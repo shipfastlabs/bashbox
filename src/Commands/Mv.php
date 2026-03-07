@@ -14,7 +14,7 @@ final class Mv extends AbstractCommand
         return 'mv';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         if (count($args) < 2) {
             return $this->failure("mv: missing operand\n");
@@ -22,12 +22,12 @@ final class Mv extends AbstractCommand
 
         $dest = array_pop($args);
         $sources = $args;
-        $destPath = $this->resolvePath($ctx, $dest);
+        $destPath = $this->resolvePath($commandContext, $dest);
 
         $destIsDir = false;
 
         try {
-            $destStat = $ctx->fs->stat($destPath);
+            $destStat = $commandContext->fs->stat($destPath);
             $destIsDir = $destStat->isDirectory;
         } catch (RuntimeException) {
             // destination does not exist
@@ -40,20 +40,20 @@ final class Mv extends AbstractCommand
         $stderr = '';
         $exitCode = 0;
 
-        foreach ($sources as $src) {
-            $srcPath = $this->resolvePath($ctx, $src);
+        foreach ($sources as $source) {
+            $srcPath = $this->resolvePath($commandContext, $source);
 
             $targetPath = $destPath;
 
             if ($destIsDir) {
-                $basename = basename($src);
+                $basename = basename($source);
                 $targetPath = $destPath === '/' ? '/'.$basename : sprintf('%s/%s', $destPath, $basename);
             }
 
             try {
-                $ctx->fs->mv($srcPath, $targetPath);
+                $commandContext->fs->mv($srcPath, $targetPath);
             } catch (RuntimeException $e) {
-                $stderr .= sprintf("mv: cannot move '%s' to '%s': %s%s", $src, $dest, $e->getMessage(), PHP_EOL);
+                $stderr .= sprintf("mv: cannot move '%s' to '%s': %s%s", $source, $dest, $e->getMessage(), PHP_EOL);
                 $exitCode = 1;
             }
         }

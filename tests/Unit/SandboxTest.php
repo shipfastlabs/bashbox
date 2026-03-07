@@ -7,10 +7,10 @@ use BashBox\Sandbox\SandboxOptions;
 
 test('sandbox create and run command', function (): void {
     $sandbox = Sandbox::create();
-    $result = $sandbox->runCommand('echo hello');
+    $sandboxCommandFinished = $sandbox->runCommand('echo hello');
 
-    expect($result->stdout)->toBe("hello\n");
-    expect($result->exitCode)->toBe(0);
+    expect($sandboxCommandFinished->stdout)->toBe("hello\n");
+    expect($sandboxCommandFinished->exitCode)->toBe(0);
 });
 
 test('sandbox write and read files', function (): void {
@@ -25,16 +25,16 @@ test('sandbox run command with files', function (): void {
     $sandbox = Sandbox::create();
     $sandbox->writeFiles(['/tmp/data.txt' => "line1\nline2\nline3\n"]);
 
-    $result = $sandbox->runCommand('cat /tmp/data.txt');
-    expect($result->stdout)->toBe("line1\nline2\nline3\n");
+    $sandboxCommandFinished = $sandbox->runCommand('cat /tmp/data.txt');
+    expect($sandboxCommandFinished->stdout)->toBe("line1\nline2\nline3\n");
 });
 
 test('sandbox mkdir', function (): void {
     $sandbox = Sandbox::create();
     $sandbox->mkDir('/tmp/nested/dir');
 
-    $result = $sandbox->runCommand('[[ -d /tmp/nested/dir ]]');
-    expect($result->exitCode)->toBe(0);
+    $sandboxCommandFinished = $sandbox->runCommand('[[ -d /tmp/nested/dir ]]');
+    expect($sandboxCommandFinished->exitCode)->toBe(0);
 });
 
 test('sandbox with custom options', function (): void {
@@ -55,8 +55,8 @@ test('sandbox with initial files', function (): void {
         initialFiles: ['/app/config.txt' => 'key=value'],
     ));
 
-    $result = $sandbox->runCommand('cat /app/config.txt');
-    expect($result->stdout)->toBe('key=value');
+    $sandboxCommandFinished = $sandbox->runCommand('cat /app/config.txt');
+    expect($sandboxCommandFinished->stdout)->toBe('key=value');
 });
 
 test('sandbox filesystem persists across commands', function (): void {
@@ -64,15 +64,15 @@ test('sandbox filesystem persists across commands', function (): void {
 
     $sandbox->runCommand('echo "created" > /tmp/persist.txt');
 
-    $result = $sandbox->runCommand('cat /tmp/persist.txt');
+    $sandboxCommandFinished = $sandbox->runCommand('cat /tmp/persist.txt');
 
-    expect($result->stdout)->toBe("created\n");
+    expect($sandboxCommandFinished->stdout)->toBe("created\n");
 });
 
 test('sandbox command stderr', function (): void {
     $sandbox = Sandbox::create();
-    $result = $sandbox->runCommand('nonexistent_cmd');
+    $sandboxCommandFinished = $sandbox->runCommand('nonexistent_cmd');
 
-    expect($result->exitCode)->toBe(127);
-    expect($result->stderr)->toContain('command not found');
+    expect($sandboxCommandFinished->exitCode)->toBe(127);
+    expect($sandboxCommandFinished->stderr)->toContain('command not found');
 });

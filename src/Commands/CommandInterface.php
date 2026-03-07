@@ -13,5 +13,5 @@ interface CommandInterface
     /**
      * @param  list<string>  $args
      */
-    public function execute(array $args, CommandContext $ctx): ExecResult;
+    public function execute(array $args, CommandContext $commandContext): ExecResult;
 }

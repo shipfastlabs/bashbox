@@ -18,7 +18,7 @@ final class Tree_ extends AbstractCommand
         return 'tree';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $this->dirCount = 0;
         $this->fileCount = 0;
@@ -26,10 +26,10 @@ final class Tree_ extends AbstractCommand
         $path = $args[0] ?? '.';
 
         if (! str_starts_with($path, '/')) {
-            $path = $ctx->fs->resolvePath($ctx->cwd, $path);
+            $path = $commandContext->fs->resolvePath($commandContext->cwd, $path);
         }
 
-        if (! $ctx->fs->exists($path)) {
+        if (! $commandContext->fs->exists($path)) {
             return $this->failure($path.' [error opening dir]
 
 0 directories, 0 files
@@ -37,7 +37,7 @@ final class Tree_ extends AbstractCommand
         }
 
         try {
-            $stat = $ctx->fs->stat($path);
+            $stat = $commandContext->fs->stat($path);
 
             if (! $stat->isDirectory) {
                 return $this->failure($path.' [error opening dir]
@@ -53,24 +53,24 @@ final class Tree_ extends AbstractCommand
         }
 
         $output = $path."\n";
-        $output .= $this->buildTree($ctx, $path, '');
+        $output .= $this->buildTree($commandContext, $path, '');
         $output .= "\n{$this->dirCount} directories, {$this->fileCount} files\n";
 
         return $this->success($output);
     }
 
-    private function buildTree(CommandContext $ctx, string $path, string $prefix): string
+    private function buildTree(CommandContext $commandContext, string $path, string $prefix): string
     {
         $output = '';
 
         try {
-            $entries = $ctx->fs->readdirWithFileTypes($path);
+            $entries = $commandContext->fs->readdirWithFileTypes($path);
         } catch (RuntimeException) {
             return $output;
         }
 
         // Sort entries alphabetically
-        usort($entries, fn ($a, $b): int => strcmp((string) $a->name, (string) $b->name));
+        usort($entries, fn ($a, $b): int => strcmp($a->name, $b->name));
 
         $count = count($entries);
 
@@ -84,7 +84,7 @@ final class Tree_ extends AbstractCommand
             if ($entry->isDirectory) {
                 $this->dirCount++;
                 $childPath = $path.'/'.$entry->name;
-                $output .= $this->buildTree($ctx, $childPath, $prefix.$childPrefix);
+                $output .= $this->buildTree($commandContext, $childPath, $prefix.$childPrefix);
             } else {
                 $this->fileCount++;
             }

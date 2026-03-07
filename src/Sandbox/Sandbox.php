@@ -11,13 +11,13 @@ final readonly class Sandbox
 {
     private function __construct(private Bash $bash) {}
 
-    public static function create(SandboxOptions $options = new SandboxOptions): self
+    public static function create(SandboxOptions $sandboxOptions = new SandboxOptions): self
     {
         $bash = new Bash(new BashOptions(
-            cwd: $options->cwd,
-            env: $options->env,
-            limits: $options->limits,
-            initialFiles: $options->initialFiles,
+            cwd: $sandboxOptions->cwd,
+            env: $sandboxOptions->env,
+            limits: $sandboxOptions->limits,
+            initialFiles: $sandboxOptions->initialFiles,
         ));
 
         return new self($bash);
@@ -25,12 +25,12 @@ final readonly class Sandbox
 
     public function runCommand(string $command): SandboxCommandFinished
     {
-        $result = $this->bash->exec($command);
+        $bashExecResult = $this->bash->exec($command);
 
         return new SandboxCommandFinished(
-            stdout: $result->stdout,
-            stderr: $result->stderr,
-            exitCode: $result->exitCode,
+            stdout: $bashExecResult->stdout,
+            stderr: $bashExecResult->stderr,
+            exitCode: $bashExecResult->exitCode,
         );
     }
 

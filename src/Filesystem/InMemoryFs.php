@@ -189,7 +189,7 @@ final class InMemoryFs implements FileSystemInterface
     {
         $entries = $this->readdirWithFileTypes($path);
 
-        return array_map(fn (DirentEntry $e): string => $e->name, $entries);
+        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $entries);
     }
 
     public function readdirWithFileTypes(string $path): array

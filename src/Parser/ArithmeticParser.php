@@ -33,10 +33,10 @@ final class ArithmeticParser
             return new ArithNumberNode(0);
         }
 
-        $expr = $this->parseComma();
+        $arithExpr = $this->parseComma();
         $this->skipWhitespace();
 
-        return $expr;
+        return $arithExpr;
     }
 
     private function parseComma(): ArithExpr
@@ -53,28 +53,28 @@ final class ArithmeticParser
 
     private function parseAssignment(): ArithExpr
     {
-        $expr = $this->parseTernary();
+        $arithExpr = $this->parseTernary();
 
         // Check for assignment operators
-        if ($expr instanceof ArithVariableNode) {
+        if ($arithExpr instanceof ArithVariableNode) {
             $this->skipWhitespace();
             $assignOps = ['<<=', '>>=', '**=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '='];
 
-            foreach ($assignOps as $op) {
-                if ($this->matchString($op)) {
+            foreach ($assignOps as $assignOp) {
+                if ($this->matchString($assignOp)) {
                     $value = $this->parseAssignment();
 
-                    return new ArithAssignmentNode($op, $expr->name, $value);
+                    return new ArithAssignmentNode($assignOp, $arithExpr->name, $value);
                 }
             }
         }
 
-        return $expr;
+        return $arithExpr;
     }
 
     private function parseTernary(): ArithExpr
     {
-        $condition = $this->parseOr();
+        $arithExpr = $this->parseOr();
 
         $this->skipWhitespace();
 
@@ -84,10 +84,10 @@ final class ArithmeticParser
             $this->expectChar(':');
             $alternate = $this->parseAssignment();
 
-            return new ArithTernaryNode($condition, $consequent, $alternate);
+            return new ArithTernaryNode($arithExpr, $consequent, $alternate);
         }
 
-        return $condition;
+        return $arithExpr;
     }
 
     private function parseOr(): ArithExpr
@@ -277,17 +277,17 @@ final class ArithmeticParser
 
     private function parseExponentiation(): ArithExpr
     {
-        $base = $this->parseUnary();
+        $arithExpr = $this->parseUnary();
 
         $this->skipWhitespace();
 
         if ($this->matchString('**')) {
             $exp = $this->parseExponentiation(); // Right-associative
 
-            return new ArithBinaryNode('**', $base, $exp);
+            return new ArithBinaryNode('**', $arithExpr, $exp);
         }
 
-        return $base;
+        return $arithExpr;
     }
 
     private function parseUnary(): ArithExpr
@@ -318,7 +318,7 @@ final class ArithmeticParser
             return new ArithUnaryNode($ch, $operand, true);
         }
 
-        $expr = $this->parsePrimary();
+        $arithExpr = $this->parsePrimary();
 
         // Postfix ++ and --
         $this->skipWhitespace();
@@ -326,16 +326,16 @@ final class ArithmeticParser
         if ($this->peekChar() === '+' && $this->peekCharAt(1) === '+') {
             $this->pos += 2;
 
-            return new ArithUnaryNode('++', $expr, false);
+            return new ArithUnaryNode('++', $arithExpr, false);
         }
 
         if ($this->peekChar() === '-' && $this->peekCharAt(1) === '-') {
             $this->pos += 2;
 
-            return new ArithUnaryNode('--', $expr, false);
+            return new ArithUnaryNode('--', $arithExpr, false);
         }
 
-        return $expr;
+        return $arithExpr;
     }
 
     private function parsePrimary(): ArithExpr

@@ -53,9 +53,9 @@ test('bash with OverlayFs reads disk files and keeps shell writes off disk', fun
         fs: new OverlayFs($root),
     ));
 
-    $result = $bash->exec('cat /seed.txt && echo overlay > /new.txt && cat /new.txt');
+    $bashExecResult = $bash->exec('cat /seed.txt && echo overlay > /new.txt && cat /new.txt');
 
-    expect($result->stdout)->toBe("from diskoverlay\n");
+    expect($bashExecResult->stdout)->toBe("from diskoverlay\n");
     expect(file_exists($root.'/new.txt'))->toBeFalse();
     expect($bash->readFile('/new.txt'))->toBe("overlay\n");
 });
@@ -67,9 +67,9 @@ test('bash with ReadWriteFs persists shell writes to disk', function (): void {
         fs: new ReadWriteFs($root),
     ));
 
-    $result = $bash->exec('echo first > notes.txt; echo second >> notes.txt; cat notes.txt');
+    $bashExecResult = $bash->exec('echo first > notes.txt; echo second >> notes.txt; cat notes.txt');
 
-    expect($result->stdout)->toBe("first\nsecond\n");
+    expect($bashExecResult->stdout)->toBe("first\nsecond\n");
     expect(file_get_contents($root.'/home/user/notes.txt'))->toBe("first\nsecond\n");
     expect(is_dir($root.'/tmp'))->toBeTrue();
 });
@@ -84,9 +84,9 @@ test('bash with MountableFs routes commands to mounted backend and supports cros
 
     $bash = new Bash(new BashOptions(fs: $mountable));
 
-    $result = $bash->exec('cp /home/user/local.txt /data/copied.txt; echo mounted >> /data/copied.txt; cp /data/copied.txt /home/user/roundtrip.txt; cat /home/user/roundtrip.txt');
+    $bashExecResult = $bash->exec('cp /home/user/local.txt /data/copied.txt; echo mounted >> /data/copied.txt; cp /data/copied.txt /home/user/roundtrip.txt; cat /home/user/roundtrip.txt');
 
-    expect($result->stdout)->toBe("local datamounted\n");
+    expect($bashExecResult->stdout)->toBe("local datamounted\n");
     expect(file_get_contents($root.'/copied.txt'))->toBe("local datamounted\n");
     expect($bash->readFile('/home/user/roundtrip.txt'))->toBe("local datamounted\n");
 });

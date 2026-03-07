@@ -12,10 +12,10 @@ final class SecurityViolationLogger
     /**
      * @param  array<string, mixed>  $context
      */
-    public function log(SecurityViolationType $type, string $message, array $context = []): void
+    public function log(SecurityViolationType $securityViolationType, string $message, array $context = []): void
     {
         $this->violations[] = [
-            'type' => $type,
+            'type' => $securityViolationType,
             'message' => $message,
             'context' => $context,
             'timestamp' => microtime(true),

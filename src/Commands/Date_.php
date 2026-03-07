@@ -13,7 +13,7 @@ final class Date_ extends AbstractCommand
         return 'date';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $format = null;
 

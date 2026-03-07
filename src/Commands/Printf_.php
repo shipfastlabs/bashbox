@@ -13,7 +13,7 @@ final class Printf_ extends AbstractCommand
         return 'printf';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         if ($args === []) {
             return $this->failure("printf: usage: printf [-v var] format [arguments]\n");

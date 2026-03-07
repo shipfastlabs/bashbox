@@ -13,7 +13,7 @@ final class Basename_ extends AbstractCommand
         return 'basename';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         if ($args === []) {
             return $this->failure("basename: missing operand\n");

@@ -205,8 +205,8 @@ test('readdirWithFileTypes returns correct type info', function (): void {
     $entries = $fs->readdirWithFileTypes('/');
     $map = [];
 
-    foreach ($entries as $e) {
-        $map[$e->name] = $e;
+    foreach ($entries as $entry) {
+        $map[$entry->name] = $entry;
     }
 
     expect($map['file.txt']->isFile)->toBeTrue();

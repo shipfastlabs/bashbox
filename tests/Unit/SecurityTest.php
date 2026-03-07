@@ -71,6 +71,7 @@ test('no proc_open in codebase', function (): void {
         if ($file->getExtension() !== 'php') {
             continue;
         }
+
         $content = file_get_contents($file->getPathname());
         expect($content)->not->toContain('proc_open');
         expect($content)->not->toContain('shell_exec');
@@ -95,10 +96,11 @@ test('no dangerous function calls in codebase', function (): void {
         if ($file->getExtension() !== 'php') {
             continue;
         }
+
         $content = file_get_contents($file->getPathname());
 
-        foreach ($dangerousFunctions as $pattern) {
-            expect($content)->not->toMatch('/'.$pattern.'/');
+        foreach ($dangerousFunctions as $dangerouFunction) {
+            expect($content)->not->toMatch('/'.$dangerouFunction.'/');
         }
     }
 });
@@ -129,28 +131,28 @@ test('security violation logger tracks violations', function (): void {
 
 test('subshell does not leak variables', function (): void {
     $bash = new Bash;
-    $result = $bash->exec('x=outer; (x=inner); echo $x');
-    expect($result->stdout)->toBe("outer\n");
+    $bashExecResult = $bash->exec('x=outer; (x=inner); echo $x');
+    expect($bashExecResult->stdout)->toBe("outer\n");
 });
 
 test('function local variables do not leak', function (): void {
     $bash = new Bash;
-    $result = $bash->exec('f() { local x=secret; }; f; echo "${x:-empty}"');
-    expect($result->stdout)->toBe("empty\n");
+    $bashExecResult = $bash->exec('f() { local x=secret; }; f; echo "${x:-empty}"');
+    expect($bashExecResult->stdout)->toBe("empty\n");
 });
 
 test('each exec call has fresh state', function (): void {
     $bash = new Bash;
     $bash->exec('x=hello');
 
-    $result = $bash->exec('echo "${x:-unset}"');
-    expect($result->stdout)->toBe("unset\n");
+    $bashExecResult = $bash->exec('echo "${x:-unset}"');
+    expect($bashExecResult->stdout)->toBe("unset\n");
 });
 
 test('filesystem persists across exec calls', function (): void {
     $bash = new Bash;
     $bash->exec('echo data > /tmp/persist.txt');
 
-    $result = $bash->exec('cat /tmp/persist.txt');
-    expect($result->stdout)->toBe("data\n");
+    $bashExecResult = $bash->exec('cat /tmp/persist.txt');
+    expect($bashExecResult->stdout)->toBe("data\n");
 });

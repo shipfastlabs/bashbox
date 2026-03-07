@@ -14,7 +14,7 @@ final class Ls extends AbstractCommand
         return 'ls';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         // Handle -1 separately since PHP coerces '1' key to int
         $onePerLine = false;
@@ -49,10 +49,10 @@ final class Ls extends AbstractCommand
         $multiPath = count($paths) > 1 || $recursive;
 
         foreach ($paths as $idx => $target) {
-            $resolved = $this->resolvePath($ctx, $target);
+            $resolved = $this->resolvePath($commandContext, $target);
 
             try {
-                $stat = $ctx->fs->stat($resolved);
+                $stat = $commandContext->fs->stat($resolved);
             } catch (RuntimeException) {
                 $stderr .= "ls: cannot access '{$target}': No such file or directory\n";
                 $exitCode = 1;
@@ -62,7 +62,7 @@ final class Ls extends AbstractCommand
 
             if ($stat->isFile) {
                 if ($longFormat) {
-                    $output .= $this->formatLong($ctx, $resolved, basename($target))."\n";
+                    $output .= $this->formatLong($commandContext, $resolved, basename($target))."\n";
                 } else {
                     $output .= basename($target)."\n";
                 }
@@ -72,7 +72,7 @@ final class Ls extends AbstractCommand
 
             if ($stat->isDirectory) {
                 $output .= $this->listDirectory(
-                    $ctx,
+                    $commandContext,
                     $resolved,
                     $target,
                     $longFormat,
@@ -93,7 +93,7 @@ final class Ls extends AbstractCommand
     }
 
     private function listDirectory(
-        CommandContext $ctx,
+        CommandContext $commandContext,
         string $resolved,
         string $displayPath,
         bool $longFormat,
@@ -115,7 +115,7 @@ final class Ls extends AbstractCommand
         }
 
         try {
-            $entries = $ctx->fs->readdirWithFileTypes($resolved);
+            $entries = $commandContext->fs->readdirWithFileTypes($resolved);
         } catch (RuntimeException) {
             return $output;
         }
@@ -123,7 +123,7 @@ final class Ls extends AbstractCommand
         if (! $showAll) {
             $entries = array_values(array_filter(
                 $entries,
-                fn (\BashBox\Filesystem\DirentEntry $e): bool => ! str_starts_with($e->name, '.'),
+                fn (\BashBox\Filesystem\DirentEntry $direntEntry): bool => ! str_starts_with($direntEntry->name, '.'),
             ));
         }
 
@@ -132,10 +132,10 @@ final class Ls extends AbstractCommand
 
             foreach ($entries as $entry) {
                 $childPath = $resolved === '/' ? '/'.$entry->name : sprintf('%s/%s', $resolved, $entry->name);
-                $output .= $this->formatLong($ctx, $childPath, $entry->name)."\n";
+                $output .= $this->formatLong($commandContext, $childPath, $entry->name)."\n";
             }
         } else {
-            $names = array_map(fn (\BashBox\Filesystem\DirentEntry $e): string => $e->name, $entries);
+            $names = array_map(fn (\BashBox\Filesystem\DirentEntry $direntEntry): string => $direntEntry->name, $entries);
 
             if ($onePerLine) {
                 foreach ($names as $name) {
@@ -152,7 +152,7 @@ final class Ls extends AbstractCommand
                     $childPath = $resolved === '/' ? '/'.$entry->name : sprintf('%s/%s', $resolved, $entry->name);
                     $childDisplay = $displayPath === '.' ? $entry->name : sprintf('%s/%s', $displayPath, $entry->name);
                     $output .= $this->listDirectory(
-                        $ctx,
+                        $commandContext,
                         $childPath,
                         $childDisplay,
                         $longFormat,
@@ -169,10 +169,10 @@ final class Ls extends AbstractCommand
         return $output;
     }
 
-    private function formatLong(CommandContext $ctx, string $path, string $name): string
+    private function formatLong(CommandContext $commandContext, string $path, string $name): string
     {
         try {
-            $stat = $ctx->fs->stat($path);
+            $stat = $commandContext->fs->stat($path);
         } catch (RuntimeException) {
             return $name;
         }

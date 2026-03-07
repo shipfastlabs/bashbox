@@ -14,7 +14,7 @@ final class Sed_ extends AbstractCommand
         return 'sed';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $inPlace = false;
         $expressions = [];
@@ -58,11 +58,11 @@ final class Sed_ extends AbstractCommand
         // Parse all substitute expressions
         $commands = [];
 
-        foreach ($expressions as $expr) {
-            $parsed = $this->parseSubstitution($expr);
+        foreach ($expressions as $expression) {
+            $parsed = $this->parseSubstitution($expression);
 
             if ($parsed === null) {
-                return $this->failure(sprintf('sed: invalid expression: %s%s', $expr, PHP_EOL));
+                return $this->failure(sprintf('sed: invalid expression: %s%s', $expression, PHP_EOL));
             }
 
             $commands[] = $parsed;
@@ -73,10 +73,10 @@ final class Sed_ extends AbstractCommand
             $output = '';
 
             foreach ($files as $file) {
-                $path = $this->resolvePath($ctx, $file);
+                $path = $this->resolvePath($commandContext, $file);
 
                 try {
-                    $content = $ctx->fs->readFile($path);
+                    $content = $commandContext->fs->readFile($path);
                 } catch (RuntimeException) {
                     return $this->failure("sed: can't read {$file}: No such file or directory\n");
                 }
@@ -84,7 +84,7 @@ final class Sed_ extends AbstractCommand
                 $processed = $this->applyCommands($content, $commands);
 
                 if ($inPlace) {
-                    $ctx->fs->writeFile($path, $processed);
+                    $commandContext->fs->writeFile($path, $processed);
                 } else {
                     $output .= $processed;
                 }
@@ -98,7 +98,7 @@ final class Sed_ extends AbstractCommand
         }
 
         // Read from stdin
-        $input = $ctx->stdin;
+        $input = $commandContext->stdin;
         $processed = $this->applyCommands($input, $commands);
 
         return $this->success($processed);
@@ -116,15 +116,15 @@ final class Sed_ extends AbstractCommand
         foreach ($lines as $i => $line) {
             $result = $line;
 
-            foreach ($commands as $cmd) {
-                $flags = $cmd['caseInsensitive'] ? 'i' : '';
+            foreach ($commands as $command) {
+                $flags = $command['caseInsensitive'] ? 'i' : '';
                 $delimiter = chr(1); // Use SOH as delimiter for preg
-                $regex = $delimiter.$cmd['pattern'].$delimiter.($cmd['global'] ? '' : '').$flags;
+                $regex = $delimiter.$command['pattern'].$delimiter.($command['global'] ? '' : '').$flags;
 
-                if ($cmd['global']) {
-                    $result = preg_replace($regex, $cmd['replacement'], $result) ?? $result;
+                if ($command['global']) {
+                    $result = preg_replace($regex, $command['replacement'], $result) ?? $result;
                 } else {
-                    $result = preg_replace($regex, $cmd['replacement'], $result, 1) ?? $result;
+                    $result = preg_replace($regex, $command['replacement'], $result, 1) ?? $result;
                 }
             }
 

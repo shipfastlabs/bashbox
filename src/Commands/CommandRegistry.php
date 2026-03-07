@@ -74,8 +74,8 @@ final class CommandRegistry
             new Sed_,
         ];
 
-        foreach ($defaults as $command) {
-            $this->register($command);
+        foreach ($defaults as $default) {
+            $this->register($default);
         }
     }
 }

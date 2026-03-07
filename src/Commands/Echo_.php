@@ -13,7 +13,7 @@ final class Echo_ extends AbstractCommand
         return 'echo';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $noNewline = false;
         $interpretEscapes = false;

@@ -14,7 +14,7 @@ final class Uniq_ extends AbstractCommand
         return 'uniq';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'c' => false,
@@ -28,15 +28,15 @@ final class Uniq_ extends AbstractCommand
         $input = '';
 
         if ($files !== []) {
-            $path = $this->resolvePath($ctx, $files[0]);
+            $path = $this->resolvePath($commandContext, $files[0]);
 
             try {
-                $input = $ctx->fs->readFile($path);
+                $input = $commandContext->fs->readFile($path);
             } catch (RuntimeException) {
                 return $this->failure("uniq: {$files[0]}: No such file or directory\n");
             }
         } else {
-            $input = $ctx->stdin;
+            $input = $commandContext->stdin;
         }
 
         if ($input === '') {

@@ -14,7 +14,7 @@ final class Sort_ extends AbstractCommand
         return 'sort';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'r' => false,
@@ -31,16 +31,16 @@ final class Sort_ extends AbstractCommand
 
         if ($files !== []) {
             foreach ($files as $file) {
-                $path = $this->resolvePath($ctx, $file);
+                $path = $this->resolvePath($commandContext, $file);
 
                 try {
-                    $input .= $ctx->fs->readFile($path);
+                    $input .= $commandContext->fs->readFile($path);
                 } catch (RuntimeException) {
                     return $this->failure("sort: cannot read: {$file}: No such file or directory\n");
                 }
             }
         } else {
-            $input = $ctx->stdin;
+            $input = $commandContext->stdin;
         }
 
         if ($input === '') {

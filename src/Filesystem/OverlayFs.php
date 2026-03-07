@@ -8,7 +8,7 @@ use RuntimeException;
 
 final class OverlayFs implements FileSystemInterface
 {
-    private readonly InMemoryFs $cow;
+    private readonly InMemoryFs $inMemoryFs;
 
     /**
      * Tracks paths that have been explicitly deleted.
@@ -31,7 +31,7 @@ final class OverlayFs implements FileSystemInterface
         }
 
         $this->rootDir = $realRoot;
-        $this->cow = new InMemoryFs;
+        $this->inMemoryFs = new InMemoryFs;
     }
 
     // ---------------------------------------------------------------
@@ -45,8 +45,8 @@ final class OverlayFs implements FileSystemInterface
         $this->assertContained($normalized, 'open');
 
         // COW layer first
-        if ($this->cow->exists($normalized)) {
-            return $this->cow->readFile($normalized);
+        if ($this->inMemoryFs->exists($normalized)) {
+            return $this->inMemoryFs->readFile($normalized);
         }
 
         // Deleted in overlay -> gone
@@ -82,7 +82,7 @@ final class OverlayFs implements FileSystemInterface
         $this->assertContained($normalized, 'write');
 
         $this->ensureCowParentDirs($normalized);
-        $this->cow->writeFile($normalized, $content);
+        $this->inMemoryFs->writeFile($normalized, $content);
         $this->undelete($normalized);
     }
 
@@ -92,8 +92,8 @@ final class OverlayFs implements FileSystemInterface
         $normalized = $this->normalizePath($path);
         $this->assertContained($normalized, 'append');
 
-        if ($this->cow->exists($normalized)) {
-            $this->cow->appendFile($normalized, $content);
+        if ($this->inMemoryFs->exists($normalized)) {
+            $this->inMemoryFs->appendFile($normalized, $content);
 
             return;
         }
@@ -111,7 +111,7 @@ final class OverlayFs implements FileSystemInterface
                 }
 
                 $this->ensureCowParentDirs($normalized);
-                $this->cow->writeFile($normalized, $existing.$content);
+                $this->inMemoryFs->writeFile($normalized, $existing.$content);
                 $this->undelete($normalized);
 
                 return;
@@ -120,7 +120,7 @@ final class OverlayFs implements FileSystemInterface
 
         // Otherwise treat as a fresh write
         $this->ensureCowParentDirs($normalized);
-        $this->cow->writeFile($normalized, $content);
+        $this->inMemoryFs->writeFile($normalized, $content);
         $this->undelete($normalized);
     }
 
@@ -140,7 +140,7 @@ final class OverlayFs implements FileSystemInterface
             return false;
         }
 
-        if ($this->cow->exists($normalized)) {
+        if ($this->inMemoryFs->exists($normalized)) {
             return true;
         }
 
@@ -163,8 +163,8 @@ final class OverlayFs implements FileSystemInterface
         $normalized = $this->normalizePath($path);
         $this->assertContained($normalized, 'stat');
 
-        if ($this->cow->exists($normalized)) {
-            return $this->cow->stat($normalized);
+        if ($this->inMemoryFs->exists($normalized)) {
+            return $this->inMemoryFs->stat($normalized);
         }
 
         if ($this->isDeleted($normalized)) {
@@ -187,8 +187,8 @@ final class OverlayFs implements FileSystemInterface
         $normalized = $this->normalizePath($path);
         $this->assertContained($normalized, 'lstat');
 
-        if ($this->cow->exists($normalized)) {
-            return $this->cow->lstat($normalized);
+        if ($this->inMemoryFs->exists($normalized)) {
+            return $this->inMemoryFs->lstat($normalized);
         }
 
         if ($this->isDeleted($normalized)) {
@@ -228,7 +228,7 @@ final class OverlayFs implements FileSystemInterface
         $this->assertContained($normalized, 'mkdir');
 
         $this->ensureCowParentDirs($normalized);
-        $this->cow->mkdir($normalized, $options);
+        $this->inMemoryFs->mkdir($normalized, $options);
         $this->undelete($normalized);
     }
 
@@ -236,7 +236,7 @@ final class OverlayFs implements FileSystemInterface
     {
         $entries = $this->readdirWithFileTypes($path);
 
-        return array_map(fn (DirentEntry $e): string => $e->name, $entries);
+        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $entries);
     }
 
     public function readdirWithFileTypes(string $path): array
@@ -246,7 +246,7 @@ final class OverlayFs implements FileSystemInterface
         $this->assertContained($normalized, 'scandir');
 
         // The directory must exist somewhere (COW or real FS)
-        $inCow = $this->cow->exists($normalized);
+        $inCow = $this->inMemoryFs->exists($normalized);
         $realPath = $this->toRealPath($normalized);
         $onReal = ! $this->isDeleted($normalized) && is_dir($realPath);
 
@@ -298,10 +298,10 @@ final class OverlayFs implements FileSystemInterface
         // 2. Overlay COW entries (they win)
         if ($inCow) {
             try {
-                $cowEntries = $this->cow->readdirWithFileTypes($normalized);
+                $cowEntries = $this->inMemoryFs->readdirWithFileTypes($normalized);
 
-                foreach ($cowEntries as $entry) {
-                    $entriesMap[$entry->name] = $entry;
+                foreach ($cowEntries as $cowEntry) {
+                    $entriesMap[$cowEntry->name] = $cowEntry;
                 }
             } catch (RuntimeException) {
                 // COW path exists but is not a directory — ignore
@@ -322,7 +322,7 @@ final class OverlayFs implements FileSystemInterface
         $force = $options['force'] ?? false;
         $recursive = $options['recursive'] ?? false;
 
-        $existsInCow = $this->cow->exists($normalized);
+        $existsInCow = $this->inMemoryFs->exists($normalized);
         $realPath = $this->toRealPath($normalized);
         $existsOnReal = ! $this->isDeleted($normalized) && file_exists($realPath);
 
@@ -339,7 +339,7 @@ final class OverlayFs implements FileSystemInterface
 
         if ($existsInCow) {
             try {
-                $stat = $this->cow->stat($normalized);
+                $stat = $this->inMemoryFs->stat($normalized);
                 $isDir = $stat->isDirectory;
             } catch (RuntimeException) {
                 // not in cow
@@ -370,7 +370,7 @@ final class OverlayFs implements FileSystemInterface
 
         // Remove from COW if present
         if ($existsInCow) {
-            $this->cow->rm($normalized, ['force' => true, 'recursive' => $recursive]);
+            $this->inMemoryFs->rm($normalized, ['force' => true, 'recursive' => $recursive]);
         }
 
         // Mark as deleted so it doesn't show through from real FS
@@ -388,12 +388,12 @@ final class OverlayFs implements FileSystemInterface
         $recursive = $options['recursive'] ?? false;
 
         // Determine source type
-        $srcStat = $this->stat($srcNorm);
+        $fsStat = $this->stat($srcNorm);
 
-        if ($srcStat->isFile) {
+        if ($fsStat->isFile) {
             $content = $this->readFile($srcNorm);
             $this->writeFile($destNorm, $content);
-        } elseif ($srcStat->isDirectory) {
+        } elseif ($fsStat->isDirectory) {
             if (! $recursive) {
                 throw new RuntimeException(sprintf("EISDIR: is a directory, cp '%s'", $src));
             }
@@ -434,9 +434,9 @@ final class OverlayFs implements FileSystemInterface
         $this->collectRealPaths($this->rootDir, '/', $paths);
 
         // Overlay COW paths
-        foreach ($this->cow->getAllPaths() as $cowPath) {
-            if (! in_array($cowPath, $paths, true)) {
-                $paths[] = $cowPath;
+        foreach ($this->inMemoryFs->getAllPaths() as $allPath) {
+            if (! in_array($allPath, $paths, true)) {
+                $paths[] = $allPath;
             }
         }
 
@@ -454,7 +454,7 @@ final class OverlayFs implements FileSystemInterface
         // Pull into COW if only on real FS
         $this->pullIntoCow($normalized, 'chmod');
 
-        $this->cow->chmod($normalized, $mode);
+        $this->inMemoryFs->chmod($normalized, $mode);
     }
 
     public function symlink(string $target, string $linkPath): void
@@ -468,7 +468,7 @@ final class OverlayFs implements FileSystemInterface
         }
 
         $this->ensureCowParentDirs($normalized);
-        $this->cow->symlink($target, $normalized);
+        $this->inMemoryFs->symlink($target, $normalized);
         $this->undelete($normalized);
     }
 
@@ -485,7 +485,7 @@ final class OverlayFs implements FileSystemInterface
         $this->pullIntoCow($existingNorm, 'link');
 
         $this->ensureCowParentDirs($newNorm);
-        $this->cow->link($existingNorm, $newNorm);
+        $this->inMemoryFs->link($existingNorm, $newNorm);
         $this->undelete($newNorm);
     }
 
@@ -495,8 +495,8 @@ final class OverlayFs implements FileSystemInterface
         $normalized = $this->normalizePath($path);
         $this->assertContained($normalized, 'readlink');
 
-        if ($this->cow->exists($normalized)) {
-            return $this->cow->readlink($normalized);
+        if ($this->inMemoryFs->exists($normalized)) {
+            return $this->inMemoryFs->readlink($normalized);
         }
 
         if ($this->isDeleted($normalized)) {
@@ -547,7 +547,7 @@ final class OverlayFs implements FileSystemInterface
 
         $this->pullIntoCow($normalized, 'utimes');
 
-        $this->cow->utimes($normalized, $mtime);
+        $this->inMemoryFs->utimes($normalized, $mtime);
     }
 
     // ---------------------------------------------------------------
@@ -699,7 +699,7 @@ final class OverlayFs implements FileSystemInterface
      */
     private function pullIntoCow(string $normalizedPath, string $operation): void
     {
-        if ($this->cow->exists($normalizedPath)) {
+        if ($this->inMemoryFs->exists($normalizedPath)) {
             return;
         }
 
@@ -718,10 +718,10 @@ final class OverlayFs implements FileSystemInterface
             }
 
             $this->ensureCowParentDirs($normalizedPath);
-            $this->cow->writeFile($normalizedPath, $content);
+            $this->inMemoryFs->writeFile($normalizedPath, $content);
         } elseif (is_dir($realPath)) {
             $this->ensureCowParentDirs($normalizedPath);
-            $this->cow->mkdir($normalizedPath, ['recursive' => true]);
+            $this->inMemoryFs->mkdir($normalizedPath, ['recursive' => true]);
         } else {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, %s '%s'", $operation, $normalizedPath));
         }
@@ -736,19 +736,19 @@ final class OverlayFs implements FileSystemInterface
         $dir = $this->dirname($normalizedPath);
 
         if ($dir === '/') {
-            if (! $this->cow->exists('/')) {
-                $this->cow->mkdir('/', ['recursive' => true]);
+            if (! $this->inMemoryFs->exists('/')) {
+                $this->inMemoryFs->mkdir('/', ['recursive' => true]);
             }
 
             return;
         }
 
-        if ($this->cow->exists($dir)) {
+        if ($this->inMemoryFs->exists($dir)) {
             return;
         }
 
         $this->ensureCowParentDirs($dir);
-        $this->cow->mkdir($dir, ['recursive' => true]);
+        $this->inMemoryFs->mkdir($dir, ['recursive' => true]);
     }
 
     /**
@@ -782,6 +782,7 @@ final class OverlayFs implements FileSystemInterface
             if ($entry === '..') {
                 continue;
             }
+
             $childReal = $realDir.DIRECTORY_SEPARATOR.$entry;
             $childVirtual = $virtualDir === '/' ? '/'.$entry : sprintf('%s/%s', $virtualDir, $entry);
 

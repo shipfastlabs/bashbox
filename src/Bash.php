@@ -16,80 +16,80 @@ use BashBox\Parser\Parser;
 
 final readonly class Bash
 {
-    private FileSystemInterface $fs;
+    private FileSystemInterface $fileSystem;
 
-    private CommandRegistry $registry;
+    private CommandRegistry $commandRegistry;
 
-    private ?SecureHttpClient $httpClient;
+    private ?SecureHttpClient $secureHttpClient;
 
-    public function __construct(private BashOptions $options = new BashOptions)
+    public function __construct(private BashOptions $bashOptions = new BashOptions)
     {
-        $this->fs = $this->options->fs ?? new InMemoryFs($this->options->initialFiles);
-        $this->registry = new CommandRegistry;
-        $this->registry->registerDefaults();
+        $this->fileSystem = $this->bashOptions->fs ?? new InMemoryFs($this->bashOptions->initialFiles);
+        $this->commandRegistry = new CommandRegistry;
+        $this->commandRegistry->registerDefaults();
 
-        if ($this->options->network !== null) {
-            $this->httpClient = new SecureHttpClient($this->options->network);
-            $this->registry->register(new Curl_);
+        if ($this->bashOptions->network instanceof \BashBox\Network\NetworkConfig) {
+            $this->secureHttpClient = new SecureHttpClient($this->bashOptions->network);
+            $this->commandRegistry->register(new Curl_);
         } else {
-            $this->httpClient = null;
+            $this->secureHttpClient = null;
         }
 
         // Ensure cwd and standard directories exist
-        if (! $this->fs->exists($this->options->cwd)) {
-            $this->fs->mkdir($this->options->cwd, ['recursive' => true]);
+        if (! $this->fileSystem->exists($this->bashOptions->cwd)) {
+            $this->fileSystem->mkdir($this->bashOptions->cwd, ['recursive' => true]);
         }
 
-        if (! $this->fs->exists('/tmp')) {
-            $this->fs->mkdir('/tmp', ['recursive' => true]);
+        if (! $this->fileSystem->exists('/tmp')) {
+            $this->fileSystem->mkdir('/tmp', ['recursive' => true]);
         }
     }
 
-    public function exec(string $script, ?ExecOptions $options = null): BashExecResult
+    public function exec(string $script, ?ExecOptions $execOptions = null): BashExecResult
     {
-        $env = array_merge($this->options->env, $options->env ?? []);
-        $cwd = $options->cwd ?? $this->options->cwd;
-        $limits = $options->limits ?? $this->options->limits;
-        $stdin = $options->stdin ?? '';
+        $env = array_merge($this->bashOptions->env, $execOptions->env ?? []);
+        $cwd = $execOptions->cwd ?? $this->bashOptions->cwd;
+        $limits = $execOptions->limits ?? $this->bashOptions->limits;
+        $stdin = $execOptions->stdin ?? '';
 
-        $state = new InterpreterState(
+        $interpreterState = new InterpreterState(
             env: $env,
             cwd: $cwd,
             limits: $limits,
         );
 
-        $interpreter = new Interpreter($state, $this->fs, $this->registry, $this->httpClient);
+        $interpreter = new Interpreter($interpreterState, $this->fileSystem, $this->commandRegistry, $this->secureHttpClient);
 
         $parser = new Parser;
-        $ast = $parser->parse($script);
+        $scriptNode = $parser->parse($script);
 
-        $result = $interpreter->executeScript($ast, $stdin);
+        $execResult = $interpreter->executeScript($scriptNode, $stdin);
 
         return new BashExecResult(
-            stdout: $result->stdout,
-            stderr: $result->stderr,
-            exitCode: $result->exitCode,
-            env: $state->env,
+            stdout: $execResult->stdout,
+            stderr: $execResult->stderr,
+            exitCode: $execResult->exitCode,
+            env: $interpreterState->env,
         );
     }
 
     public function registerCommand(CommandInterface $command): void
     {
-        $this->registry->register($command);
+        $this->commandRegistry->register($command);
     }
 
     public function readFile(string $path): string
     {
-        return $this->fs->readFile($path);
+        return $this->fileSystem->readFile($path);
     }
 
     public function writeFile(string $path, string $content): void
     {
-        $this->fs->writeFile($path, $content);
+        $this->fileSystem->writeFile($path, $content);
     }
 
     public function getFilesystem(): FileSystemInterface
     {
-        return $this->fs;
+        return $this->fileSystem;
     }
 }

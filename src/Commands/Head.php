@@ -14,7 +14,7 @@ final class Head extends AbstractCommand
         return 'head';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, ['n' => '10']);
         $numLines = (int) $parsed['flags']['n'];
@@ -33,12 +33,12 @@ final class Head extends AbstractCommand
             $content = '';
 
             if ($file === '-') {
-                $content = $ctx->stdin;
+                $content = $commandContext->stdin;
             } else {
-                $path = $this->resolvePath($ctx, $file);
+                $path = $this->resolvePath($commandContext, $file);
 
                 try {
-                    $content = $ctx->fs->readFile($path);
+                    $content = $commandContext->fs->readFile($path);
                 } catch (RuntimeException) {
                     $stderr .= "head: cannot open '{$file}' for reading: No such file or directory\n";
                     $exitCode = 1;

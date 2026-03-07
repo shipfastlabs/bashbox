@@ -14,7 +14,7 @@ final class Test_ extends AbstractCommand
         return 'test';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         // Remove trailing ] if invoked as [
         if ($args !== [] && $args[count($args) - 1] === ']') {
@@ -25,7 +25,7 @@ final class Test_ extends AbstractCommand
             return $this->failure();
         }
 
-        $result = $this->evaluate($args, $ctx, 0, count($args));
+        $result = $this->evaluate($args, $commandContext, 0, count($args));
 
         return $result ? $this->success() : $this->failure();
     }
@@ -33,7 +33,7 @@ final class Test_ extends AbstractCommand
     /**
      * @param  list<string>  $args
      */
-    private function evaluate(array $args, CommandContext $ctx, int $start, int $end): bool
+    private function evaluate(array $args, CommandContext $commandContext, int $start, int $end): bool
     {
         $length = $end - $start;
 
@@ -44,8 +44,8 @@ final class Test_ extends AbstractCommand
         // Look for -o (OR) at the top level (lowest precedence)
         for ($i = $start; $i < $end; $i++) {
             if ($args[$i] === '-o') {
-                $left = $this->evaluate($args, $ctx, $start, $i);
-                $right = $this->evaluate($args, $ctx, $i + 1, $end);
+                $left = $this->evaluate($args, $commandContext, $start, $i);
+                $right = $this->evaluate($args, $commandContext, $i + 1, $end);
 
                 return $left || $right;
             }
@@ -54,8 +54,8 @@ final class Test_ extends AbstractCommand
         // Look for -a (AND)
         for ($i = $start; $i < $end; $i++) {
             if ($args[$i] === '-a') {
-                $left = $this->evaluate($args, $ctx, $start, $i);
-                $right = $this->evaluate($args, $ctx, $i + 1, $end);
+                $left = $this->evaluate($args, $commandContext, $start, $i);
+                $right = $this->evaluate($args, $commandContext, $i + 1, $end);
 
                 return $left && $right;
             }
@@ -63,7 +63,7 @@ final class Test_ extends AbstractCommand
 
         // Unary ! (NOT)
         if ($length >= 2 && $args[$start] === '!') {
-            return ! $this->evaluate($args, $ctx, $start + 1, $end);
+            return ! $this->evaluate($args, $commandContext, $start + 1, $end);
         }
 
         // Single argument: true if non-empty string
@@ -79,13 +79,13 @@ final class Test_ extends AbstractCommand
             return match ($op) {
                 '-z' => $val === '',
                 '-n' => $val !== '',
-                '-e' => $this->fileExists($ctx, $val),
-                '-f' => $this->isFile($ctx, $val),
-                '-d' => $this->isDirectory($ctx, $val),
-                '-r' => $this->isReadable($ctx, $val),
-                '-w' => $this->isWritable($ctx, $val),
-                '-x' => $this->isExecutable($ctx, $val),
-                '-s' => $this->isNonEmptyFile($ctx, $val),
+                '-e' => $this->fileExists($commandContext, $val),
+                '-f' => $this->isFile($commandContext, $val),
+                '-d' => $this->isDirectory($commandContext, $val),
+                '-r' => $this->isReadable($commandContext, $val),
+                '-w' => $this->isWritable($commandContext, $val),
+                '-x' => $this->isExecutable($commandContext, $val),
+                '-s' => $this->isNonEmptyFile($commandContext, $val),
                 default => $val !== '',
             };
         }
@@ -112,21 +112,21 @@ final class Test_ extends AbstractCommand
         return false;
     }
 
-    private function fileExists(CommandContext $ctx, string $path): bool
+    private function fileExists(CommandContext $commandContext, string $path): bool
     {
-        return $ctx->fs->exists($this->resolvePath($ctx, $path));
+        return $commandContext->fs->exists($this->resolvePath($commandContext, $path));
     }
 
-    private function isFile(CommandContext $ctx, string $path): bool
+    private function isFile(CommandContext $commandContext, string $path): bool
     {
-        $resolved = $this->resolvePath($ctx, $path);
+        $resolved = $this->resolvePath($commandContext, $path);
 
-        if (! $ctx->fs->exists($resolved)) {
+        if (! $commandContext->fs->exists($resolved)) {
             return false;
         }
 
         try {
-            $stat = $ctx->fs->stat($resolved);
+            $stat = $commandContext->fs->stat($resolved);
 
             return $stat->isFile;
         } catch (RuntimeException) {
@@ -134,16 +134,16 @@ final class Test_ extends AbstractCommand
         }
     }
 
-    private function isDirectory(CommandContext $ctx, string $path): bool
+    private function isDirectory(CommandContext $commandContext, string $path): bool
     {
-        $resolved = $this->resolvePath($ctx, $path);
+        $resolved = $this->resolvePath($commandContext, $path);
 
-        if (! $ctx->fs->exists($resolved)) {
+        if (! $commandContext->fs->exists($resolved)) {
             return false;
         }
 
         try {
-            $stat = $ctx->fs->stat($resolved);
+            $stat = $commandContext->fs->stat($resolved);
 
             return $stat->isDirectory;
         } catch (RuntimeException) {
@@ -151,16 +151,16 @@ final class Test_ extends AbstractCommand
         }
     }
 
-    private function isReadable(CommandContext $ctx, string $path): bool
+    private function isReadable(CommandContext $commandContext, string $path): bool
     {
-        $resolved = $this->resolvePath($ctx, $path);
+        $resolved = $this->resolvePath($commandContext, $path);
 
-        if (! $ctx->fs->exists($resolved)) {
+        if (! $commandContext->fs->exists($resolved)) {
             return false;
         }
 
         try {
-            $stat = $ctx->fs->stat($resolved);
+            $stat = $commandContext->fs->stat($resolved);
 
             return ($stat->mode & 0o444) !== 0;
         } catch (RuntimeException) {
@@ -168,16 +168,16 @@ final class Test_ extends AbstractCommand
         }
     }
 
-    private function isWritable(CommandContext $ctx, string $path): bool
+    private function isWritable(CommandContext $commandContext, string $path): bool
     {
-        $resolved = $this->resolvePath($ctx, $path);
+        $resolved = $this->resolvePath($commandContext, $path);
 
-        if (! $ctx->fs->exists($resolved)) {
+        if (! $commandContext->fs->exists($resolved)) {
             return false;
         }
 
         try {
-            $stat = $ctx->fs->stat($resolved);
+            $stat = $commandContext->fs->stat($resolved);
 
             return ($stat->mode & 0o222) !== 0;
         } catch (RuntimeException) {
@@ -185,16 +185,16 @@ final class Test_ extends AbstractCommand
         }
     }
 
-    private function isExecutable(CommandContext $ctx, string $path): bool
+    private function isExecutable(CommandContext $commandContext, string $path): bool
     {
-        $resolved = $this->resolvePath($ctx, $path);
+        $resolved = $this->resolvePath($commandContext, $path);
 
-        if (! $ctx->fs->exists($resolved)) {
+        if (! $commandContext->fs->exists($resolved)) {
             return false;
         }
 
         try {
-            $stat = $ctx->fs->stat($resolved);
+            $stat = $commandContext->fs->stat($resolved);
 
             return ($stat->mode & 0o111) !== 0;
         } catch (RuntimeException) {
@@ -202,16 +202,16 @@ final class Test_ extends AbstractCommand
         }
     }
 
-    private function isNonEmptyFile(CommandContext $ctx, string $path): bool
+    private function isNonEmptyFile(CommandContext $commandContext, string $path): bool
     {
-        $resolved = $this->resolvePath($ctx, $path);
+        $resolved = $this->resolvePath($commandContext, $path);
 
-        if (! $ctx->fs->exists($resolved)) {
+        if (! $commandContext->fs->exists($resolved)) {
             return false;
         }
 
         try {
-            $stat = $ctx->fs->stat($resolved);
+            $stat = $commandContext->fs->stat($resolved);
 
             return $stat->isFile && $stat->size > 0;
         } catch (RuntimeException) {

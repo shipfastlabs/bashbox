@@ -14,7 +14,7 @@ final class Touch extends AbstractCommand
         return 'touch';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         if ($args === []) {
             return $this->failure("touch: missing file operand\n");
@@ -23,17 +23,17 @@ final class Touch extends AbstractCommand
         $stderr = '';
         $exitCode = 0;
 
-        foreach ($args as $file) {
-            $path = $this->resolvePath($ctx, $file);
+        foreach ($args as $arg) {
+            $path = $this->resolvePath($commandContext, $arg);
 
             try {
-                if ($ctx->fs->exists($path)) {
-                    $ctx->fs->utimes($path, time());
+                if ($commandContext->fs->exists($path)) {
+                    $commandContext->fs->utimes($path, time());
                 } else {
-                    $ctx->fs->writeFile($path, '');
+                    $commandContext->fs->writeFile($path, '');
                 }
             } catch (RuntimeException $e) {
-                $stderr .= sprintf("touch: cannot touch '%s': %s%s", $file, $e->getMessage(), PHP_EOL);
+                $stderr .= sprintf("touch: cannot touch '%s': %s%s", $arg, $e->getMessage(), PHP_EOL);
                 $exitCode = 1;
             }
         }

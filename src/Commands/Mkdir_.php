@@ -14,7 +14,7 @@ final class Mkdir_ extends AbstractCommand
         return 'mkdir';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, ['p' => false]);
         $recursive = (bool) $parsed['flags']['p'];
@@ -28,10 +28,10 @@ final class Mkdir_ extends AbstractCommand
         $exitCode = 0;
 
         foreach ($dirs as $dir) {
-            $path = $this->resolvePath($ctx, $dir);
+            $path = $this->resolvePath($commandContext, $dir);
 
             try {
-                $ctx->fs->mkdir($path, ['recursive' => $recursive]);
+                $commandContext->fs->mkdir($path, ['recursive' => $recursive]);
             } catch (RuntimeException $e) {
                 $stderr .= sprintf("mkdir: cannot create directory '%s': %s%s", $dir, $e->getMessage(), PHP_EOL);
                 $exitCode = 1;

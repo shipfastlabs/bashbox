@@ -13,13 +13,13 @@ final class Printenv extends AbstractCommand
         return 'printenv';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         if ($args === []) {
             // Print all environment variables
             $output = '';
 
-            foreach ($ctx->env as $key => $value) {
+            foreach ($commandContext->env as $key => $value) {
                 $output .= sprintf('%s=%s%s', $key, $value, PHP_EOL);
             }
 
@@ -30,9 +30,9 @@ final class Printenv extends AbstractCommand
         $output = '';
         $found = false;
 
-        foreach ($args as $name) {
-            if (array_key_exists($name, $ctx->env)) {
-                $output .= $ctx->env[$name]."\n";
+        foreach ($args as $arg) {
+            if (array_key_exists($arg, $commandContext->env)) {
+                $output .= $commandContext->env[$arg]."\n";
                 $found = true;
             }
         }

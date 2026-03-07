@@ -14,13 +14,13 @@ final class MountableFs implements FileSystemInterface
     private array $mounts = [];
 
     public function __construct(
-        private readonly FileSystemInterface $defaultFs,
+        private readonly FileSystemInterface $fileSystem,
     ) {}
 
-    public function mount(string $mountPoint, FileSystemInterface $fs): void
+    public function mount(string $mountPoint, FileSystemInterface $fileSystem): void
     {
         $mountPoint = $this->normalizePath($mountPoint);
-        $this->mounts[$mountPoint] = $fs;
+        $this->mounts[$mountPoint] = $fileSystem;
     }
 
     public function unmount(string $mountPoint): void
@@ -98,7 +98,7 @@ final class MountableFs implements FileSystemInterface
     {
         $entries = $this->readdirWithFileTypes($path);
 
-        return array_map(fn (DirentEntry $e): string => $e->name, $entries);
+        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $entries);
     }
 
     public function readdirWithFileTypes(string $path): array
@@ -162,12 +162,12 @@ final class MountableFs implements FileSystemInterface
 
         // Cross-filesystem copy
         $recursive = $options['recursive'] ?? false;
-        $srcStat = $srcFs->stat($srcInner);
+        $fsStat = $srcFs->stat($srcInner);
 
-        if ($srcStat->isFile) {
+        if ($fsStat->isFile) {
             $content = $srcFs->readFile($srcInner);
             $destFs->writeFile($destInner, $content);
-        } elseif ($srcStat->isDirectory) {
+        } elseif ($fsStat->isDirectory) {
             if (! $recursive) {
                 throw new RuntimeException(sprintf("EISDIR: is a directory, cp '%s'", $src));
             }
@@ -204,13 +204,13 @@ final class MountableFs implements FileSystemInterface
 
     public function getAllPaths(): array
     {
-        $allPaths = $this->defaultFs->getAllPaths();
+        $allPaths = $this->fileSystem->getAllPaths();
 
         foreach ($this->mounts as $mp => $fs) {
             $mountedPaths = $fs->getAllPaths();
 
-            foreach ($mountedPaths as $innerPath) {
-                $allPaths[] = $innerPath === '/' ? $mp : $mp.$innerPath;
+            foreach ($mountedPaths as $mountedPath) {
+                $allPaths[] = $mountedPath === '/' ? $mp : $mp.$mountedPath;
             }
         }
 
@@ -302,7 +302,7 @@ final class MountableFs implements FileSystemInterface
         }
 
         if ($bestMount === null) {
-            return [$this->defaultFs, $normalized];
+            return [$this->fileSystem, $normalized];
         }
 
         $innerPath = substr($normalized, $bestLength);

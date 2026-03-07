@@ -13,7 +13,7 @@ final class Dirname_ extends AbstractCommand
         return 'dirname';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         if ($args === []) {
             return $this->failure("dirname: missing operand\n");

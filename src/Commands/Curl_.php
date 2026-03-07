@@ -16,9 +16,9 @@ final class Curl_ extends AbstractCommand
         return 'curl';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        if ($ctx->fetch === null) {
+        if (! $commandContext->fetch instanceof \BashBox\Network\SecureHttpClient) {
             return $this->failure("curl: network is not configured\n");
         }
 
@@ -32,7 +32,6 @@ final class Curl_ extends AbstractCommand
         $url = $parsed['url'];
         $headers = $parsed['headers'];
         $body = $parsed['body'];
-        $silent = $parsed['silent'];
         $showHeaders = $parsed['showHeaders'];
         $outputFile = $parsed['output'];
         $headOnly = $parsed['headOnly'];
@@ -42,7 +41,7 @@ final class Curl_ extends AbstractCommand
         }
 
         try {
-            $response = $ctx->fetch->request($method, $url, $headers, $body);
+            $response = $commandContext->fetch->request($method, $url, $headers, $body);
         } catch (NetworkAccessDeniedException $e) {
             return $this->failure(sprintf("curl: (6) Access denied: %s\n", $e->getMessage()));
         } catch (ResponseTooLargeException $e) {
@@ -59,6 +58,7 @@ final class Curl_ extends AbstractCommand
             foreach ($response['headers'] as $name => $value) {
                 $output .= sprintf("%s: %s\r\n", $name, $value);
             }
+
             $output .= "\r\n";
         }
 
@@ -67,12 +67,8 @@ final class Curl_ extends AbstractCommand
         }
 
         if ($outputFile !== null) {
-            $path = $this->resolvePath($ctx, $outputFile);
-            $ctx->fs->writeFile($path, $output);
-
-            if (! $silent) {
-                return $this->success();
-            }
+            $path = $this->resolvePath($commandContext, $outputFile);
+            $commandContext->fs->writeFile($path, $output);
 
             return $this->success();
         }

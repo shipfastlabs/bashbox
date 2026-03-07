@@ -13,8 +13,8 @@ final class Pwd extends AbstractCommand
         return 'pwd';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        return $this->success($ctx->cwd."\n");
+        return $this->success($commandContext->cwd."\n");
     }
 }

@@ -377,7 +377,7 @@ test('dirs shows directory stack', function (): void {
 test('dirs -c clears stack', function (): void {
     $result = $this->bash->exec('mkdir -p /tmp/d1 /tmp/d2; pushd /tmp/d1; pushd /tmp/d2; dirs -c; dirs');
 
-    $lines = array_filter(explode("\n", $result->stdout));
+    $lines = array_filter(explode("\n", (string) $result->stdout));
     $lastLine = end($lines);
     // After dirs -c, only cwd remains (no stack entries)
     expect($lastLine)->toBe('/tmp/d2');

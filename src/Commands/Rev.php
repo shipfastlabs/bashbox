@@ -13,9 +13,9 @@ final class Rev extends AbstractCommand
         return 'rev';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $input = $ctx->stdin;
+        $input = $commandContext->stdin;
 
         if ($input === '') {
             return $this->success();

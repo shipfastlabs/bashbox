@@ -8,11 +8,11 @@ use Amp\File;
 use Amp\File\FilesystemException;
 use RuntimeException;
 
-final class ReadWriteFs implements FileSystemInterface
+final readonly class ReadWriteFs implements FileSystemInterface
 {
-    private readonly string $rootDir;
+    private string $rootDir;
 
-    private readonly File\Filesystem $driver;
+    private File\Filesystem $filesystem;
 
     public function __construct(string $rootDir)
     {
@@ -23,7 +23,7 @@ final class ReadWriteFs implements FileSystemInterface
         }
 
         $this->rootDir = $realRoot;
-        $this->driver = File\filesystem();
+        $this->filesystem = File\filesystem();
     }
 
     public function readFile(string $path): string
@@ -33,7 +33,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'open', $path);
 
         try {
-            $status = $this->driver->getStatus($realPath);
+            $status = $this->filesystem->getStatus($realPath);
         } catch (FilesystemException) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path));
         }
@@ -48,8 +48,8 @@ final class ReadWriteFs implements FileSystemInterface
 
         try {
             return File\read($realPath);
-        } catch (FilesystemException $e) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path), 0, $e);
+        } catch (FilesystemException $filesystemException) {
+            throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path), 0, $filesystemException);
         }
     }
 
@@ -64,8 +64,8 @@ final class ReadWriteFs implements FileSystemInterface
 
         try {
             File\write($realPath, $content);
-        } catch (FilesystemException $e) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, write '%s'", $path), 0, $e);
+        } catch (FilesystemException $filesystemException) {
+            throw new RuntimeException(sprintf("EACCES: permission denied, write '%s'", $path), 0, $filesystemException);
         }
     }
 
@@ -75,7 +75,7 @@ final class ReadWriteFs implements FileSystemInterface
         $realPath = $this->toRealPath($path);
         $this->assertContained($realPath, 'append', $path);
 
-        $status = $this->driver->getStatus($realPath);
+        $status = $this->filesystem->getStatus($realPath);
 
         if ($status !== null && UnixFileMode::isDirectory($this->statInt($status, 'mode'))) {
             throw new RuntimeException(sprintf("EISDIR: illegal operation on a directory, write '%s'", $path));
@@ -96,8 +96,8 @@ final class ReadWriteFs implements FileSystemInterface
 
         try {
             File\write($realPath, $existing.$content);
-        } catch (FilesystemException $e) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, append '%s'", $path), 0, $e);
+        } catch (FilesystemException $filesystemException) {
+            throw new RuntimeException(sprintf("EACCES: permission denied, append '%s'", $path), 0, $filesystemException);
         }
     }
 
@@ -114,7 +114,7 @@ final class ReadWriteFs implements FileSystemInterface
                 return false;
             }
 
-            return $this->driver->getStatus($realPath) !== null;
+            return $this->filesystem->getStatus($realPath) !== null;
         } catch (RuntimeException|FilesystemException) {
             return false;
         }
@@ -126,7 +126,7 @@ final class ReadWriteFs implements FileSystemInterface
         $realPath = $this->toRealPath($path);
         $this->assertContained($realPath, 'stat', $path);
 
-        $status = $this->driver->getStatus($realPath);
+        $status = $this->filesystem->getStatus($realPath);
 
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, stat '%s'", $path));
@@ -151,7 +151,7 @@ final class ReadWriteFs implements FileSystemInterface
         $realPath = $this->toRealPath($path);
         $this->assertContained($realPath, 'lstat', $path);
 
-        $status = $this->driver->getLinkStatus($realPath);
+        $status = $this->filesystem->getLinkStatus($realPath);
 
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, lstat '%s'", $path));
@@ -188,7 +188,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'mkdir', $path);
         $recursive = $options['recursive'] ?? false;
 
-        $status = $this->driver->getStatus($realPath);
+        $status = $this->filesystem->getStatus($realPath);
 
         if ($status !== null) {
             if (UnixFileMode::isRegularFile($this->statInt($status, 'mode'))) {
@@ -203,13 +203,13 @@ final class ReadWriteFs implements FileSystemInterface
         }
 
         try {
-            $this->driver->createDirectoryRecursively($realPath, 0755);
-        } catch (FilesystemException $e) {
+            $this->filesystem->createDirectoryRecursively($realPath, 0755);
+        } catch (FilesystemException $filesystemException) {
             if (! $recursive) {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, mkdir '%s'", $path), 0, $e);
+                throw new RuntimeException(sprintf("ENOENT: no such file or directory, mkdir '%s'", $path), 0, $filesystemException);
             }
 
-            throw new RuntimeException(sprintf("EACCES: permission denied, mkdir '%s'", $path), 0, $e);
+            throw new RuntimeException(sprintf("EACCES: permission denied, mkdir '%s'", $path), 0, $filesystemException);
         }
     }
 
@@ -217,7 +217,7 @@ final class ReadWriteFs implements FileSystemInterface
     {
         $entries = $this->readdirWithFileTypes($path);
 
-        return array_map(fn (DirentEntry $e): string => $e->name, $entries);
+        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $entries);
     }
 
     public function readdirWithFileTypes(string $path): array
@@ -226,7 +226,7 @@ final class ReadWriteFs implements FileSystemInterface
         $realPath = $this->toRealPath($path);
         $this->assertContained($realPath, 'scandir', $path);
 
-        $status = $this->driver->getStatus($realPath);
+        $status = $this->filesystem->getStatus($realPath);
 
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, scandir '%s'", $path));
@@ -237,16 +237,16 @@ final class ReadWriteFs implements FileSystemInterface
         }
 
         try {
-            $names = $this->driver->listFiles($realPath);
-        } catch (FilesystemException $e) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, scandir '%s'", $path), 0, $e);
+            $names = $this->filesystem->listFiles($realPath);
+        } catch (FilesystemException $filesystemException) {
+            throw new RuntimeException(sprintf("EACCES: permission denied, scandir '%s'", $path), 0, $filesystemException);
         }
 
         $entries = [];
 
         foreach ($names as $name) {
             $childPath = $realPath.DIRECTORY_SEPARATOR.$name;
-            $childStatus = $this->driver->getLinkStatus($childPath);
+            $childStatus = $this->filesystem->getLinkStatus($childPath);
 
             $childType = $childStatus !== null ? UnixFileMode::type($this->statInt($childStatus, 'mode')) : null;
             $isLink = $childType === UnixFileType::SymbolicLink;
@@ -274,7 +274,7 @@ final class ReadWriteFs implements FileSystemInterface
         $force = $options['force'] ?? false;
         $recursive = $options['recursive'] ?? false;
 
-        $status = $this->driver->getLinkStatus($realPath);
+        $status = $this->filesystem->getLinkStatus($realPath);
 
         if ($status === null) {
             if ($force) {
@@ -305,13 +305,13 @@ final class ReadWriteFs implements FileSystemInterface
             }
 
             try {
-                $this->driver->deleteDirectory($realPath);
+                $this->filesystem->deleteDirectory($realPath);
             } catch (FilesystemException $e) {
                 throw new RuntimeException(sprintf("EACCES: permission denied, rm '%s'", $path), 0, $e);
             }
         } else {
             try {
-                $this->driver->deleteFile($realPath);
+                $this->filesystem->deleteFile($realPath);
             } catch (FilesystemException $e) {
                 throw new RuntimeException(sprintf("EACCES: permission denied, rm '%s'", $path), 0, $e);
             }
@@ -328,7 +328,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($destReal, 'cp', $dest);
         $recursive = $options['recursive'] ?? false;
 
-        $status = $this->driver->getStatus($srcReal);
+        $status = $this->filesystem->getStatus($srcReal);
 
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, cp '%s'", $src));
@@ -372,7 +372,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($srcReal, 'rename', $src);
         $this->assertContained($destReal, 'rename', $dest);
 
-        $status = $this->driver->getStatus($srcReal);
+        $status = $this->filesystem->getStatus($srcReal);
 
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, rename '%s'", $src));
@@ -382,9 +382,9 @@ final class ReadWriteFs implements FileSystemInterface
         $this->ensureDirectory($destDir, $dest);
 
         try {
-            $this->driver->move($srcReal, $destReal);
-        } catch (FilesystemException $e) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, rename '%s'", $src), 0, $e);
+            $this->filesystem->move($srcReal, $destReal);
+        } catch (FilesystemException $filesystemException) {
+            throw new RuntimeException(sprintf("EACCES: permission denied, rename '%s'", $src), 0, $filesystemException);
         }
     }
 
@@ -414,16 +414,16 @@ final class ReadWriteFs implements FileSystemInterface
         $realPath = $this->toRealPath($path);
         $this->assertContained($realPath, 'chmod', $path);
 
-        $status = $this->driver->getStatus($realPath);
+        $status = $this->filesystem->getStatus($realPath);
 
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, chmod '%s'", $path));
         }
 
         try {
-            $this->driver->changePermissions($realPath, $mode);
-        } catch (FilesystemException $e) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, chmod '%s'", $path), 0, $e);
+            $this->filesystem->changePermissions($realPath, $mode);
+        } catch (FilesystemException $filesystemException) {
+            throw new RuntimeException(sprintf("EACCES: permission denied, chmod '%s'", $path), 0, $filesystemException);
         }
     }
 
@@ -433,16 +433,16 @@ final class ReadWriteFs implements FileSystemInterface
         $realLinkPath = $this->toRealPath($linkPath);
         $this->assertContained($realLinkPath, 'symlink', $linkPath);
 
-        $status = $this->driver->getLinkStatus($realLinkPath);
+        $status = $this->filesystem->getLinkStatus($realLinkPath);
 
         if ($status !== null) {
             throw new RuntimeException(sprintf("EEXIST: file already exists, symlink '%s'", $linkPath));
         }
 
         try {
-            $this->driver->createSymlink($this->normalizeSymlinkTarget($target), $realLinkPath);
-        } catch (FilesystemException $e) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, symlink '%s'", $linkPath), 0, $e);
+            $this->filesystem->createSymlink($this->normalizeSymlinkTarget($target), $realLinkPath);
+        } catch (FilesystemException $filesystemException) {
+            throw new RuntimeException(sprintf("EACCES: permission denied, symlink '%s'", $linkPath), 0, $filesystemException);
         }
     }
 
@@ -455,7 +455,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($existingReal, 'link', $existingPath);
         $this->assertContained($newReal, 'link', $newPath);
 
-        $status = $this->driver->getStatus($existingReal);
+        $status = $this->filesystem->getStatus($existingReal);
 
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, link '%s'", $existingPath));
@@ -465,16 +465,16 @@ final class ReadWriteFs implements FileSystemInterface
             throw new RuntimeException(sprintf("EPERM: operation not permitted, link '%s'", $existingPath));
         }
 
-        $newStatus = $this->driver->getLinkStatus($newReal);
+        $newStatus = $this->filesystem->getLinkStatus($newReal);
 
         if ($newStatus !== null) {
             throw new RuntimeException(sprintf("EEXIST: file already exists, link '%s'", $newPath));
         }
 
         try {
-            $this->driver->createHardlink($existingReal, $newReal);
-        } catch (FilesystemException $e) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, link '%s'", $existingPath), 0, $e);
+            $this->filesystem->createHardlink($existingReal, $newReal);
+        } catch (FilesystemException $filesystemException) {
+            throw new RuntimeException(sprintf("EACCES: permission denied, link '%s'", $existingPath), 0, $filesystemException);
         }
     }
 
@@ -484,7 +484,7 @@ final class ReadWriteFs implements FileSystemInterface
         $realPath = $this->toRealPath($path);
         $this->assertContained($realPath, 'readlink', $path);
 
-        $status = $this->driver->getLinkStatus($realPath);
+        $status = $this->filesystem->getLinkStatus($realPath);
 
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
@@ -534,16 +534,16 @@ final class ReadWriteFs implements FileSystemInterface
         $realPath = $this->toRealPath($path);
         $this->assertContained($realPath, 'utimes', $path);
 
-        $status = $this->driver->getStatus($realPath);
+        $status = $this->filesystem->getStatus($realPath);
 
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, utimes '%s'", $path));
         }
 
         try {
-            $this->driver->touch($realPath, $mtime, $mtime);
-        } catch (FilesystemException $e) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, utimes '%s'", $path), 0, $e);
+            $this->filesystem->touch($realPath, $mtime, $mtime);
+        } catch (FilesystemException $filesystemException) {
+            throw new RuntimeException(sprintf("EACCES: permission denied, utimes '%s'", $path), 0, $filesystemException);
         }
     }
 
@@ -609,11 +609,11 @@ final class ReadWriteFs implements FileSystemInterface
 
     private function ensureDirectory(string $realDir, string $userPath): void
     {
-        $status = $this->driver->getStatus($realDir);
+        $status = $this->filesystem->getStatus($realDir);
 
         if ($status === null) {
             try {
-                $this->driver->createDirectoryRecursively($realDir, 0755);
+                $this->filesystem->createDirectoryRecursively($realDir, 0755);
             } catch (FilesystemException $e) {
                 throw new RuntimeException(sprintf("ENOENT: no such file or directory, write '%s'", $userPath), 0, $e);
             }
@@ -669,14 +669,14 @@ final class ReadWriteFs implements FileSystemInterface
     {
         $paths[] = $virtualDir;
 
-        $status = $this->driver->getStatus($realDir);
+        $status = $this->filesystem->getStatus($realDir);
 
         if ($status === null || ! UnixFileMode::isDirectory($this->statInt($status, 'mode'))) {
             return;
         }
 
         try {
-            $names = $this->driver->listFiles($realDir);
+            $names = $this->filesystem->listFiles($realDir);
         } catch (FilesystemException) {
             return;
         }
@@ -686,7 +686,7 @@ final class ReadWriteFs implements FileSystemInterface
             $childVirtual = $virtualDir === '/' ? '/'.$name : sprintf('%s/%s', $virtualDir, $name);
             $paths[] = $childVirtual;
 
-            $childStatus = $this->driver->getLinkStatus($childReal);
+            $childStatus = $this->filesystem->getLinkStatus($childReal);
             $childType = $childStatus !== null ? UnixFileMode::type($this->statInt($childStatus, 'mode')) : null;
             $isDir = $childType === UnixFileType::Directory;
             $isLink = $childType === UnixFileType::SymbolicLink;

@@ -14,7 +14,7 @@ final class Wc extends AbstractCommand
         return 'wc';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'l' => false,
@@ -48,12 +48,12 @@ final class Wc extends AbstractCommand
 
         foreach ($files as $file) {
             if ($file === '-') {
-                $content = $ctx->stdin;
+                $content = $commandContext->stdin;
             } else {
-                $path = $this->resolvePath($ctx, $file);
+                $path = $this->resolvePath($commandContext, $file);
 
                 try {
-                    $content = $ctx->fs->readFile($path);
+                    $content = $commandContext->fs->readFile($path);
                 } catch (RuntimeException) {
                     $output .= "wc: {$file}: No such file or directory\n";
 

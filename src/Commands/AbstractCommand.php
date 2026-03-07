@@ -86,13 +86,13 @@ abstract class AbstractCommand implements CommandInterface
         return ['flags' => $flags, 'args' => $remaining];
     }
 
-    protected function resolvePath(CommandContext $ctx, string $path): string
+    protected function resolvePath(CommandContext $commandContext, string $path): string
     {
         if (str_starts_with($path, '/')) {
             return $path;
         }
 
-        return $ctx->fs->resolvePath($ctx->cwd, $path);
+        return $commandContext->fs->resolvePath($commandContext->cwd, $path);
     }
 
     /**

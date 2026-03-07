@@ -503,9 +503,9 @@ final class Lexer
         $this->column = $startColumn + ($pos - $start);
 
         // Classify the token
-        $type = $this->classifyWord($value, $wasQuoted);
+        $tokenType = $this->classifyWord($value, $wasQuoted);
 
-        return new Token($type, $value, $start, $pos, $startLine, $startColumn, $wasQuoted, $singleQuoted);
+        return new Token($tokenType, $value, $start, $pos, $startLine, $startColumn, $wasQuoted, $singleQuoted);
     }
 
     /**

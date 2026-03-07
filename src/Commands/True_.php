@@ -13,7 +13,7 @@ final class True_ extends AbstractCommand
         return 'true';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         return $this->success();
     }

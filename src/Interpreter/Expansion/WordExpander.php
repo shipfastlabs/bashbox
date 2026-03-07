@@ -34,15 +34,15 @@ use RuntimeException;
 final readonly class WordExpander
 {
     public function __construct(
-        private InterpreterState $state,
+        private InterpreterState $interpreterState,
         private Interpreter $interpreter,
     ) {}
 
-    public function expand(WordNode $word): string
+    public function expand(WordNode $wordNode): string
     {
         $result = '';
 
-        foreach ($word->parts as $part) {
+        foreach ($wordNode->parts as $part) {
             $result .= $this->expandPart($part);
         }
 
@@ -52,14 +52,14 @@ final readonly class WordExpander
     /**
      * @return list<string>
      */
-    public function expandToList(WordNode $word): array
+    public function expandToList(WordNode $wordNode): array
     {
-        $ifs = $this->state->getVar('IFS') ?? " \t\n";
+        $ifs = $this->interpreterState->getVar('IFS') ?? " \t\n";
         $results = [];
-        $quoted = $this->isQuotedWord($word);
+        $quoted = $this->isQuotedWord($wordNode);
 
-        foreach ($this->expandWordVariants($word) as $expanded) {
-            $globbed = ($quoted || ($this->state->shellOpts['noglob'] ?? false))
+        foreach ($this->expandWordVariants($wordNode) as $expanded) {
+            $globbed = ($quoted || ($this->interpreterState->shellOpts['noglob'] ?? false))
                 ? [$expanded]
                 : $this->expandGlob($expanded);
 
@@ -77,60 +77,60 @@ final readonly class WordExpander
         return $results === [] ? [''] : $results;
     }
 
-    private function expandPart(WordPart $part): string
+    private function expandPart(WordPart $wordPart): string
     {
-        if ($part instanceof LiteralPart) {
-            return $this->expandLiteralValue($part->value);
+        if ($wordPart instanceof LiteralPart) {
+            return $this->expandLiteralValue($wordPart->value);
         }
 
-        if ($part instanceof SingleQuotedPart) {
-            return $part->value;
+        if ($wordPart instanceof SingleQuotedPart) {
+            return $wordPart->value;
         }
 
-        if ($part instanceof EscapedPart) {
-            return $part->value;
+        if ($wordPart instanceof EscapedPart) {
+            return $wordPart->value;
         }
 
-        if ($part instanceof DoubleQuotedPart) {
+        if ($wordPart instanceof DoubleQuotedPart) {
             $result = '';
 
-            foreach ($part->parts as $inner) {
+            foreach ($wordPart->parts as $inner) {
                 $result .= $this->expandPart($inner);
             }
 
             return $result;
         }
 
-        if ($part instanceof ParameterExpansionPart) {
-            return $this->expandParameter($part);
+        if ($wordPart instanceof ParameterExpansionPart) {
+            return $this->expandParameter($wordPart);
         }
 
-        if ($part instanceof CommandSubstitutionPart) {
-            $result = $this->interpreter->executeScript($part->body);
+        if ($wordPart instanceof CommandSubstitutionPart) {
+            $result = $this->interpreter->executeScript($wordPart->body);
 
             return rtrim($result->stdout, "\n");
         }
 
-        if ($part instanceof ArithmeticExpansionPart) {
-            $value = $this->interpreter->evaluateArithmeticExpression($part->expression);
+        if ($wordPart instanceof ArithmeticExpansionPart) {
+            $value = $this->interpreter->evaluateArithmeticExpression($wordPart->expression);
 
             return (string) $value;
         }
 
-        if ($part instanceof TildeExpansionPart) {
-            if ($part->user === null) {
-                return $this->state->getVar('HOME') ?? '/home/user';
+        if ($wordPart instanceof TildeExpansionPart) {
+            if ($wordPart->user === null) {
+                return $this->interpreterState->getVar('HOME') ?? '/home/user';
             }
 
-            return '/home/'.$part->user;
+            return '/home/'.$wordPart->user;
         }
 
-        if ($part instanceof GlobPart) {
-            return $part->pattern;
+        if ($wordPart instanceof GlobPart) {
+            return $wordPart->pattern;
         }
 
-        if ($part instanceof BraceExpansionPart) {
-            return implode(' ', $this->expandBrace($part));
+        if ($wordPart instanceof BraceExpansionPart) {
+            return implode(' ', $this->expandBrace($wordPart));
         }
 
         return '';
@@ -139,16 +139,16 @@ final readonly class WordExpander
     /**
      * @return list<string>
      */
-    private function expandWordVariants(WordNode $word): array
+    private function expandWordVariants(WordNode $wordNode): array
     {
         $variants = [''];
 
-        foreach ($word->parts as $part) {
+        foreach ($wordNode->parts as $part) {
             $next = [];
 
-            foreach ($variants as $prefix) {
+            foreach ($variants as $variant) {
                 foreach ($this->expandPartVariants($part) as $suffix) {
-                    $next[] = $prefix.$suffix;
+                    $next[] = $variant.$suffix;
                 }
             }
 
@@ -161,76 +161,77 @@ final readonly class WordExpander
     /**
      * @return list<string>
      */
-    private function expandPartVariants(WordPart $part): array
+    private function expandPartVariants(WordPart $wordPart): array
     {
-        if ($part instanceof LiteralPart) {
+        if ($wordPart instanceof LiteralPart) {
             return array_map(
-                fn (string $value): string => $this->expandLiteralValue($value),
-                $this->expandBraceString($part->value),
+                $this->expandLiteralValue(...),
+                $this->expandBraceString($wordPart->value),
             );
         }
 
-        if ($part instanceof SingleQuotedPart) {
-            return [$part->value];
+        if ($wordPart instanceof SingleQuotedPart) {
+            return [$wordPart->value];
         }
 
-        if ($part instanceof EscapedPart) {
-            return [$part->value];
+        if ($wordPart instanceof EscapedPart) {
+            return [$wordPart->value];
         }
 
-        if ($part instanceof DoubleQuotedPart) {
+        if ($wordPart instanceof DoubleQuotedPart) {
             $variants = [''];
 
-            foreach ($part->parts as $inner) {
+            foreach ($wordPart->parts as $inner) {
                 $next = [];
 
-                foreach ($variants as $prefix) {
+                foreach ($variants as $variant) {
                     foreach ($this->expandPartVariants($inner) as $suffix) {
-                        $next[] = $prefix.$suffix;
+                        $next[] = $variant.$suffix;
                     }
                 }
+
                 $variants = $next;
             }
 
             return $variants;
         }
 
-        if ($part instanceof ParameterExpansionPart) {
-            return [$this->expandParameter($part)];
+        if ($wordPart instanceof ParameterExpansionPart) {
+            return [$this->expandParameter($wordPart)];
         }
 
-        if ($part instanceof CommandSubstitutionPart) {
-            $result = $this->interpreter->executeScript($part->body);
+        if ($wordPart instanceof CommandSubstitutionPart) {
+            $result = $this->interpreter->executeScript($wordPart->body);
 
             return [rtrim($result->stdout, "\n")];
         }
 
-        if ($part instanceof ArithmeticExpansionPart) {
-            return [(string) $this->interpreter->evaluateArithmeticExpression($part->expression)];
+        if ($wordPart instanceof ArithmeticExpansionPart) {
+            return [(string) $this->interpreter->evaluateArithmeticExpression($wordPart->expression)];
         }
 
-        if ($part instanceof TildeExpansionPart) {
-            if ($part->user === null) {
-                return [$this->state->getVar('HOME') ?? '/home/user'];
+        if ($wordPart instanceof TildeExpansionPart) {
+            if ($wordPart->user === null) {
+                return [$this->interpreterState->getVar('HOME') ?? '/home/user'];
             }
 
-            return ['/home/'.$part->user];
+            return ['/home/'.$wordPart->user];
         }
 
-        if ($part instanceof GlobPart) {
-            return [$part->pattern];
+        if ($wordPart instanceof GlobPart) {
+            return [$wordPart->pattern];
         }
 
-        if ($part instanceof BraceExpansionPart) {
-            return $this->expandBrace($part);
+        if ($wordPart instanceof BraceExpansionPart) {
+            return $this->expandBrace($wordPart);
         }
 
         return [''];
     }
 
-    private function isQuotedWord(WordNode $word): bool
+    private function isQuotedWord(WordNode $wordNode): bool
     {
-        foreach ($word->parts as $part) {
+        foreach ($wordNode->parts as $part) {
             if ($part instanceof SingleQuotedPart || $part instanceof DoubleQuotedPart) {
                 return true;
             }
@@ -257,7 +258,7 @@ final readonly class WordExpander
 
             if ($len === 1 || $slashPos === 1) {
                 // ~ or ~/...
-                $home = $this->state->getVar('HOME') ?? '/home/user';
+                $home = $this->interpreterState->getVar('HOME') ?? '/home/user';
                 $result .= $home;
                 $i = 1;
             } elseif ($slashPos !== false) {
@@ -270,7 +271,7 @@ final readonly class WordExpander
                 $user = substr($value, 1);
 
                 if ($user === '') {
-                    $result .= $this->state->getVar('HOME') ?? '/home/user';
+                    $result .= $this->interpreterState->getVar('HOME') ?? '/home/user';
                 } else {
                     $result .= '/home/'.$user;
                 }
@@ -529,12 +530,12 @@ final readonly class WordExpander
                     return ['value' => 'bashbox', 'pos' => $i];
                 }
 
-                $val = $this->state->positionalParams[$idx - 1] ?? '';
+                $val = $this->interpreterState->positionalParams[$idx - 1] ?? '';
 
                 return ['value' => $val, 'pos' => $i];
             }
 
-            $val = $this->state->getSpecialVar($ch) ?? '';
+            $val = $this->interpreterState->getSpecialVar($ch) ?? '';
 
             return ['value' => $val, 'pos' => $i];
         }
@@ -547,10 +548,10 @@ final readonly class WordExpander
         // Handle # prefix (length)
         if (str_starts_with($content, '#')) {
             $varName = substr($content, 1);
-            $val = $this->state->getVar($varName) ?? $this->state->getSpecialVar($varName) ?? '';
+            $val = $this->interpreterState->getVar($varName) ?? $this->interpreterState->getSpecialVar($varName) ?? '';
 
             if ($varName === '@' || $varName === '*') {
-                return (string) count($this->state->positionalParams);
+                return (string) count($this->interpreterState->positionalParams);
             }
 
             // Array length
@@ -559,7 +560,7 @@ final readonly class WordExpander
                 $subscript = substr($varName, (int) strpos($varName, '[') + 1, -1);
 
                 if ($subscript === '@' || $subscript === '*') {
-                    return (string) count($this->state->arrays[$arrayName] ?? []);
+                    return (string) count($this->interpreterState->arrays[$arrayName] ?? []);
                 }
 
                 return (string) strlen($this->getArrayElement($arrayName, $subscript));
@@ -579,9 +580,9 @@ final readonly class WordExpander
                 ));
             }
 
-            $intermediate = $this->state->getVar($varName) ?? '';
+            $intermediate = $this->interpreterState->getVar($varName) ?? '';
 
-            return $this->state->getVar($intermediate) ?? '';
+            return $this->interpreterState->getVar($intermediate) ?? '';
         }
 
         // Find operator position
@@ -593,7 +594,7 @@ final readonly class WordExpander
                 $word = substr($content, $opPos + strlen($op));
                 $checkEmpty = str_starts_with($op, ':');
                 $baseOp = ltrim($op, ':');
-                $val = $this->state->getVar($varName) ?? $this->state->getSpecialVar($varName);
+                $val = $this->interpreterState->getVar($varName) ?? $this->interpreterState->getSpecialVar($varName);
 
                 $isUnset = $val === null;
                 $isEmpty = $val === '' || $val === null;
@@ -603,7 +604,7 @@ final readonly class WordExpander
                     '-' => $shouldApply ? $this->expandLiteralValue($word) : ($val ?? ''),
                     '=' => $shouldApply ? (function () use ($varName, $word): string {
                         $expanded = $this->expandLiteralValue($word);
-                        $this->state->setVar($varName, $expanded);
+                        $this->interpreterState->setVar($varName, $expanded);
 
                         return $expanded;
                     })() : ($val ?? ''),
@@ -622,7 +623,7 @@ final readonly class WordExpander
             if ($opPos !== false && $opPos > 0) {
                 $varName = substr($content, 0, $opPos);
                 $pattern = substr($content, $opPos + strlen($op));
-                $val = $this->state->getVar($varName) ?? '';
+                $val = $this->interpreterState->getVar($varName) ?? '';
 
                 $greedy = strlen($op) === 2;
                 $side = ($op[0] === '#') ? 'prefix' : 'suffix';
@@ -657,7 +658,7 @@ final readonly class WordExpander
                     return implode(' ', $slice);
                 }
 
-                $val = $this->state->getVar($varName) ?? '';
+                $val = $this->interpreterState->getVar($varName) ?? '';
                 $parts = explode(':', $rest, 2);
                 $offset = (int) $parts[0];
                 $length = isset($parts[1]) ? (int) $parts[1] : null;
@@ -696,7 +697,7 @@ final readonly class WordExpander
             $parts = explode('/', $rest, 2);
             $pattern = $parts[0];
             $replacement = $parts[1] ?? '';
-            $val = $this->state->getVar($varName) ?? '';
+            $val = $this->interpreterState->getVar($varName) ?? '';
 
             return $this->applyPatternReplacement($val, $pattern, $replacement, $all);
         }
@@ -710,28 +711,28 @@ final readonly class WordExpander
 
             if ($lastTwo === '^^') {
                 $varName = substr($content, 0, -2);
-                $val = $this->state->getVar($varName) ?? '';
+                $val = $this->interpreterState->getVar($varName) ?? '';
 
                 return mb_strtoupper($val);
             }
 
             if ($lastTwo === ',,') {
                 $varName = substr($content, 0, -2);
-                $val = $this->state->getVar($varName) ?? '';
+                $val = $this->interpreterState->getVar($varName) ?? '';
 
                 return mb_strtolower($val);
             }
 
             if ($lastOne === '^') {
                 $varName = substr($content, 0, -1);
-                $val = $this->state->getVar($varName) ?? '';
+                $val = $this->interpreterState->getVar($varName) ?? '';
 
                 return $val !== '' ? mb_strtoupper(mb_substr($val, 0, 1)).mb_substr($val, 1) : '';
             }
 
             if ($lastOne === ',') {
                 $varName = substr($content, 0, -1);
-                $val = $this->state->getVar($varName) ?? '';
+                $val = $this->interpreterState->getVar($varName) ?? '';
 
                 return $val !== '' ? mb_strtolower(mb_substr($val, 0, 1)).mb_substr($val, 1) : '';
             }
@@ -744,6 +745,7 @@ final readonly class WordExpander
             if ($bracketPos === false) {
                 return $this->getBoundValue($content);
             }
+
             $arrayName = substr($content, 0, $bracketPos);
             $subscript = substr($content, $bracketPos + 1, -1);
 
@@ -758,17 +760,17 @@ final readonly class WordExpander
         return $this->getBoundValue($content);
     }
 
-    private function expandParameter(ParameterExpansionPart $part): string
+    private function expandParameter(ParameterExpansionPart $parameterExpansionPart): string
     {
-        $val = $this->state->getVar($part->parameter)
-            ?? $this->state->getSpecialVar($part->parameter)
+        $val = $this->interpreterState->getVar($parameterExpansionPart->parameter)
+            ?? $this->interpreterState->getSpecialVar($parameterExpansionPart->parameter)
             ?? '';
 
-        if (! $part->operation instanceof \BashBox\Ast\ParameterOps\ParameterOperation) {
+        if (! $parameterExpansionPart->operation instanceof \BashBox\Ast\ParameterOps\ParameterOperation) {
             return $val;
         }
 
-        $op = $part->operation;
+        $op = $parameterExpansionPart->operation;
 
         if ($op instanceof LengthOp) {
             return (string) strlen($val);
@@ -785,7 +787,7 @@ final readonly class WordExpander
 
             if ($shouldApply) {
                 $expanded = $this->expand($op->word);
-                $this->state->setVar($part->parameter, $expanded);
+                $this->interpreterState->setVar($parameterExpansionPart->parameter, $expanded);
 
                 return $expanded;
             }
@@ -805,7 +807,7 @@ final readonly class WordExpander
             if ($shouldApply) {
                 $msg = $op->word instanceof \BashBox\Ast\WordNode ? $this->expand($op->word) : 'parameter null or not set';
 
-                throw new \BashBox\Exceptions\BashException(sprintf('bash: %s: %s', $part->parameter, $msg));
+                throw new \BashBox\Exceptions\BashException(sprintf('bash: %s: %s', $parameterExpansionPart->parameter, $msg));
             }
 
             return $val;
@@ -859,11 +861,11 @@ final readonly class WordExpander
     /**
      * @return list<string>
      */
-    private function expandBrace(BraceExpansionPart $part): array
+    private function expandBrace(BraceExpansionPart $braceExpansionPart): array
     {
         $results = [];
 
-        foreach ($part->items as $item) {
+        foreach ($braceExpansionPart->items as $item) {
             if ($item['type'] === 'Word' && isset($item['word'])) {
                 $results[] = $this->expand($item['word']);
             } elseif ($item['type'] === 'Range') {
@@ -979,7 +981,7 @@ final readonly class WordExpander
         $isAbsolute = str_starts_with($pattern, '/');
         $resolved = $isAbsolute
             ? $pattern
-            : $this->interpreter->resolvePath($this->state->cwd, $pattern);
+            : $this->interpreter->resolvePath($this->interpreterState->cwd, $pattern);
 
         $baseDir = dirname($resolved);
         $basenamePattern = basename($resolved);
@@ -1017,7 +1019,7 @@ final readonly class WordExpander
 
     private function getBoundValue(string $name): string
     {
-        $value = $this->state->getVar($name) ?? $this->state->getSpecialVar($name);
+        $value = $this->interpreterState->getVar($name) ?? $this->interpreterState->getSpecialVar($name);
 
         if ($value === null) {
             $this->assertBound($name);
@@ -1031,7 +1033,7 @@ final readonly class WordExpander
     private function getArrayElement(string $arrayName, string $subscript): string
     {
         $key = $this->normalizeArrayKey($subscript);
-        $array = $this->state->arrays[$arrayName] ?? null;
+        $array = $this->interpreterState->arrays[$arrayName] ?? null;
 
         if ($array === null || ! array_key_exists($key, $array)) {
             $this->assertBound(sprintf('%s[%s]', $arrayName, $subscript));
@@ -1039,7 +1041,7 @@ final readonly class WordExpander
             return '';
         }
 
-        return (string) $array[$key];
+        return $array[$key];
     }
 
     /**
@@ -1063,7 +1065,7 @@ final readonly class WordExpander
      */
     private function getOrderedArrayEntries(string $arrayName): array
     {
-        $array = $this->state->arrays[$arrayName] ?? [];
+        $array = $this->interpreterState->arrays[$arrayName] ?? [];
 
         if ($array === []) {
             return [];
@@ -1090,7 +1092,7 @@ final readonly class WordExpander
 
     private function assertBound(string $name): void
     {
-        if ($this->state->shellOpts['nounset'] ?? false) {
+        if ($this->interpreterState->shellOpts['nounset'] ?? false) {
             throw new UnboundVariableException($name);
         }
     }

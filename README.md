@@ -207,6 +207,35 @@ $mount->mount('/data', new ReadWriteFs('/real/data'));
 $bash = new Bash(new BashOptions(fs: $mount));
 ```
 
+All backends implement the same `FileSystemInterface`, including:
+
+- File reads, writes, appends, copies, moves, and deletes
+- Directory creation and directory listing with file-type metadata
+- `stat` / `lstat` metadata via `FsStat`
+- `chmod`, `utimes`, hard links, symbolic links, `readlink`, and `realpath`
+
+Backend behavior:
+
+- `InMemoryFs` is fully virtual and never touches disk
+- `OverlayFs` reads from a real directory and keeps writes in an in-memory copy-on-write layer
+- `ReadWriteFs` reads and writes directly to disk inside the configured root
+- `MountableFs` combines multiple backends under different mount points and supports cross-mount copies
+
+Example:
+
+```php
+$bash = new Bash(new BashOptions(
+    fs: new ReadWriteFs('/path/to/sandbox'),
+));
+
+$bash->exec('echo "#!/bin/bash" > /script.sh');
+$bash->getFilesystem()->chmod('/script.sh', 0755);
+
+$stat = $bash->getFilesystem()->stat('/script.sh');
+$stat->mode;  // 0755
+$stat->size;  // file size in bytes
+```
+
 ### Network Access
 
 Network is **off by default**. Enable it by passing a `NetworkConfig`:
@@ -222,6 +251,7 @@ $bash = new Bash(new BashOptions(
         allowedMethods: ['GET', 'POST'],
         denyPrivateRanges: true,  // SSRF protection
         maxResponseSize: 5 * 1024 * 1024, // 5MB
+        maxRedirects: 10,
         timeout: 10,
     ),
 ));
@@ -275,8 +305,8 @@ BashBox is built for untrusted input:
 - No `proc_open`, `exec`, `shell_exec`, `system`, or `passthru` — anywhere
 - All filesystem access goes through `FileSystemInterface`
 - Path traversal and null-byte injection are blocked
-- Symlinks denied by default in `OverlayFs`
-- Network off by default, with SSRF protection when enabled
+- `OverlayFs` denies symlinks by default when reading from real directories
+- Network is off by default; when enabled, every request and redirect target goes through URL prefix checks, method allow-lists, SSRF protection, response-size caps, and timeouts
 - Every execution has gas counters for loops, commands, output, and recursion
 
 ## Contributing

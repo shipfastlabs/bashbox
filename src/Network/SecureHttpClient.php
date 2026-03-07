@@ -9,29 +9,29 @@ use Amp\Http\Client\HttpClient;
 use Amp\Http\Client\HttpClientBuilder;
 use Amp\Http\Client\Interceptor\SetRequestTimeout;
 use Amp\Http\Client\Request;
-use BashBox\Network\Exceptions\NetworkAccessDeniedException;
 use BashBox\Network\Exceptions\ResponseTooLargeException;
 
-final class SecureHttpClient
+final readonly class SecureHttpClient
 {
-    private readonly AllowList $allowList;
+    private AllowList $allowList;
 
-    private readonly HttpClient $client;
+    private HttpClient $httpClient;
 
     public function __construct(
-        private readonly NetworkConfig $config = new NetworkConfig,
+        private NetworkConfig $networkConfig = new NetworkConfig,
     ) {
-        $this->allowList = new AllowList($this->config);
+        $this->allowList = new AllowList($this->networkConfig);
 
-        $timeout = new SetRequestTimeout(
-            tcpConnectTimeout: min(10, $this->config->timeout),
-            tlsHandshakeTimeout: min(10, $this->config->timeout),
-            transferTimeout: $this->config->timeout,
+        $setRequestTimeout = new SetRequestTimeout(
+            tcpConnectTimeout: min(10, $this->networkConfig->timeout),
+            tlsHandshakeTimeout: min(10, $this->networkConfig->timeout),
+            transferTimeout: $this->networkConfig->timeout,
         );
 
-        $this->client = (new HttpClientBuilder)
-            ->intercept($timeout)
-            ->followRedirects($this->config->maxRedirects)
+        $this->httpClient = (new HttpClientBuilder)
+            ->intercept($setRequestTimeout)
+            ->followRedirects(0)
+            ->intercept(new ValidatedRedirects($this->allowList, $this->networkConfig->maxRedirects))
             ->build();
     }
 
@@ -46,8 +46,8 @@ final class SecureHttpClient
         /** @var non-empty-string&uppercase-string $upperMethod */
         $upperMethod = strtoupper($method);
         $request = new Request($url, $upperMethod);
-        $request->setBodySizeLimit($this->config->maxResponseSize);
-        $request->setTransferTimeout($this->config->timeout);
+        $request->setBodySizeLimit($this->networkConfig->maxResponseSize);
+        $request->setTransferTimeout($this->networkConfig->timeout);
 
         foreach ($headers as $name => $value) {
             /** @var non-empty-string $name */
@@ -58,37 +58,21 @@ final class SecureHttpClient
             $request->setBody($body);
         }
 
-        $response = $this->client->request($request);
-
-        // Validate the effective URI after redirects (SSRF check)
-        $effectiveUri = (string) $response->getRequest()->getUri();
-
-        if ($effectiveUri !== $url) {
-            try {
-                $this->allowList->validateRequest(strtoupper($method), $effectiveUri);
-            } catch (NetworkAccessDeniedException $e) {
-                throw new NetworkAccessDeniedException(sprintf(
-                    'Redirect to denied URL: %s (original: %s). %s',
-                    $effectiveUri,
-                    $url,
-                    $e->getMessage(),
-                ));
-            }
-        }
+        $response = $this->httpClient->request($request);
 
         try {
-            $responseBody = $response->getBody()->buffer(null, $this->config->maxResponseSize);
+            $responseBody = $response->getBody()->buffer(null, $this->networkConfig->maxResponseSize);
         } catch (BufferException) {
             throw new ResponseTooLargeException(sprintf(
                 'Response exceeded maximum size of %d bytes',
-                $this->config->maxResponseSize,
+                $this->networkConfig->maxResponseSize,
             ));
         }
 
         $responseHeaders = [];
 
-        foreach ($response->getHeaders() as $name => $values) {
-            $responseHeaders[strtolower($name)] = implode(', ', $values);
+        foreach ($response->getHeaders() as $name => $header) {
+            $responseHeaders[strtolower((string) $name)] = implode(', ', $header);
         }
 
         return [

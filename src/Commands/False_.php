@@ -13,7 +13,7 @@ final class False_ extends AbstractCommand
         return 'false';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         return $this->failure();
     }

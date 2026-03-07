@@ -13,7 +13,7 @@ final class Seq extends AbstractCommand
         return 'seq';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         if ($args === []) {
             return $this->failure("seq: missing operand\n");

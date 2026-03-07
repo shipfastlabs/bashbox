@@ -13,7 +13,7 @@ final class Xargs extends AbstractCommand
         return 'xargs';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'I' => '',
@@ -22,7 +22,7 @@ final class Xargs extends AbstractCommand
         $flags = $parsed['flags'];
         $remaining = $parsed['args'];
 
-        $stdin = $ctx->stdin;
+        $stdin = $commandContext->stdin;
 
         $replaceStr = (string) $flags['I'];
 
@@ -47,16 +47,16 @@ final class Xargs extends AbstractCommand
             // -I mode: run the command once per line, replacing the placeholder
             $lineItems = array_filter(explode("\n", $stdin), fn (string $s): bool => trim($s) !== '');
 
-            foreach ($lineItems as $item) {
-                $item = trim($item);
+            foreach ($lineItems as $lineItem) {
+                $lineItem = trim($lineItem);
                 $cmdParts = [];
 
                 foreach ($remaining as $part) {
-                    $cmdParts[] = str_replace($replaceStr, $item, $part);
+                    $cmdParts[] = str_replace($replaceStr, $lineItem, $part);
                 }
 
                 $cmdLine = implode(' ', array_map($this->shellQuote(...), $cmdParts));
-                $result = ($ctx->exec)($cmdLine);
+                $result = ($commandContext->exec)($cmdLine);
                 $output .= $result->stdout;
                 $stderr .= $result->stderr;
 
@@ -68,7 +68,7 @@ final class Xargs extends AbstractCommand
             // Default mode: pass all items as arguments to a single command invocation
             $cmdParts = array_merge($remaining, $items);
             $cmdLine = implode(' ', array_map($this->shellQuote(...), $cmdParts));
-            $result = ($ctx->exec)($cmdLine);
+            $result = ($commandContext->exec)($cmdLine);
             $output .= $result->stdout;
             $stderr .= $result->stderr;
             $exitCode = $result->exitCode;

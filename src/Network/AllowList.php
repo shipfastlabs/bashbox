@@ -9,7 +9,7 @@ use BashBox\Network\Exceptions\NetworkAccessDeniedException;
 final readonly class AllowList
 {
     public function __construct(
-        private NetworkConfig $config,
+        private NetworkConfig $networkConfig,
     ) {}
 
     public function validateRequest(string $method, string $url): void
@@ -17,7 +17,7 @@ final readonly class AllowList
         $this->validateMethod($method);
         $this->validateUrl($url);
 
-        if ($this->config->denyPrivateRanges) {
+        if ($this->networkConfig->denyPrivateRanges) {
             $this->validateNotPrivate($url);
         }
     }
@@ -26,8 +26,8 @@ final readonly class AllowList
     {
         $upper = strtoupper($method);
 
-        foreach ($this->config->allowedMethods as $allowed) {
-            if (strtoupper($allowed) === $upper) {
+        foreach ($this->networkConfig->allowedMethods as $allowed) {
+            if (strtoupper((string) $allowed) === $upper) {
                 return;
             }
         }
@@ -35,18 +35,18 @@ final readonly class AllowList
         throw new NetworkAccessDeniedException(sprintf(
             'HTTP method "%s" is not allowed. Allowed methods: %s',
             $method,
-            implode(', ', $this->config->allowedMethods),
+            implode(', ', $this->networkConfig->allowedMethods),
         ));
     }
 
     private function validateUrl(string $url): void
     {
-        if ($this->config->allowedUrlPrefixes === []) {
+        if ($this->networkConfig->allowedUrlPrefixes === []) {
             return;
         }
 
-        foreach ($this->config->allowedUrlPrefixes as $prefix) {
-            if (str_starts_with($url, $prefix)) {
+        foreach ($this->networkConfig->allowedUrlPrefixes as $prefix) {
+            if (str_starts_with($url, (string) $prefix)) {
                 return;
             }
         }
@@ -97,9 +97,7 @@ final readonly class AllowList
     {
         $lower = strtolower($host);
 
-        return $lower === 'localhost'
-            || $lower === 'ip6-localhost'
-            || $lower === 'ip6-loopback'
+        return in_array($lower, ['localhost', 'ip6-localhost', 'ip6-loopback'], true)
             || str_ends_with($lower, '.local')
             || str_ends_with($lower, '.internal');
     }

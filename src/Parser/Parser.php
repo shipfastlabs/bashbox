@@ -92,15 +92,15 @@ final class Parser
         return in_array($current, $types, true);
     }
 
-    private function expect(TokenType $type, ?string $message = null): Token
+    private function expect(TokenType $tokenType, ?string $message = null): Token
     {
-        if ($this->check($type)) {
+        if ($this->check($tokenType)) {
             return $this->advance();
         }
 
         $token = $this->current();
 
-        throw new ParseException($message ?? sprintf('Expected %s, got %s', $type->value, $token->type->value));
+        throw new ParseException($message ?? sprintf('Expected %s, got %s', $tokenType->value, $token->type->value));
     }
 
     private function error(string $message): never
@@ -142,16 +142,16 @@ final class Parser
 
     private function processHeredocs(): void
     {
-        foreach ($this->pendingHeredocs as $heredoc) {
+        foreach ($this->pendingHeredocs as $pendingHeredoc) {
             if ($this->check(TokenType::HEREDOC_CONTENT)) {
                 $content = $this->advance();
                 $contentWord = new WordNode([new LiteralPart($content->value)]);
 
-                $heredoc['redirect']->target = new HereDocNode(
-                    delimiter: $heredoc['delimiter'],
+                $pendingHeredoc['redirect']->target = new HereDocNode(
+                    delimiter: $pendingHeredoc['delimiter'],
                     content: $contentWord,
-                    stripTabs: $heredoc['stripTabs'],
-                    quoted: $heredoc['quoted'],
+                    stripTabs: $pendingHeredoc['stripTabs'],
+                    quoted: $pendingHeredoc['quoted'],
                 );
             }
         }
@@ -515,9 +515,9 @@ final class Parser
 
     private function isRedirectionAfterNumber(): bool
     {
-        $next = $this->peek(1);
+        $token = $this->peek(1);
 
-        return in_array($next->type, [
+        return in_array($token->type, [
             TokenType::LESS,
             TokenType::GREAT,
             TokenType::DGREAT,
@@ -635,20 +635,20 @@ final class Parser
             $delimiter = trim($delimiter, "'\"");
 
             $target = new WordNode([new LiteralPart('')]);
-            $redirect = new RedirectionNode(
+            $redirectionNode = new RedirectionNode(
                 operator: $operator,
                 target: $target,
                 fd: $fd ?? 0,
             );
 
             $this->pendingHeredocs[] = [
-                'redirect' => $redirect,
+                'redirect' => $redirectionNode,
                 'delimiter' => $delimiter,
                 'stripTabs' => $stripTabs,
                 'quoted' => $quoted,
             ];
 
-            return $redirect;
+            return $redirectionNode;
         }
 
         // Here-string: <<<
@@ -865,7 +865,7 @@ final class Parser
         $this->expect(TokenType::CASE);
         $line = $this->current()->line;
 
-        $word = $this->parseWord();
+        $wordNode = $this->parseWord();
         $this->skipNewlines();
         $this->expect(TokenType::IN);
         $this->skipNewlines();
@@ -935,7 +935,7 @@ final class Parser
         $redirections = $this->parseTrailingRedirections();
 
         return new CaseNode(
-            word: $word,
+            word: $wordNode,
             items: $items,
             redirections: $redirections,
             line: $line,
@@ -991,12 +991,12 @@ final class Parser
 
         $this->expect(TokenType::DPAREN_END);
 
-        $expression = $this->tokensToArithExpr($exprTokens);
+        $arithmeticExpressionNode = $this->tokensToArithExpr($exprTokens);
 
         $redirections = $this->parseTrailingRedirections();
 
         return new ArithmeticCommandNode(
-            expression: $expression,
+            expression: $arithmeticExpressionNode,
             redirections: $redirections,
             line: $line,
         );
@@ -1007,14 +1007,14 @@ final class Parser
         $this->expect(TokenType::DBRACK_START);
         $line = $this->current()->line;
 
-        $expression = $this->parseConditionalExpression();
+        $conditionalExpressionNode = $this->parseConditionalExpression();
 
         $this->expect(TokenType::DBRACK_END);
 
         $redirections = $this->parseTrailingRedirections();
 
         return new ConditionalCommandNode(
-            expression: $expression,
+            expression: $conditionalExpressionNode,
             redirections: $redirections,
             line: $line,
         );
@@ -1177,17 +1177,17 @@ final class Parser
         }
 
         // Read left operand
-        $left = $this->parseWord();
+        $wordNode = $this->parseWord();
 
         // Check for binary operator
         if ($this->isCondBinaryOperator()) {
             $op = $this->advance()->value;
             $right = $this->parseWord();
 
-            return new CondBinaryNode($op, $left, $right);
+            return new CondBinaryNode($op, $wordNode, $right);
         }
 
-        return new CondWordNode($left);
+        return new CondWordNode($wordNode);
     }
 
     private function isCondUnaryOperator(): bool
@@ -1221,20 +1221,20 @@ final class Parser
      */
     private function tokensToArithExpr(array $tokens): ArithmeticExpressionNode
     {
-        $text = implode('', array_map(fn (Token $t): string => $t->value, $tokens));
+        $text = implode('', array_map(fn (Token $token): string => $token->value, $tokens));
 
-        $expr = $this->parseArithExpression($text);
+        $arithExpr = $this->parseArithExpression($text);
 
         return new ArithmeticExpressionNode(
-            expression: $expr,
+            expression: $arithExpr,
             originalText: $text,
         );
     }
 
     private function parseArithExpression(string $text): \BashBox\Ast\Arithmetic\ArithExpr
     {
-        $parser = new ArithmeticParser($text);
+        $arithmeticParser = new ArithmeticParser($text);
 
-        return $parser->parse();
+        return $arithmeticParser->parse();
     }
 }

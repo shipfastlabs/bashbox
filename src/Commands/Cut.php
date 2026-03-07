@@ -14,7 +14,7 @@ final class Cut extends AbstractCommand
         return 'cut';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'd' => '',
@@ -40,19 +40,19 @@ final class Cut extends AbstractCommand
         if ($files !== []) {
             foreach ($files as $file) {
                 if ($file === '-') {
-                    $input .= $ctx->stdin;
+                    $input .= $commandContext->stdin;
                 } else {
-                    $path = $this->resolvePath($ctx, $file);
+                    $path = $this->resolvePath($commandContext, $file);
 
                     try {
-                        $input .= $ctx->fs->readFile($path);
+                        $input .= $commandContext->fs->readFile($path);
                     } catch (RuntimeException) {
                         return $this->failure("cut: {$file}: No such file or directory\n");
                     }
                 }
             }
         } else {
-            $input = $ctx->stdin;
+            $input = $commandContext->stdin;
         }
 
         if ($input === '') {
@@ -70,9 +70,9 @@ final class Cut extends AbstractCommand
                 $chars = mb_str_split($line);
                 $selected = [];
 
-                foreach ($positions as $pos) {
-                    if ($pos >= 1 && $pos <= count($chars)) {
-                        $selected[] = $chars[$pos - 1];
+                foreach ($positions as $position) {
+                    if ($position >= 1 && $position <= count($chars)) {
+                        $selected[] = $chars[$position - 1];
                     }
                 }
 
@@ -92,9 +92,9 @@ final class Cut extends AbstractCommand
                 $fields = explode($delimiter, $line);
                 $selected = [];
 
-                foreach ($fieldPositions as $pos) {
-                    if ($pos >= 1 && $pos <= count($fields)) {
-                        $selected[] = $fields[$pos - 1];
+                foreach ($fieldPositions as $fieldPosition) {
+                    if ($fieldPosition >= 1 && $fieldPosition <= count($fields)) {
+                        $selected[] = $fields[$fieldPosition - 1];
                     }
                 }
 

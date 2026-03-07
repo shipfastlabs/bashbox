@@ -13,7 +13,7 @@ final class Base64_ extends AbstractCommand
         return 'base64';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'd' => false,
@@ -22,7 +22,7 @@ final class Base64_ extends AbstractCommand
         ]);
 
         $decode = $parsed['flags']['d'] || $parsed['flags']['D'] || $parsed['flags']['decode'];
-        $input = $ctx->stdin;
+        $input = $commandContext->stdin;
 
         if ($decode) {
             $decoded = base64_decode($input, true);

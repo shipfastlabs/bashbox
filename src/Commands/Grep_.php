@@ -14,7 +14,7 @@ final class Grep_ extends AbstractCommand
         return 'grep';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'i' => false,
@@ -48,7 +48,7 @@ final class Grep_ extends AbstractCommand
         $readingStdin = $files === [];
 
         if ($readingStdin && ! $flags['r']) {
-            return $this->grepContent($ctx->stdin, '-', $pattern, $flags, false);
+            return $this->grepContent($commandContext->stdin, '-', $pattern, $flags, false);
         }
 
         if ($flags['r'] && $files === []) {
@@ -58,10 +58,10 @@ final class Grep_ extends AbstractCommand
         $allFiles = [];
 
         foreach ($files as $file) {
-            $path = $this->resolvePath($ctx, $file);
+            $path = $this->resolvePath($commandContext, $file);
 
             if ($flags['r']) {
-                $this->collectFiles($ctx, $path, $allFiles);
+                $this->collectFiles($commandContext, $path, $allFiles);
             } else {
                 $allFiles[] = ['path' => $path, 'label' => $file];
             }
@@ -71,18 +71,18 @@ final class Grep_ extends AbstractCommand
         $output = '';
         $matchFound = false;
 
-        foreach ($allFiles as $entry) {
+        foreach ($allFiles as $allFile) {
             try {
-                $content = $ctx->fs->readFile($entry['path']);
+                $content = $commandContext->fs->readFile($allFile['path']);
             } catch (RuntimeException) {
                 if (! $flags['q']) {
-                    $output .= "grep: {$entry['label']}: No such file or directory\n";
+                    $output .= "grep: {$allFile['label']}: No such file or directory\n";
                 }
 
                 continue;
             }
 
-            $result = $this->grepContent($content, $entry['label'], $pattern, $flags, $multiFile);
+            $result = $this->grepContent($content, $allFile['label'], $pattern, $flags, $multiFile);
 
             if ($result->exitCode === 0) {
                 $matchFound = true;
@@ -156,7 +156,7 @@ final class Grep_ extends AbstractCommand
 
         $output = '';
 
-        foreach ($matchedLines as $m) {
+        foreach ($matchedLines as $matchedLine) {
             $parts = [];
 
             if ($multiFile) {
@@ -164,13 +164,13 @@ final class Grep_ extends AbstractCommand
             }
 
             if ($flags['n']) {
-                $parts[] = (string) $m['num'];
+                $parts[] = (string) $matchedLine['num'];
             }
 
             if ($parts !== []) {
-                $output .= implode(':', $parts).':'.$m['text']."\n";
+                $output .= implode(':', $parts).':'.$matchedLine['text']."\n";
             } else {
-                $output .= $m['text']."\n";
+                $output .= $matchedLine['text']."\n";
             }
         }
 
@@ -200,14 +200,14 @@ final class Grep_ extends AbstractCommand
     /**
      * @param  list<array{path: string, label: string}>  $result
      */
-    private function collectFiles(CommandContext $ctx, string $dirPath, array &$result): void
+    private function collectFiles(CommandContext $commandContext, string $dirPath, array &$result): void
     {
         try {
-            $entries = $ctx->fs->readdirWithFileTypes($dirPath);
+            $entries = $commandContext->fs->readdirWithFileTypes($dirPath);
         } catch (RuntimeException) {
             // If it's a file, not a directory
             try {
-                $stat = $ctx->fs->stat($dirPath);
+                $stat = $commandContext->fs->stat($dirPath);
 
                 if ($stat->isFile) {
                     $result[] = ['path' => $dirPath, 'label' => $dirPath];
@@ -225,7 +225,7 @@ final class Grep_ extends AbstractCommand
             if ($entry->isFile) {
                 $result[] = ['path' => $childPath, 'label' => $childPath];
             } elseif ($entry->isDirectory) {
-                $this->collectFiles($ctx, $childPath, $result);
+                $this->collectFiles($commandContext, $childPath, $result);
             }
         }
     }

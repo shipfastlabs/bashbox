@@ -14,7 +14,7 @@ final class Cp extends AbstractCommand
         return 'cp';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'r' => false,
@@ -29,12 +29,12 @@ final class Cp extends AbstractCommand
         }
 
         $dest = array_pop($operands);
-        $destPath = $this->resolvePath($ctx, $dest);
+        $destPath = $this->resolvePath($commandContext, $dest);
 
         $destIsDir = false;
 
         try {
-            $destStat = $ctx->fs->stat($destPath);
+            $destStat = $commandContext->fs->stat($destPath);
             $destIsDir = $destStat->isDirectory;
         } catch (RuntimeException) {
             // destination does not exist
@@ -47,18 +47,18 @@ final class Cp extends AbstractCommand
         $stderr = '';
         $exitCode = 0;
 
-        foreach ($operands as $src) {
-            $srcPath = $this->resolvePath($ctx, $src);
+        foreach ($operands as $operand) {
+            $srcPath = $this->resolvePath($commandContext, $operand);
 
             $targetPath = $destPath;
 
             if ($destIsDir) {
-                $basename = basename($src);
+                $basename = basename($operand);
                 $targetPath = $destPath === '/' ? '/'.$basename : sprintf('%s/%s', $destPath, $basename);
             }
 
             try {
-                $ctx->fs->cp($srcPath, $targetPath, ['recursive' => $recursive]);
+                $commandContext->fs->cp($srcPath, $targetPath, ['recursive' => $recursive]);
             } catch (RuntimeException $e) {
                 $stderr .= sprintf('cp: %s%s', $e->getMessage(), PHP_EOL);
                 $exitCode = 1;

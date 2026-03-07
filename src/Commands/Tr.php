@@ -13,7 +13,7 @@ final class Tr extends AbstractCommand
         return 'tr';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'd' => false,
@@ -23,7 +23,7 @@ final class Tr extends AbstractCommand
         $flags = $parsed['flags'];
         $remaining = $parsed['args'];
 
-        $input = $ctx->stdin;
+        $input = $commandContext->stdin;
 
         if ($flags['d']) {
             // Delete mode: tr -d SET1

@@ -14,7 +14,7 @@ final class Find_ extends AbstractCommand
         return 'find';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         // Parse find arguments: find [path...] [expression]
         $paths = [];
@@ -49,26 +49,26 @@ final class Find_ extends AbstractCommand
 
         $output = '';
 
-        foreach ($paths as $searchPath) {
-            $resolvedPath = $this->resolvePath($ctx, $searchPath);
+        foreach ($paths as $path) {
+            $resolvedPath = $this->resolvePath($commandContext, $path);
 
             try {
-                $stat = $ctx->fs->stat($resolvedPath);
+                $stat = $commandContext->fs->stat($resolvedPath);
             } catch (RuntimeException) {
-                return $this->failure("find: '{$searchPath}': No such file or directory\n");
+                return $this->failure("find: '{$path}': No such file or directory\n");
             }
 
             if ($stat->isFile) {
-                $name = basename($searchPath);
+                $name = basename($path);
 
                 if ($this->matchesFilters($name, true, false, $namePattern, $typeFilter)) {
-                    $output .= $searchPath."\n";
+                    $output .= $path."\n";
                 }
             } else {
                 $this->walkDirectory(
-                    $ctx,
+                    $commandContext,
                     $resolvedPath,
-                    $searchPath,
+                    $path,
                     $namePattern,
                     $typeFilter,
                     $maxDepth,
@@ -82,7 +82,7 @@ final class Find_ extends AbstractCommand
     }
 
     private function walkDirectory(
-        CommandContext $ctx,
+        CommandContext $commandContext,
         string $absolutePath,
         string $displayPath,
         string $namePattern,
@@ -107,13 +107,13 @@ final class Find_ extends AbstractCommand
         }
 
         try {
-            $entries = $ctx->fs->readdirWithFileTypes($absolutePath);
+            $entries = $commandContext->fs->readdirWithFileTypes($absolutePath);
         } catch (RuntimeException) {
             return;
         }
 
         // Sort entries for consistent output
-        usort($entries, fn ($a, $b): int => strcmp((string) $a->name, (string) $b->name));
+        usort($entries, fn ($a, $b): int => strcmp($a->name, $b->name));
 
         foreach ($entries as $entry) {
             $childAbsolute = $absolutePath.'/'.$entry->name;
@@ -121,7 +121,7 @@ final class Find_ extends AbstractCommand
 
             if ($entry->isDirectory) {
                 $this->walkDirectory(
-                    $ctx,
+                    $commandContext,
                     $childAbsolute,
                     $childDisplay,
                     $namePattern,

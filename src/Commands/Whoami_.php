@@ -13,9 +13,9 @@ final class Whoami_ extends AbstractCommand
         return 'whoami';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $user = $ctx->env['USER'] ?? 'root';
+        $user = $commandContext->env['USER'] ?? 'root';
 
         return $this->success($user."\n");
     }

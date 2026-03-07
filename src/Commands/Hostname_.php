@@ -13,9 +13,9 @@ final class Hostname_ extends AbstractCommand
         return 'hostname';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $hostname = $ctx->env['HOSTNAME'] ?? 'localhost';
+        $hostname = $commandContext->env['HOSTNAME'] ?? 'localhost';
 
         return $this->success($hostname."\n");
     }

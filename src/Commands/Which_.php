@@ -13,7 +13,7 @@ final class Which_ extends AbstractCommand
         return 'which';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         if ($args === []) {
             return $this->failure();
@@ -21,8 +21,8 @@ final class Which_ extends AbstractCommand
 
         $output = '';
 
-        foreach ($args as $name) {
-            $output .= sprintf('/usr/bin/%s%s', $name, PHP_EOL);
+        foreach ($args as $arg) {
+            $output .= sprintf('/usr/bin/%s%s', $arg, PHP_EOL);
         }
 
         return $this->success($output);

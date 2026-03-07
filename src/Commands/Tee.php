@@ -14,24 +14,24 @@ final class Tee extends AbstractCommand
         return 'tee';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, ['a' => false]);
         $append = (bool) $parsed['flags']['a'];
         $files = $parsed['args'];
 
-        $content = $ctx->stdin;
+        $content = $commandContext->stdin;
         $stderr = '';
         $exitCode = 0;
 
         foreach ($files as $file) {
-            $path = $this->resolvePath($ctx, $file);
+            $path = $this->resolvePath($commandContext, $file);
 
             try {
                 if ($append) {
-                    $ctx->fs->appendFile($path, $content);
+                    $commandContext->fs->appendFile($path, $content);
                 } else {
-                    $ctx->fs->writeFile($path, $content);
+                    $commandContext->fs->writeFile($path, $content);
                 }
             } catch (RuntimeException) {
                 $stderr .= "tee: {$file}: No such file or directory\n";

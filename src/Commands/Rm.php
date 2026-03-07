@@ -14,7 +14,7 @@ final class Rm extends AbstractCommand
         return 'rm';
     }
 
-    public function execute(array $args, CommandContext $ctx): ExecResult
+    public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $parsed = $this->parseFlags($args, [
             'r' => false,
@@ -38,10 +38,10 @@ final class Rm extends AbstractCommand
         $exitCode = 0;
 
         foreach ($targets as $target) {
-            $path = $this->resolvePath($ctx, $target);
+            $path = $this->resolvePath($commandContext, $target);
 
             try {
-                $ctx->fs->rm($path, ['recursive' => $recursive, 'force' => $force]);
+                $commandContext->fs->rm($path, ['recursive' => $recursive, 'force' => $force]);
             } catch (RuntimeException $e) {
                 if (! $force) {
                     $stderr .= sprintf("rm: cannot remove '%s': %s%s", $target, $e->getMessage(), PHP_EOL);
