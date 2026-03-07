@@ -9,9 +9,11 @@ final readonly class NetworkConfig
     /**
      * @param  list<string>  $allowedUrlPrefixes  URL prefixes that are allowed (e.g., "https://api.example.com/")
      * @param  list<string>  $allowedMethods  HTTP methods allowed (e.g., ["GET", "POST"])
+     * @param  bool  $denyPrivateRanges  Whether to block private/internal IP ranges (SSRF protection)
      * @param  int  $maxResponseSize  Maximum response body size in bytes
      * @param  int  $maxRedirects  Maximum number of HTTP redirects to follow
      * @param  int  $timeout  Request timeout in seconds
+     * @param  bool  $dangerouslyAllowFullInternetAccess  Allow unrestricted internet access (DANGEROUS - use with caution)
      */
     public function __construct(
         public array $allowedUrlPrefixes = [],
@@ -20,5 +22,6 @@ final readonly class NetworkConfig
         public int $maxResponseSize = 10 * 1024 * 1024,
         public int $maxRedirects = 20,
         public int $timeout = 30,
+        public bool $dangerouslyAllowFullInternetAccess = false,
     ) {}
 }

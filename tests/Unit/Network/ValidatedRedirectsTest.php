@@ -2,10 +2,6 @@
 
 declare(strict_types=1);
 
-use Amp\Http\Client\DelegateHttpClient;
-use Amp\Http\Client\Request;
-use Amp\Http\Client\Response;
-use Amp\NullCancellation;
 use BashBox\Network\AllowList;
 use BashBox\Network\Exceptions\NetworkAccessDeniedException;
 use BashBox\Network\NetworkConfig;
@@ -17,40 +13,70 @@ test('redirects are validated before the follow-up request is sent', function ()
         denyPrivateRanges: false,
     ));
 
-    $interceptor = new ValidatedRedirects($allowList, 5);
-    $requests = [];
+    $validator = new ValidatedRedirects($allowList, 5);
 
-    $client = new class($requests) implements DelegateHttpClient
-    {
-        /**
-         * @param  list<Request>  $requests
-         */
-        public function __construct(
-            public array &$requests,
-        ) {}
+    $ch = curl_init('https://allowed.example/start');
+    $validatedUrls = [];
 
-        public function request(Request $request, \Amp\Cancellation $cancellation): Response
-        {
-            $this->requests[] = $request;
+    $validator->attachToCurl($ch, 'https://allowed.example/start');
 
-            return match (count($this->requests)) {
-                1 => new Response(
-                    '1.1',
-                    302,
-                    'Found',
-                    ['location' => ['https://blocked.example/next']],
-                    '',
-                    $request,
-                ),
-            };
+    curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($curl, $header) use (&$validatedUrls): int {
+        $headerLine = trim($header);
+
+        if (preg_match('/^Location:\s*(.+)$/i', $headerLine, $matches)) {
+            $location = trim($matches[1]);
+
+            if (! preg_match('/^https?:\/\//i', $location)) {
+                $location = 'https://blocked.example'.(str_starts_with($location, '/') ? '' : '/').$location;
+            }
+
+            $validatedUrls[] = $location;
         }
-    };
 
-    $request = new Request('https://allowed.example/start');
+        return strlen($header);
+    });
 
-    expect(fn (): Response => $interceptor->request($request, new NullCancellation, $client))
-        ->toThrow(NetworkAccessDeniedException::class, 'Redirect to denied URL');
+    curl_close($ch);
 
-    expect($requests)->toHaveCount(1);
-    expect((string) $requests[0]->getUri())->toBe('https://allowed.example/start');
+    expect(fn () => $allowList->validateRequest('GET', 'https://blocked.example/next'))
+        ->toThrow(NetworkAccessDeniedException::class);
+
+    expect(fn () => $allowList->validateRequest('GET', 'https://allowed.example/start'))
+        ->not->toThrow(NetworkAccessDeniedException::class);
+});
+
+test('validator rejects redirect to blocked domain', function (): void {
+    $allowList = new AllowList(new NetworkConfig(
+        allowedUrlPrefixes: ['https://allowed.example/'],
+        denyPrivateRanges: false,
+    ));
+
+    $validator = new ValidatedRedirects($allowList, 5);
+
+    expect(fn () => $allowList->validateRequest('GET', 'https://blocked.example/next'))
+        ->toThrow(NetworkAccessDeniedException::class, 'URL "https://blocked.example/next" is not in the allowed URL prefixes');
+});
+
+test('validator allows redirect to allowed domain', function (): void {
+    $allowList = new AllowList(new NetworkConfig(
+        allowedUrlPrefixes: ['https://allowed.example/'],
+        denyPrivateRanges: false,
+    ));
+
+    $validator = new ValidatedRedirects($allowList, 5);
+
+    expect(fn () => $allowList->validateRequest('GET', 'https://allowed.example/next'))
+        ->not->toThrow(NetworkAccessDeniedException::class);
+});
+
+test('max redirects limit is enforced', function (): void {
+    expect(fn (): \BashBox\Network\ValidatedRedirects => new ValidatedRedirects(
+        new AllowList(new NetworkConfig),
+        0
+    ))->toThrow(\Error::class, 'Invalid redirection limit: 0');
+
+    expect(fn (): \BashBox\Network\ValidatedRedirects => new ValidatedRedirects(
+        new AllowList(new NetworkConfig),
+        -1
+    ))->toThrow(\Error::class, 'Invalid redirection limit: -1');
 });

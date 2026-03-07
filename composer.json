@@ -15,12 +15,7 @@
         }
     ],
     "require": {
-        "php": "^8.4.0",
-        "amphp/amp": "^3.0",
-        "amphp/byte-stream": "^2.0",
-        "amphp/file": "^3.0",
-        "amphp/http-client": "^5.0",
-        "revolt/event-loop": "^1.0"
+        "php": "^8.4.0"
     },
     "require-dev": {
         "laravel/pint": "^1.24.0",

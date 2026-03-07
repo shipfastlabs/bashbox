@@ -342,7 +342,7 @@ final class Interpreter
 
                 foreach ($prefixAssignments as $prefixAssignment) {
                     if ($prefixAssignment['type'] === 'scalar') {
-                        $env[$prefixAssignment['name']] = $prefixAssignment['value'];
+                        $env[$prefixAssignment['name']] = $prefixAssignment['value'] ?? '';
                     }
                 }
 
@@ -1983,7 +1983,7 @@ final class Interpreter
                 'element' => sprintf(
                     '%s[%s]%s=%s',
                     $assignment['name'],
-                    (string) $assignment['subscript'],
+                    (string) ($assignment['subscript'] ?? ''),
                     $assignment['append'] ? '+' : '',
                     $assignment['value'] ?? '',
                 ),
@@ -2094,7 +2094,7 @@ final class Interpreter
 
         if ($assignment['type'] === 'element') {
             $name = $assignment['name'];
-            $subscript = $assignment['subscript'];
+            $subscript = $assignment['subscript'] ?? 0;
             $value = $assignment['value'] ?? '';
             $array = $this->interpreterState->arrays[$name] ?? [];
 
@@ -2121,6 +2121,9 @@ final class Interpreter
         return null;
     }
 
+    /**
+     * @param  array<int|string, string>  $array
+     */
     private function nextArrayIndex(array $array): int
     {
         $numericKeys = array_filter(array_keys($array), is_int(...));

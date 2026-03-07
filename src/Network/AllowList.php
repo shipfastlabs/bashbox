@@ -14,8 +14,10 @@ final readonly class AllowList
 
     public function validateRequest(string $method, string $url): void
     {
-        $this->validateMethod($method);
-        $this->validateUrl($url);
+        if (! $this->networkConfig->dangerouslyAllowFullInternetAccess) {
+            $this->validateMethod($method);
+            $this->validateUrl($url);
+        }
 
         if ($this->networkConfig->denyPrivateRanges) {
             $this->validateNotPrivate($url);
@@ -33,7 +35,7 @@ final readonly class AllowList
         }
 
         throw new NetworkAccessDeniedException(sprintf(
-            'HTTP method "%s" is not allowed. Allowed methods: %s',
+            'HTTP method "%s" is not allowed. Allowed methods: %s. Set `dangerouslyAllowFullInternetAccess: true` to allow all methods (security risk).',
             $method,
             implode(', ', $this->networkConfig->allowedMethods),
         ));
@@ -52,7 +54,7 @@ final readonly class AllowList
         }
 
         throw new NetworkAccessDeniedException(sprintf(
-            'URL "%s" is not in the allowed URL prefixes',
+            'URL "%s" is not in the allowed URL prefixes. Set `dangerouslyAllowFullInternetAccess: true` to allow all URLs (security risk).',
             $url,
         ));
     }
@@ -67,11 +69,9 @@ final readonly class AllowList
 
         $host = $parsed['host'];
 
-        // Resolve the hostname to IP addresses
         $ips = gethostbynamel($host);
 
         if ($ips === false) {
-            // If we can't resolve, check common private hostnames
             if ($this->isPrivateHostname($host)) {
                 throw new NetworkAccessDeniedException(sprintf(
                     'Access to private/internal host "%s" is denied (SSRF protection)',
