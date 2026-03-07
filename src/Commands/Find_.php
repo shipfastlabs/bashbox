@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
+use BashBox\Filesystem\DirentEntry;
 use RuntimeException;
 
 final class Find_ extends AbstractCommand
@@ -113,7 +114,7 @@ final class Find_ extends AbstractCommand
         }
 
         // Sort entries for consistent output
-        usort($entries, fn ($a, $b): int => strcmp($a->name, $b->name));
+        usort($entries, fn (DirentEntry $a, DirentEntry $b): int => strcmp($a->name, $b->name));
 
         foreach ($entries as $entry) {
             $childAbsolute = $absolutePath.'/'.$entry->name;

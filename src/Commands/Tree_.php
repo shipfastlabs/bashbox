@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
+use BashBox\Filesystem\DirentEntry;
 use RuntimeException;
 
 final class Tree_ extends AbstractCommand
@@ -70,7 +71,7 @@ final class Tree_ extends AbstractCommand
         }
 
         // Sort entries alphabetically
-        usort($entries, fn ($a, $b): int => strcmp($a->name, $b->name));
+        usort($entries, fn (DirentEntry $a, DirentEntry $b): int => strcmp($a->name, $b->name));
 
         $count = count($entries);
 

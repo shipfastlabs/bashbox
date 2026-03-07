@@ -26,10 +26,8 @@ final readonly class ValidatedRedirects
 
     /**
      * Attach redirect validation to a curl handle.
-     *
-     * @param  CurlHandle  $ch
      */
-    public function attachToCurl($ch, string $originalUrl): void
+    public function attachToCurl(CurlHandle $ch, string $originalUrl): void
     {
         $redirectCount = 0;
         $currentUrl = $originalUrl;

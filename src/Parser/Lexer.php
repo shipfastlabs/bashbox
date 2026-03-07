@@ -860,6 +860,8 @@ final class Lexer
                     $this->column = 1;
                 }
 
+                // Handle Windows CRLF line endings by removing trailing \r
+                $line = rtrim($line, "\r");
                 $trimmedLine = $stripTabs ? ltrim($line, "\t") : $line;
 
                 if ($trimmedLine === $delimiter) {
