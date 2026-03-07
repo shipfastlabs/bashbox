@@ -43,11 +43,14 @@ final class SecureHttpClient
     {
         $this->allowList->validateRequest($method, $url);
 
-        $request = new Request($url, strtoupper($method));
+        /** @var non-empty-string&uppercase-string $upperMethod */
+        $upperMethod = strtoupper($method);
+        $request = new Request($url, $upperMethod);
         $request->setBodySizeLimit($this->config->maxResponseSize);
         $request->setTransferTimeout($this->config->timeout);
 
         foreach ($headers as $name => $value) {
+            /** @var non-empty-string $name */
             $request->setHeader($name, $value);
         }
 
@@ -59,6 +62,7 @@ final class SecureHttpClient
 
         // Validate the effective URI after redirects (SSRF check)
         $effectiveUri = (string) $response->getRequest()->getUri();
+
         if ($effectiveUri !== $url) {
             try {
                 $this->allowList->validateRequest(strtoupper($method), $effectiveUri);
@@ -82,6 +86,7 @@ final class SecureHttpClient
         }
 
         $responseHeaders = [];
+
         foreach ($response->getHeaders() as $name => $values) {
             $responseHeaders[strtolower($name)] = implode(', ', $values);
         }

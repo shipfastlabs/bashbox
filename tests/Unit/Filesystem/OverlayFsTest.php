@@ -16,6 +16,7 @@ afterEach(function (): void {
             new RecursiveDirectoryIterator($this->tmpDir, RecursiveDirectoryIterator::SKIP_DOTS),
             RecursiveIteratorIterator::CHILD_FIRST,
         );
+
         foreach ($iter as $file) {
             if ($file->isDir()) {
                 rmdir($file->getPathname());
@@ -203,6 +204,7 @@ test('readdirWithFileTypes returns correct type info', function (): void {
 
     $entries = $fs->readdirWithFileTypes('/');
     $map = [];
+
     foreach ($entries as $e) {
         $map[$e->name] = $e;
     }

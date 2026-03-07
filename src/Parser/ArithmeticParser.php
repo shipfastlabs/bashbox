@@ -77,6 +77,7 @@ final class ArithmeticParser
         $condition = $this->parseOr();
 
         $this->skipWhitespace();
+
         if ($this->matchChar('?')) {
             $consequent = $this->parseAssignment();
             $this->skipWhitespace();
@@ -157,6 +158,7 @@ final class ArithmeticParser
 
         while (true) {
             $this->skipWhitespace();
+
             if ($this->matchString('==')) {
                 $right = $this->parseRelational();
                 $left = new ArithBinaryNode('==', $left, $right);
@@ -177,6 +179,7 @@ final class ArithmeticParser
 
         while (true) {
             $this->skipWhitespace();
+
             if ($this->matchString('<=')) {
                 $right = $this->parseShift();
                 $left = new ArithBinaryNode('<=', $left, $right);
@@ -205,6 +208,7 @@ final class ArithmeticParser
 
         while (true) {
             $this->skipWhitespace();
+
             if ($this->matchString('<<')) {
                 $right = $this->parseAdditive();
                 $left = new ArithBinaryNode('<<', $left, $right);
@@ -226,6 +230,7 @@ final class ArithmeticParser
         while (true) {
             $this->skipWhitespace();
             $ch = $this->peekChar();
+
             if ($ch === '+' && $this->peekCharAt(1) !== '+' && $this->peekCharAt(1) !== '=') {
                 $this->pos++;
                 $right = $this->parseMultiplicative();
@@ -249,6 +254,7 @@ final class ArithmeticParser
         while (true) {
             $this->skipWhitespace();
             $ch = $this->peekChar();
+
             if ($ch === '*' && $this->peekCharAt(1) !== '*' && $this->peekCharAt(1) !== '=') {
                 $this->pos++;
                 $right = $this->parseExponentiation();
@@ -274,6 +280,7 @@ final class ArithmeticParser
         $base = $this->parseUnary();
 
         $this->skipWhitespace();
+
         if ($this->matchString('**')) {
             $exp = $this->parseExponentiation(); // Right-associative
 
@@ -315,6 +322,7 @@ final class ArithmeticParser
 
         // Postfix ++ and --
         $this->skipWhitespace();
+
         if ($this->peekChar() === '+' && $this->peekCharAt(1) === '+') {
             $this->pos += 2;
 
@@ -358,10 +366,12 @@ final class ArithmeticParser
         // Variable with $ prefix
         if ($ch === '$') {
             $this->pos++;
+
             if ($this->pos < $this->len && $this->input[$this->pos] === '{') {
                 // ${...}
                 $this->pos++;
                 $name = '';
+
                 while ($this->pos < $this->len && $this->input[$this->pos] !== '}') {
                     $name .= $this->input[$this->pos];
                     $this->pos++;
@@ -399,8 +409,10 @@ final class ArithmeticParser
         // Handle hex, octal, binary
         if ($this->input[$this->pos] === '0' && $this->pos + 1 < $this->len) {
             $next = $this->input[$this->pos + 1];
+
             if ($next === 'x' || $next === 'X') {
                 $this->pos += 2;
+
                 while ($this->pos < $this->len && ctype_xdigit($this->input[$this->pos])) {
                     $this->pos++;
                 }
@@ -449,6 +461,7 @@ final class ArithmeticParser
     private function matchChar(string $ch): bool
     {
         $this->skipWhitespace();
+
         if ($this->pos < $this->len && $this->input[$this->pos] === $ch) {
             $this->pos++;
 
@@ -467,6 +480,7 @@ final class ArithmeticParser
             // Make sure we're not matching a prefix of a longer operator
             if ($slen === 1 && $this->pos + 1 < $this->len) {
                 $next = $this->input[$this->pos + 1];
+
                 if ($str === '=' && $next === '=') {
                     return false;
                 }
@@ -483,6 +497,7 @@ final class ArithmeticParser
     private function expectChar(string $ch): void
     {
         $this->skipWhitespace();
+
         if ($this->pos < $this->len && $this->input[$this->pos] === $ch) {
             $this->pos++;
 

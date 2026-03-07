@@ -54,8 +54,10 @@ abstract class AbstractCommand implements CommandInterface
                 } else {
                     // Handle combined short flags: -rf => -r -f
                     $handled = true;
+
                     for ($j = 0; $j < strlen($flag); $j++) {
                         $ch = $flag[$j];
+
                         if (isset($flagDefs[$ch]) && is_bool($flagDefs[$ch])) {
                             $flags[$ch] = true;
                         } elseif (isset($flagDefs[$ch]) && ! is_bool($flagDefs[$ch])) {
@@ -100,6 +102,7 @@ abstract class AbstractCommand implements CommandInterface
     {
         $trailingNewline = str_ends_with($input, "\n");
         $lines = explode("\n", $input);
+
         if ($trailingNewline && $lines[count($lines) - 1] === '') {
             array_pop($lines);
         }

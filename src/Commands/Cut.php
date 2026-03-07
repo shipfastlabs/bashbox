@@ -27,7 +27,8 @@ final class Cut extends AbstractCommand
 
         $fieldsSpec = (string) $flags['f'];
         $charsSpec = (string) $flags['c'];
-        /** @var string $delimiter */
+
+        /** @var non-empty-string $delimiter */
         $delimiter = $flags['d'] !== '' && $flags['d'] !== false ? (string) $flags['d'] : "\t";
 
         if ($fieldsSpec === '' && $charsSpec === '') {
@@ -35,12 +36,14 @@ final class Cut extends AbstractCommand
         }
 
         $input = '';
+
         if ($files !== []) {
             foreach ($files as $file) {
                 if ($file === '-') {
                     $input .= $ctx->stdin;
                 } else {
                     $path = $this->resolvePath($ctx, $file);
+
                     try {
                         $input .= $ctx->fs->readFile($path);
                     } catch (RuntimeException) {
@@ -62,9 +65,11 @@ final class Cut extends AbstractCommand
 
         if ($charsSpec !== '') {
             $positions = $this->parseRangeSpec($charsSpec);
+
             foreach ($lines as $line) {
                 $chars = mb_str_split($line);
                 $selected = [];
+
                 foreach ($positions as $pos) {
                     if ($pos >= 1 && $pos <= count($chars)) {
                         $selected[] = $chars[$pos - 1];
@@ -75,6 +80,7 @@ final class Cut extends AbstractCommand
             }
         } else {
             $fieldPositions = $this->parseRangeSpec($fieldsSpec);
+
             foreach ($lines as $line) {
                 if (! str_contains($line, $delimiter)) {
                     // Lines without delimiter are printed as-is
@@ -85,6 +91,7 @@ final class Cut extends AbstractCommand
 
                 $fields = explode($delimiter, $line);
                 $selected = [];
+
                 foreach ($fieldPositions as $pos) {
                     if ($pos >= 1 && $pos <= count($fields)) {
                         $selected[] = $fields[$pos - 1];
@@ -110,10 +117,12 @@ final class Cut extends AbstractCommand
 
         foreach ($parts as $part) {
             $part = trim($part);
+
             if (str_contains($part, '-')) {
                 $range = explode('-', $part, 2);
                 $start = $range[0] !== '' ? (int) $range[0] : 1;
                 $end = $range[1] !== '' ? (int) $range[1] : 10000;
+
                 for ($i = $start; $i <= min($end, 10000); $i++) {
                     $positions[] = $i;
                 }

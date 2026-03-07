@@ -38,6 +38,7 @@ final class Tree_ extends AbstractCommand
 
         try {
             $stat = $ctx->fs->stat($path);
+
             if (! $stat->isDirectory) {
                 return $this->failure($path.' [error opening dir]
 

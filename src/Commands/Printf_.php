@@ -86,6 +86,7 @@ final class Printf_ extends AbstractCommand
                 if ($i < $len && $format[$i] === '.') {
                     $spec .= '.';
                     $i++;
+
                     while ($i < $len && ctype_digit($format[$i])) {
                         $spec .= $format[$i];
                         $i++;

@@ -44,6 +44,7 @@ final class Mv extends AbstractCommand
             $srcPath = $this->resolvePath($ctx, $src);
 
             $targetPath = $destPath;
+
             if ($destIsDir) {
                 $basename = basename($src);
                 $targetPath = $destPath === '/' ? '/'.$basename : sprintf('%s/%s', $destPath, $basename);

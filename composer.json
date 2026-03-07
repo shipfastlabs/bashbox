@@ -1,7 +1,13 @@
 {
     "name": "shipfastlabs/bashbox",
     "description": "A sandboxed bash interpreter for AI agents, written in pure PHP 8.4+",
-    "keywords": ["bash", "interpreter", "sandbox", "ai", "agents"],
+    "keywords": [
+        "bash",
+        "interpreter",
+        "sandbox",
+        "ai",
+        "agents"
+    ],
     "license": "MIT",
     "authors": [
         {
@@ -48,7 +54,7 @@
         }
     },
     "scripts": {
-        "lint": "pint",
+        "lint": "pint --parallel",
         "refactor": "rector",
         "test:type-coverage": "pest --type-coverage --min=100",
         "test:typos": "peck",

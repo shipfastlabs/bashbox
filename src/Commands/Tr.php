@@ -96,6 +96,7 @@ final class Tr extends AbstractCommand
             if ($i + 2 < $len && $spec[$i + 1] === '-') {
                 $start = ord($spec[$i]);
                 $end = ord($spec[$i + 2]);
+
                 if ($start <= $end) {
                     for ($c = $start; $c <= $end; $c++) {
                         $result .= chr($c);
@@ -114,10 +115,12 @@ final class Tr extends AbstractCommand
             // Handle character classes
             if ($spec[$i] === '[' && $i + 2 < $len && $spec[$i + 1] === ':') {
                 $end = strpos($spec, ':]', $i + 2);
+
                 if ($end !== false) {
                     $class = substr($spec, $i + 2, $end - $i - 2);
                     $result .= $this->expandClass($class);
                     $i = $end + 1;
+
                     // skip the closing ]
                     if ($i + 1 < $len && $spec[$i + 1] === ']') {
                         $i++;
@@ -169,6 +172,7 @@ final class Tr extends AbstractCommand
 
         for ($i = 0; $i < strlen($input); $i++) {
             $ch = $input[$i];
+
             if ($ch === $prevChar && in_array($ch, $chars, true)) {
                 continue;
             }
@@ -198,6 +202,7 @@ final class Tr extends AbstractCommand
         }
 
         $output = '';
+
         for ($i = 0; $i < strlen($input); $i++) {
             $ch = $input[$i];
             $output .= $map[$ch] ?? $ch;

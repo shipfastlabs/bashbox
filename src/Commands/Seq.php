@@ -26,15 +26,20 @@ final class Seq extends AbstractCommand
         switch (count($args)) {
             case 1:
                 $last = (int) $args[0];
+
                 break;
+
             case 2:
                 $first = (int) $args[0];
                 $last = (int) $args[1];
+
                 break;
+
             default:
                 $first = (int) $args[0];
                 $increment = (int) $args[1];
                 $last = (int) $args[2];
+
                 break;
         }
 

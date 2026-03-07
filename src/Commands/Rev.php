@@ -27,6 +27,7 @@ final class Rev extends AbstractCommand
 
         foreach ($lines as $i => $line) {
             $output .= strrev($line);
+
             if ($i < $lastIndex) {
                 $output .= "\n";
             }

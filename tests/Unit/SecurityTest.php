@@ -67,6 +67,7 @@ test('no proc_open in codebase', function (): void {
         if ($file->isDir()) {
             continue;
         }
+
         if ($file->getExtension() !== 'php') {
             continue;
         }
@@ -90,10 +91,12 @@ test('no dangerous function calls in codebase', function (): void {
         if ($file->isDir()) {
             continue;
         }
+
         if ($file->getExtension() !== 'php') {
             continue;
         }
         $content = file_get_contents($file->getPathname());
+
         foreach ($dangerousFunctions as $pattern) {
             expect($content)->not->toMatch('/'.$pattern.'/');
         }

@@ -85,6 +85,7 @@ final class Echo_ extends AbstractCommand
                     '0' => $this->parseOctal($str, $i + 1),
                     default => '\\'.$next,
                 };
+
                 if ($next === '0') {
                     while ($i + 2 < $len && $str[$i + 2] >= '0' && $str[$i + 2] <= '7') {
                         $i++;
@@ -107,6 +108,7 @@ final class Echo_ extends AbstractCommand
 
         for ($j = 0; $j < 3 && $pos + $j < strlen($str); $j++) {
             $ch = $str[$pos + $j];
+
             if ($ch >= '0' && $ch <= '7') {
                 $octal .= $ch;
             } else {

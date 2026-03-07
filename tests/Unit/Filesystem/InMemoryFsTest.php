@@ -159,6 +159,7 @@ test('readdirWithFileTypes returns typed entries', function (): void {
 
     $fileEntry = null;
     $dirEntry = null;
+
     foreach ($entries as $entry) {
         if ($entry->name === 'file.txt') {
             $fileEntry = $entry;

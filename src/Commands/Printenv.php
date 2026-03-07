@@ -18,6 +18,7 @@ final class Printenv extends AbstractCommand
         if ($args === []) {
             // Print all environment variables
             $output = '';
+
             foreach ($ctx->env as $key => $value) {
                 $output .= sprintf('%s=%s%s', $key, $value, PHP_EOL);
             }

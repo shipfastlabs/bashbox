@@ -77,6 +77,7 @@ final class Parser
     private function advance(): Token
     {
         $token = $this->current();
+
         if ($this->pos < count($this->tokens) - 1) {
             $this->pos++;
         }
@@ -98,6 +99,7 @@ final class Parser
         }
 
         $token = $this->current();
+
         throw new ParseException($message ?? sprintf('Expected %s, got %s', $type->value, $token->type->value));
     }
 
@@ -160,6 +162,7 @@ final class Parser
     private function checkIteration(): void
     {
         $this->parseIterations++;
+
         if ($this->parseIterations > ParserLimits::MAX_PARSE_ITERATIONS) {
             $this->error('Maximum parse iterations exceeded');
         }
@@ -168,6 +171,7 @@ final class Parser
     private function enterDepth(): void
     {
         $this->parseDepth++;
+
         if ($this->parseDepth > ParserLimits::MAX_PARSER_DEPTH) {
             $this->error('Maximum parser nesting depth exceeded');
         }
@@ -254,6 +258,7 @@ final class Parser
             $posBefore = $this->pos;
 
             $stmt = $this->parseStatement();
+
             if ($stmt instanceof \BashBox\Ast\StatementNode) {
                 $statements[] = $stmt;
             }
@@ -302,7 +307,7 @@ final class Parser
             pipelines: $pipelines,
             operators: $operators,
             background: $background,
-            line: $pipelines[0]->commands[0]->line ?? null,
+            line: ($cmd = $pipelines[0]->commands[0]) instanceof SimpleCommandNode || $cmd instanceof FunctionDefNode ? $cmd->line : null,
         );
     }
 
@@ -321,6 +326,7 @@ final class Parser
         if ($this->check(TokenType::TIME)) {
             $this->advance();
             $timed = true;
+
             if ($this->check(TokenType::WORD) && $this->current()->value === '-p') {
                 $this->advance();
                 $timePosix = true;
@@ -488,6 +494,22 @@ final class Parser
             TokenType::NUMBER,
             TokenType::IN,
             TokenType::FD_VARIABLE,
+            TokenType::IF,
+            TokenType::THEN,
+            TokenType::ELSE,
+            TokenType::ELIF,
+            TokenType::FI,
+            TokenType::DO,
+            TokenType::DONE,
+            TokenType::CASE,
+            TokenType::ESAC,
+            TokenType::FOR,
+            TokenType::SELECT,
+            TokenType::WHILE,
+            TokenType::UNTIL,
+            TokenType::FUNCTION,
+            TokenType::TIME,
+            TokenType::COPROC,
         );
     }
 
@@ -527,6 +549,7 @@ final class Parser
 
         // Find = sign
         $eqPos = strpos($value, '=');
+
         if ($eqPos === false) {
             return new AssignmentNode(name: $value, line: $token->line);
         }
@@ -535,9 +558,16 @@ final class Parser
         $rhs = substr($value, $eqPos + 1);
 
         $append = false;
+
         if (str_ends_with($lhs, '+')) {
             $lhs = substr($lhs, 0, -1);
             $append = true;
+        }
+
+        if ($rhs === '' && $this->check(TokenType::LPAREN)) {
+            $this->advance();
+
+            return $this->parseArrayAssignment($lhs, $append, $token->line);
         }
 
         // Check for array assignment: VAR=(...)
@@ -561,6 +591,7 @@ final class Parser
 
         while (! $this->check(TokenType::RPAREN, TokenType::EOF)) {
             $this->skipNewlines();
+
             if ($this->check(TokenType::RPAREN)) {
                 break;
             }
@@ -674,6 +705,7 @@ final class Parser
         }
 
         $elseBody = null;
+
         if ($this->check(TokenType::ELSE)) {
             $this->advance();
             $elseBody = $this->parseCompoundList();
@@ -710,6 +742,7 @@ final class Parser
         if ($this->check(TokenType::IN)) {
             $this->advance();
             $words = [];
+
             while (! $this->check(TokenType::SEMICOLON, TokenType::NEWLINE, TokenType::EOF, TokenType::DO)) {
                 $words[] = $this->parseWord();
             }
@@ -841,6 +874,7 @@ final class Parser
 
         while (! $this->check(TokenType::ESAC, TokenType::EOF)) {
             $this->skipNewlines();
+
             if ($this->check(TokenType::ESAC)) {
                 break;
             }
@@ -861,19 +895,23 @@ final class Parser
             $this->expect(TokenType::RPAREN);
 
             $body = [];
+
             while (! $this->check(TokenType::DSEMI, TokenType::SEMI_AND, TokenType::SEMI_SEMI_AND, TokenType::ESAC, TokenType::EOF)) {
                 $stmt = $this->parseStatement();
+
                 if ($stmt instanceof \BashBox\Ast\StatementNode) {
                     $body[] = $stmt;
                 }
 
                 $this->skipSeparators();
+
                 if ($this->check(TokenType::DSEMI, TokenType::SEMI_AND, TokenType::SEMI_SEMI_AND, TokenType::ESAC)) {
                     break;
                 }
             }
 
             $terminator = ';;';
+
             if ($this->check(TokenType::DSEMI)) {
                 $this->advance();
                 $terminator = ';;';
@@ -946,6 +984,7 @@ final class Parser
         $line = $this->current()->line;
 
         $exprTokens = [];
+
         while (! $this->check(TokenType::DPAREN_END, TokenType::EOF)) {
             $exprTokens[] = $this->advance();
         }
@@ -1001,6 +1040,7 @@ final class Parser
         $this->skipNewlines();
 
         $body = $this->parseCommand();
+
         if (! ($body instanceof CompoundCommandNode)) {
             $this->error('Function body must be a compound command');
         }
@@ -1046,6 +1086,7 @@ final class Parser
             $posBefore = $this->pos;
 
             $stmt = $this->parseStatement();
+
             if ($stmt instanceof \BashBox\Ast\StatementNode) {
                 $statements[] = $stmt;
             }

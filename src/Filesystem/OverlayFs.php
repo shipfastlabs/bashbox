@@ -25,6 +25,7 @@ final class OverlayFs implements FileSystemInterface
         private readonly bool $denySymlinks = true,
     ) {
         $realRoot = realpath($rootDir);
+
         if ($realRoot === false || ! is_dir($rootDir)) {
             throw new RuntimeException(sprintf("OverlayFs root directory does not exist: '%s'", $rootDir));
         }
@@ -66,6 +67,7 @@ final class OverlayFs implements FileSystemInterface
         }
 
         $content = file_get_contents($realPath);
+
         if ($content === false) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path));
         }
@@ -99,9 +101,11 @@ final class OverlayFs implements FileSystemInterface
         // If the file exists on the real FS and is not deleted, pull it in first
         if (! $this->isDeleted($normalized)) {
             $realPath = $this->toRealPath($normalized);
+
             if (is_file($realPath)) {
                 $this->guardSymlink($realPath, 'append', $path);
                 $existing = file_get_contents($realPath);
+
                 if ($existing === false) {
                     $existing = '';
                 }
@@ -128,6 +132,7 @@ final class OverlayFs implements FileSystemInterface
 
         try {
             $normalized = $this->normalizePath($path);
+
             if (! $this->isContained($normalized)) {
                 return false;
             }
@@ -255,16 +260,19 @@ final class OverlayFs implements FileSystemInterface
         // 1. Pull entries from real FS
         if ($onReal) {
             $handle = opendir($realPath);
+
             if ($handle !== false) {
                 while (($entry = readdir($handle)) !== false) {
                     if ($entry === '.') {
                         continue;
                     }
+
                     if ($entry === '..') {
                         continue;
                     }
 
                     $childNormalized = $normalized === '/' ? '/'.$entry : sprintf('%s/%s', $normalized, $entry);
+
                     if ($this->isDeleted($childNormalized)) {
                         continue;
                     }
@@ -291,6 +299,7 @@ final class OverlayFs implements FileSystemInterface
         if ($inCow) {
             try {
                 $cowEntries = $this->cow->readdirWithFileTypes($normalized);
+
                 foreach ($cowEntries as $entry) {
                     $entriesMap[$entry->name] = $entry;
                 }
@@ -327,6 +336,7 @@ final class OverlayFs implements FileSystemInterface
 
         // If it is a directory, handle children recursively
         $isDir = false;
+
         if ($existsInCow) {
             try {
                 $stat = $this->cow->stat($normalized);
@@ -344,11 +354,13 @@ final class OverlayFs implements FileSystemInterface
             if (! $recursive) {
                 // Check if directory is non-empty
                 $children = $this->readdir($normalized);
+
                 if ($children !== []) {
                     throw new RuntimeException(sprintf("ENOTEMPTY: directory not empty, rm '%s'", $path));
                 }
             } else {
                 $children = $this->readdir($normalized);
+
                 foreach ($children as $child) {
                     $childPath = $normalized === '/' ? '/'.$child : sprintf('%s/%s', $normalized, $child);
                     $this->rm($childPath, $options);
@@ -388,6 +400,7 @@ final class OverlayFs implements FileSystemInterface
 
             $this->mkdir($destNorm, ['recursive' => true]);
             $children = $this->readdir($srcNorm);
+
             foreach ($children as $child) {
                 $srcChild = $srcNorm === '/' ? '/'.$child : sprintf('%s/%s', $srcNorm, $child);
                 $destChild = $destNorm === '/' ? '/'.$child : sprintf('%s/%s', $destNorm, $child);
@@ -491,6 +504,7 @@ final class OverlayFs implements FileSystemInterface
         }
 
         $realPath = $this->toRealPath($normalized);
+
         if (! is_link($realPath)) {
             if (! file_exists($realPath)) {
                 throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
@@ -504,6 +518,7 @@ final class OverlayFs implements FileSystemInterface
         }
 
         $target = readlink($realPath);
+
         if ($target === false) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
         }
@@ -546,6 +561,7 @@ final class OverlayFs implements FileSystemInterface
         }
 
         $normalized = $path;
+
         if (str_ends_with($normalized, '/') && $normalized !== '/') {
             $normalized = rtrim($normalized, '/');
         }
@@ -571,13 +587,18 @@ final class OverlayFs implements FileSystemInterface
     private function dirname(string $path): string
     {
         $normalized = $this->normalizePath($path);
+
         if ($normalized === '/') {
             return '/';
         }
 
         $lastSlash = strrpos($normalized, '/');
 
-        return $lastSlash === 0 ? '/' : substr($normalized, 0, $lastSlash);
+        if ($lastSlash === false || $lastSlash === 0) {
+            return '/';
+        }
+
+        return substr($normalized, 0, $lastSlash);
     }
 
     private function validatePath(string $path, string $operation): void
@@ -632,6 +653,7 @@ final class OverlayFs implements FileSystemInterface
 
         // Check if any ancestor has been deleted
         $parent = $this->dirname($normalizedPath);
+
         while ($parent !== $normalizedPath) {
             if (isset($this->deletedPaths[$parent])) {
                 return true;
@@ -657,6 +679,7 @@ final class OverlayFs implements FileSystemInterface
     private function statRealPath(string $realPath): FsStat
     {
         $phpStat = stat($realPath);
+
         if ($phpStat === false) {
             throw new RuntimeException('Failed to stat real path');
         }
@@ -665,7 +688,7 @@ final class OverlayFs implements FileSystemInterface
             isFile: is_file($realPath),
             isDirectory: is_dir($realPath),
             isSymbolicLink: false,
-            mode: $phpStat['mode'] & 0777,
+            mode: UnixFileMode::permissions($phpStat['mode']),
             size: $phpStat['size'],
             mtime: $phpStat['mtime'],
         );
@@ -689,6 +712,7 @@ final class OverlayFs implements FileSystemInterface
 
         if (is_file($realPath)) {
             $content = file_get_contents($realPath);
+
             if ($content === false) {
                 throw new RuntimeException(sprintf("ENOENT: no such file or directory, %s '%s'", $operation, $normalizedPath));
             }
@@ -710,6 +734,7 @@ final class OverlayFs implements FileSystemInterface
     private function ensureCowParentDirs(string $normalizedPath): void
     {
         $dir = $this->dirname($normalizedPath);
+
         if ($dir === '/') {
             if (! $this->cow->exists('/')) {
                 $this->cow->mkdir('/', ['recursive' => true]);
@@ -744,6 +769,7 @@ final class OverlayFs implements FileSystemInterface
         }
 
         $handle = opendir($realDir);
+
         if ($handle === false) {
             return;
         }
@@ -752,6 +778,7 @@ final class OverlayFs implements FileSystemInterface
             if ($entry === '.') {
                 continue;
             }
+
             if ($entry === '..') {
                 continue;
             }

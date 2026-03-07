@@ -51,6 +51,7 @@ final class Wc extends AbstractCommand
                 $content = $ctx->stdin;
             } else {
                 $path = $this->resolvePath($ctx, $file);
+
                 try {
                     $content = $ctx->fs->readFile($path);
                 } catch (RuntimeException) {
@@ -69,6 +70,7 @@ final class Wc extends AbstractCommand
             $totalBytes += $bytes;
 
             $parts = [];
+
             if ($showLines) {
                 $parts[] = sprintf('%8d', $lines);
             }
@@ -87,6 +89,7 @@ final class Wc extends AbstractCommand
 
         if ($multiFile) {
             $parts = [];
+
             if ($showLines) {
                 $parts[] = sprintf('%8d', $totalLines);
             }

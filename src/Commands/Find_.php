@@ -23,6 +23,7 @@ final class Find_ extends AbstractCommand
         $maxDepth = -1;
 
         $i = 0;
+
         while ($i < count($args)) {
             $arg = $args[$i];
 
@@ -59,6 +60,7 @@ final class Find_ extends AbstractCommand
 
             if ($stat->isFile) {
                 $name = basename($searchPath);
+
                 if ($this->matchesFilters($name, true, false, $namePattern, $typeFilter)) {
                     $output .= $searchPath."\n";
                 }
@@ -91,6 +93,7 @@ final class Find_ extends AbstractCommand
     ): void {
         // Check the directory itself
         $dirName = basename($displayPath);
+
         if ($displayPath === '.') {
             $dirName = '.';
         }

@@ -30,6 +30,7 @@ final class Sed_ extends AbstractCommand
                 $i++;
             } elseif ($arg === '-e') {
                 $i++;
+
                 if ($i < count($args)) {
                     $expressions[] = $args[$i];
                 }
@@ -56,8 +57,10 @@ final class Sed_ extends AbstractCommand
 
         // Parse all substitute expressions
         $commands = [];
+
         foreach ($expressions as $expr) {
             $parsed = $this->parseSubstitution($expr);
+
             if ($parsed === null) {
                 return $this->failure(sprintf('sed: invalid expression: %s%s', $expr, PHP_EOL));
             }
@@ -126,6 +129,7 @@ final class Sed_ extends AbstractCommand
             }
 
             $output .= $result;
+
             if ($i < $lastIndex) {
                 $output .= "\n";
             }

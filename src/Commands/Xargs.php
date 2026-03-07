@@ -46,9 +46,11 @@ final class Xargs extends AbstractCommand
         if ($replaceStr !== '') {
             // -I mode: run the command once per line, replacing the placeholder
             $lineItems = array_filter(explode("\n", $stdin), fn (string $s): bool => trim($s) !== '');
+
             foreach ($lineItems as $item) {
                 $item = trim($item);
                 $cmdParts = [];
+
                 foreach ($remaining as $part) {
                     $cmdParts[] = str_replace($replaceStr, $item, $part);
                 }
@@ -57,6 +59,7 @@ final class Xargs extends AbstractCommand
                 $result = ($ctx->exec)($cmdLine);
                 $output .= $result->stdout;
                 $stderr .= $result->stderr;
+
                 if ($result->exitCode !== 0) {
                     $exitCode = $result->exitCode;
                 }
@@ -82,6 +85,7 @@ final class Xargs extends AbstractCommand
     private function splitInput(string $input): array
     {
         $input = trim($input);
+
         if ($input === '') {
             return [];
         }

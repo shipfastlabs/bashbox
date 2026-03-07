@@ -35,6 +35,7 @@ final class Grep_ extends AbstractCommand
 
         /** @var string $pattern */
         $pattern = '';
+
         if ($flags['e'] !== '' && $flags['e'] !== false) {
             $pattern = (string) $flags['e'];
         } elseif ($remaining !== []) {
@@ -55,8 +56,10 @@ final class Grep_ extends AbstractCommand
         }
 
         $allFiles = [];
+
         foreach ($files as $file) {
             $path = $this->resolvePath($ctx, $file);
+
             if ($flags['r']) {
                 $this->collectFiles($ctx, $path, $allFiles);
             } else {
@@ -80,6 +83,7 @@ final class Grep_ extends AbstractCommand
             }
 
             $result = $this->grepContent($content, $entry['label'], $pattern, $flags, $multiFile);
+
             if ($result->exitCode === 0) {
                 $matchFound = true;
             }
@@ -112,12 +116,14 @@ final class Grep_ extends AbstractCommand
 
         foreach ($lines as $idx => $line) {
             $matches = (bool) @preg_match($regex, $line);
+
             if ($flags['v']) {
                 $matches = ! $matches;
             }
 
             if ($matches) {
                 $matchCount++;
+
                 if ($earlyExit) {
                     break;
                 }
@@ -149,8 +155,10 @@ final class Grep_ extends AbstractCommand
         }
 
         $output = '';
+
         foreach ($matchedLines as $m) {
             $parts = [];
+
             if ($multiFile) {
                 $parts[] = $label;
             }
@@ -181,6 +189,7 @@ final class Grep_ extends AbstractCommand
         }
 
         $modifiers = '';
+
         if ($flags['i']) {
             $modifiers .= 'i';
         }
@@ -199,6 +208,7 @@ final class Grep_ extends AbstractCommand
             // If it's a file, not a directory
             try {
                 $stat = $ctx->fs->stat($dirPath);
+
                 if ($stat->isFile) {
                     $result[] = ['path' => $dirPath, 'label' => $dirPath];
                 }
@@ -211,6 +221,7 @@ final class Grep_ extends AbstractCommand
 
         foreach ($entries as $entry) {
             $childPath = $dirPath.'/'.$entry->name;
+
             if ($entry->isFile) {
                 $result[] = ['path' => $childPath, 'label' => $childPath];
             } elseif ($entry->isDirectory) {

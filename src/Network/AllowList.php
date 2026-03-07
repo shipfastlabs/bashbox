@@ -25,6 +25,7 @@ final readonly class AllowList
     private function validateMethod(string $method): void
     {
         $upper = strtoupper($method);
+
         foreach ($this->config->allowedMethods as $allowed) {
             if (strtoupper($allowed) === $upper) {
                 return;
@@ -59,6 +60,7 @@ final readonly class AllowList
     private function validateNotPrivate(string $url): void
     {
         $parsed = parse_url($url);
+
         if ($parsed === false || ! isset($parsed['host'])) {
             throw new NetworkAccessDeniedException(sprintf('Invalid URL: "%s"', $url));
         }
@@ -67,6 +69,7 @@ final readonly class AllowList
 
         // Resolve the hostname to IP addresses
         $ips = gethostbynamel($host);
+
         if ($ips === false) {
             // If we can't resolve, check common private hostnames
             if ($this->isPrivateHostname($host)) {

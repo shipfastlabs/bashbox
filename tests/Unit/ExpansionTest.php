@@ -214,3 +214,67 @@ test('backslash escape in unquoted', function (): void {
     $result = $this->bash->exec('echo hello\\ world');
     expect($result->stdout)->toBe("hello world\n");
 });
+
+// ===== Arrays =====
+
+test('indexed array assignment and access', function (): void {
+    $result = $this->bash->exec('arr[0]=x; echo ${arr[0]}');
+    expect($result->stdout)->toBe("x\n");
+});
+
+test('array all-elements expansion', function (): void {
+    $result = $this->bash->exec('arr=(a b c); echo ${arr[@]}; echo ${arr[*]}');
+    expect($result->stdout)->toBe("a b c\na b c\n");
+});
+
+test('array length expansion', function (): void {
+    $result = $this->bash->exec('arr=(a b c); echo ${#arr[@]}');
+    expect($result->stdout)->toBe("3\n");
+});
+
+test('associative array expansion', function (): void {
+    $result = $this->bash->exec('declare -A arr; arr[key]=v; echo ${arr[key]}; echo ${!arr[@]}');
+    expect($result->stdout)->toBe("v\nkey\n");
+});
+
+test('array slicing expansion', function (): void {
+    $result = $this->bash->exec('arr=(a b c d); echo ${arr[@]:1:2}');
+    expect($result->stdout)->toBe("b c\n");
+});
+
+test('array append expansion', function (): void {
+    $result = $this->bash->exec('arr=(a); arr+=(b c); echo ${arr[@]}');
+    expect($result->stdout)->toBe("a b c\n");
+});
+
+test('unset array element keeps remaining elements', function (): void {
+    $result = $this->bash->exec('arr=(a b); unset arr[0]; echo "<${arr[0]}>" "<${arr[1]}>"');
+    expect($result->stdout)->toBe("<> <b>\n");
+});
+
+// ===== Brace Expansion =====
+
+test('brace expansion alternatives', function (): void {
+    $result = $this->bash->exec('echo {a,b,c}');
+    expect($result->stdout)->toBe("a b c\n");
+});
+
+test('brace expansion numeric range', function (): void {
+    $result = $this->bash->exec('echo {1..5}');
+    expect($result->stdout)->toBe("1 2 3 4 5\n");
+});
+
+test('brace expansion alpha range', function (): void {
+    $result = $this->bash->exec('echo {a..c}');
+    expect($result->stdout)->toBe("a b c\n");
+});
+
+test('brace expansion step range', function (): void {
+    $result = $this->bash->exec('echo {1..5..2}');
+    expect($result->stdout)->toBe("1 3 5\n");
+});
+
+test('brace expansion nested values', function (): void {
+    $result = $this->bash->exec('echo {a,{b,c}}');
+    expect($result->stdout)->toBe("a b c\n");
+});

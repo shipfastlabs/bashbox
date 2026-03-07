@@ -110,6 +110,7 @@ final class MountableFs implements FileSystemInterface
 
         // Build a map keyed by name for deduplication
         $entriesMap = [];
+
         foreach ($entries as $entry) {
             $entriesMap[$entry->name] = $entry;
         }
@@ -173,6 +174,7 @@ final class MountableFs implements FileSystemInterface
 
             $destFs->mkdir($destInner, ['recursive' => true]);
             $children = $srcFs->readdir($srcInner);
+
             foreach ($children as $child) {
                 $srcChild = $srcInner === '/' ? '/'.$child : sprintf('%s/%s', $srcInner, $child);
                 $destChild = $destInner === '/' ? '/'.$child : sprintf('%s/%s', $destInner, $child);
@@ -206,6 +208,7 @@ final class MountableFs implements FileSystemInterface
 
         foreach ($this->mounts as $mp => $fs) {
             $mountedPaths = $fs->getAllPaths();
+
             foreach ($mountedPaths as $innerPath) {
                 $allPaths[] = $innerPath === '/' ? $mp : $mp.$innerPath;
             }
@@ -342,6 +345,7 @@ final class MountableFs implements FileSystemInterface
         }
 
         $normalized = $path;
+
         if (str_ends_with($normalized, '/') && $normalized !== '/') {
             $normalized = rtrim($normalized, '/');
         }

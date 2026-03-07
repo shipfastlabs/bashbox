@@ -28,9 +28,11 @@ final class Sort_ extends AbstractCommand
         $files = $parsed['args'];
 
         $input = '';
+
         if ($files !== []) {
             foreach ($files as $file) {
                 $path = $this->resolvePath($ctx, $file);
+
                 try {
                     $input .= $ctx->fs->readFile($path);
                 } catch (RuntimeException) {
@@ -70,6 +72,7 @@ final class Sort_ extends AbstractCommand
         }
 
         $output = implode("\n", $lines);
+
         if ($trailingNewline || $output !== '') {
             $output .= "\n";
         }
@@ -89,6 +92,7 @@ final class Sort_ extends AbstractCommand
         $endField = isset($parts[1]) ? (int) $parts[1] : $startField;
 
         $sep = $delimiter !== '' ? $delimiter : ' ';
+
         if ($delimiter !== '') {
             $fields = explode($sep, $line);
         } else {
@@ -97,6 +101,7 @@ final class Sort_ extends AbstractCommand
         }
 
         $result = [];
+
         for ($i = $startField - 1; $i < $endField && $i < count($fields); $i++) {
             $result[] = $fields[$i];
         }
@@ -107,6 +112,7 @@ final class Sort_ extends AbstractCommand
     private function extractLeadingNumber(string $s): float
     {
         $s = ltrim($s);
+
         if (preg_match('/^[+-]?\d+(\.\d+)?/', $s, $m)) {
             return (float) $m[0];
         }
@@ -126,6 +132,7 @@ final class Sort_ extends AbstractCommand
 
         foreach ($lines as $line) {
             $key = $this->extractKey($line, $keySpec, $delimiter);
+
             if ($flags['n']) {
                 $key = (string) $this->extractLeadingNumber($key);
             }

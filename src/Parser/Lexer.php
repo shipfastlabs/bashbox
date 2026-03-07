@@ -249,6 +249,7 @@ final class Lexer
             if ($c0 === $first && $c1 === $second) {
                 if ($type === TokenType::DBRACK_START || $type === TokenType::DBRACK_END) {
                     $afterOp = $this->input[$pos + 2] ?? '';
+
                     if ($afterOp !== '' && ! $this->isWordBoundary($afterOp)) {
                         break;
                     }
@@ -304,6 +305,7 @@ final class Lexer
             }
 
             $next = $this->input[$pos + 1] ?? '';
+
             if (in_array($next, ['', ' ', "\t", "\n", ';'], true)) {
                 $this->pos = $pos + 1;
                 $this->column = $startColumn + 1;
@@ -323,6 +325,7 @@ final class Lexer
 
         if ($c0 === '!') {
             $next = $this->input[$pos + 1] ?? '';
+
             if (in_array($next, ['', ' ', "\t", "\n"], true)) {
                 $this->pos = $pos + 1;
                 $this->column = $startColumn + 1;
@@ -407,6 +410,7 @@ final class Lexer
                 }
 
                 $value .= "'".substr($this->input, $quoteStart, $pos - $quoteStart)."'";
+
                 if ($pos < $len) {
                     $pos++; // Skip closing quote
                 }
@@ -440,6 +444,7 @@ final class Lexer
                 }
 
                 $quoteContent .= '"';
+
                 if ($pos < $len) {
                     $pos++; // Skip closing quote
                 }
@@ -478,6 +483,7 @@ final class Lexer
                 }
 
                 $btContent .= '`';
+
                 if ($pos < $len) {
                     $pos++;
                 }
@@ -554,10 +560,12 @@ final class Lexer
 
             while ($pos < $len) {
                 $ch = $this->input[$pos];
+
                 if ($ch === '(') {
                     $depth++;
                 } elseif ($ch === ')') {
                     $depth--;
+
                     if ($depth === 0) {
                         $content .= ')';
                         $pos++;
@@ -569,6 +577,7 @@ final class Lexer
                     $quote = $ch;
                     $content .= $ch;
                     $pos++;
+
                     while ($pos < $len && $this->input[$pos] !== $quote) {
                         if ($this->input[$pos] === '\\' && $quote === '"' && $pos + 1 < $len) {
                             $content .= $this->input[$pos].$this->input[$pos + 1];
@@ -604,6 +613,7 @@ final class Lexer
 
             while ($pos < $len && $depth > 0) {
                 $ch = $this->input[$pos];
+
                 if ($ch === '{') {
                     $depth++;
                 } elseif ($ch === '}') {
@@ -620,6 +630,7 @@ final class Lexer
         // $var or $special
         if (ctype_alpha($next) || $next === '_') {
             $varName = '$';
+
             while ($pos < $len && (ctype_alnum($this->input[$pos]) || $this->input[$pos] === '_')) {
                 $varName .= $this->input[$pos];
                 $pos++;
@@ -630,6 +641,7 @@ final class Lexer
                 $varName .= '[';
                 $pos++;
                 $bracketDepth = 1;
+
                 while ($pos < $len && $bracketDepth > 0) {
                     if ($this->input[$pos] === '[') {
                         $bracketDepth++;
@@ -683,11 +695,13 @@ final class Lexer
     private function looksLikeAssignment(string $value): bool
     {
         $eqPos = $this->findAssignmentEquals($value);
+
         if ($eqPos === -1) {
             return false;
         }
 
         $lhs = substr($value, 0, $eqPos);
+
         // Handle += by stripping trailing +
         if (str_ends_with($lhs, '+')) {
             $lhs = substr($lhs, 0, -1);
@@ -703,6 +717,7 @@ final class Lexer
 
         for ($i = 0; $i < $len; $i++) {
             $c = $str[$i];
+
             if ($c === '[') {
                 $depth++;
             } elseif ($c === ']') {
@@ -743,6 +758,7 @@ final class Lexer
                     $depth++;
                 } elseif ($afterName[$i] === ']') {
                     $depth--;
+
                     if ($depth === 0) {
                         break;
                     }
@@ -791,6 +807,7 @@ final class Lexer
         } elseif ($ch === '\\') {
             $quoted = true;
             $pos++;
+
             while ($pos < $len && ! $this->isWordBoundary($this->input[$pos]) && $this->input[$pos] !== "\n") {
                 if ($this->input[$pos] === '\\' && $pos + 1 < $len) {
                     $delimiter .= $this->input[$pos + 1];

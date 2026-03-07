@@ -100,6 +100,7 @@ final class InMemoryFs implements FileSystemInterface
         }
 
         $size = 0;
+
         if ($entry['type'] === 'file' && isset($entry['content'])) {
             $size = strlen($entry['content']);
         }
@@ -136,6 +137,7 @@ final class InMemoryFs implements FileSystemInterface
         }
 
         $size = 0;
+
         if ($entry['type'] === 'file' && isset($entry['content'])) {
             $size = strlen($entry['content']);
         }
@@ -158,6 +160,7 @@ final class InMemoryFs implements FileSystemInterface
 
         if (isset($this->data[$normalized])) {
             $entry = $this->data[$normalized];
+
             if ($entry['type'] === 'file') {
                 throw new RuntimeException(sprintf("EEXIST: file already exists, mkdir '%s'", $path));
             }
@@ -170,6 +173,7 @@ final class InMemoryFs implements FileSystemInterface
         }
 
         $parent = $this->dirname($normalized);
+
         if ($parent !== '/' && ! isset($this->data[$parent])) {
             if ($recursive) {
                 $this->mkdir($parent, ['recursive' => true]);
@@ -199,6 +203,7 @@ final class InMemoryFs implements FileSystemInterface
         }
 
         $seen = [];
+
         while ($entry !== null && $entry['type'] === 'symlink') {
             if (isset($seen[$normalized])) {
                 throw new RuntimeException(sprintf("ELOOP: too many levels of symbolic links, scandir '%s'", $path));
@@ -265,6 +270,7 @@ final class InMemoryFs implements FileSystemInterface
 
         if ($entry['type'] === 'directory') {
             $children = $this->readdir($normalized);
+
             if ($children !== []) {
                 if (! $recursive) {
                     throw new RuntimeException(sprintf("ENOTEMPTY: directory not empty, rm '%s'", $path));
@@ -306,6 +312,7 @@ final class InMemoryFs implements FileSystemInterface
 
             $this->mkdir($destNorm, ['recursive' => true]);
             $children = $this->readdir($srcNorm);
+
             foreach ($children as $child) {
                 $srcChild = $srcNorm === '/' ? '/'.$child : sprintf('%s/%s', $srcNorm, $child);
                 $destChild = $destNorm === '/' ? '/'.$child : sprintf('%s/%s', $destNorm, $child);
@@ -374,6 +381,7 @@ final class InMemoryFs implements FileSystemInterface
         $newNorm = $this->normalizePath($newPath);
 
         $entry = $this->data[$existingNorm] ?? null;
+
         if ($entry === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, link '%s'", $existingPath));
         }
@@ -439,6 +447,7 @@ final class InMemoryFs implements FileSystemInterface
         }
 
         $normalized = $path;
+
         if (str_ends_with($normalized, '/') && $normalized !== '/') {
             $normalized = rtrim($normalized, '/');
         }
@@ -464,18 +473,24 @@ final class InMemoryFs implements FileSystemInterface
     private function dirname(string $path): string
     {
         $normalized = $this->normalizePath($path);
+
         if ($normalized === '/') {
             return '/';
         }
 
         $lastSlash = strrpos($normalized, '/');
 
-        return $lastSlash === 0 ? '/' : substr($normalized, 0, $lastSlash);
+        if ($lastSlash === false || $lastSlash === 0) {
+            return '/';
+        }
+
+        return substr($normalized, 0, $lastSlash);
     }
 
     private function ensureParentDirs(string $path): void
     {
         $dir = $this->dirname($path);
+
         if ($dir === '/') {
             return;
         }
@@ -507,11 +522,13 @@ final class InMemoryFs implements FileSystemInterface
     private function resolveIntermediateSymlinks(string $path): string
     {
         $normalized = $this->normalizePath($path);
+
         if ($normalized === '/') {
             return '/';
         }
 
         $parts = explode('/', ltrim($normalized, '/'));
+
         if (count($parts) <= 1) {
             return $normalized;
         }
@@ -546,6 +563,7 @@ final class InMemoryFs implements FileSystemInterface
     private function resolvePathWithSymlinks(string $path): string
     {
         $normalized = $this->normalizePath($path);
+
         if ($normalized === '/') {
             return '/';
         }

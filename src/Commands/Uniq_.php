@@ -26,8 +26,10 @@ final class Uniq_ extends AbstractCommand
         $files = $parsed['args'];
 
         $input = '';
+
         if ($files !== []) {
             $path = $this->resolvePath($ctx, $files[0]);
+
             try {
                 $input = $ctx->fs->readFile($path);
             } catch (RuntimeException) {
@@ -46,6 +48,7 @@ final class Uniq_ extends AbstractCommand
         // Group consecutive identical lines
         /** @var list<array{line: string, count: int}> $groups */
         $groups = [];
+
         foreach ($lines as $line) {
             if ($groups !== [] && $groups[count($groups) - 1]['line'] === $line) {
                 $groups[count($groups) - 1]['count']++;
@@ -55,6 +58,7 @@ final class Uniq_ extends AbstractCommand
         }
 
         $output = '';
+
         foreach ($groups as $group) {
             if ($flags['d'] && $group['count'] < 2) {
                 continue;

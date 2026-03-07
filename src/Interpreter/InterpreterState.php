@@ -44,10 +44,37 @@ final class InterpreterState
     /** @var array<string, string> */
     public array $aliases = [];
 
+    /** @var array<string, true> */
+    public array $readonlyVars = [];
+
+    /** @var array<string, string> */
+    public array $traps = [];
+
+    /** @var list<string> */
+    public array $directoryStack = [];
+
+    /** @var list<array{line: int, function: string, file: string}> */
+    public array $callStack = [];
+
+    /** @var array<string, true> */
+    public array $disabledBuiltins = [];
+
+    public string $umask = '0022';
+
     /**
      * @param  array<string, string>  $env
      */
     public function __construct(public array $env = [], public string $cwd = '/home/user', public readonly Limits $limits = new Limits) {}
+
+    public function markReadonly(string $name): void
+    {
+        $this->readonlyVars[$name] = true;
+    }
+
+    public function isReadonly(string $name): bool
+    {
+        return isset($this->readonlyVars[$name]);
+    }
 
     public function getVar(string $name): ?string
     {
@@ -112,6 +139,7 @@ final class InterpreterState
     public function incrementCommandCount(): void
     {
         $this->commandCount++;
+
         if ($this->commandCount > $this->limits->maxCommandCount) {
             throw new \BashBox\Exceptions\ExecutionLimitException(
                 sprintf('Command count limit exceeded (%d)', $this->limits->maxCommandCount),
@@ -159,6 +187,7 @@ final class InterpreterState
     private function getSetFlags(): string
     {
         $flags = '';
+
         if ($this->shellOpts['errexit'] ?? false) {
             $flags .= 'e';
         }

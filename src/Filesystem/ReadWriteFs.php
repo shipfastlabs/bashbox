@@ -17,6 +17,7 @@ final class ReadWriteFs implements FileSystemInterface
     public function __construct(string $rootDir)
     {
         $realRoot = realpath($rootDir);
+
         if ($realRoot === false || ! is_dir($rootDir)) {
             throw new RuntimeException(sprintf("ReadWriteFs root directory does not exist: '%s'", $rootDir));
         }
@@ -41,7 +42,7 @@ final class ReadWriteFs implements FileSystemInterface
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path));
         }
 
-        if (($status['mode'] & 0040000) !== 0) {
+        if (UnixFileMode::isDirectory($this->statInt($status, 'mode'))) {
             throw new RuntimeException(sprintf("EISDIR: illegal operation on a directory, read '%s'", $path));
         }
 
@@ -75,7 +76,8 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'append', $path);
 
         $status = $this->driver->getStatus($realPath);
-        if ($status !== null && ($status['mode'] & 0040000) !== 0) {
+
+        if ($status !== null && UnixFileMode::isDirectory($this->statInt($status, 'mode'))) {
             throw new RuntimeException(sprintf("EISDIR: illegal operation on a directory, write '%s'", $path));
         }
 
@@ -83,6 +85,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->ensureDirectory($dir, $path);
 
         $existing = '';
+
         if ($status !== null) {
             try {
                 $existing = File\read($realPath);
@@ -106,6 +109,7 @@ final class ReadWriteFs implements FileSystemInterface
 
         try {
             $realPath = $this->toRealPath($path);
+
             if (! $this->isContained($realPath)) {
                 return false;
             }
@@ -123,20 +127,21 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'stat', $path);
 
         $status = $this->driver->getStatus($realPath);
+
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, stat '%s'", $path));
         }
 
-        $isDir = ($status['mode'] & 0040000) !== 0;
-        $isFile = ($status['mode'] & 0100000) !== 0;
+        $mode = $this->statInt($status, 'mode');
+        $type = UnixFileMode::type($mode);
 
         return new FsStat(
-            isFile: $isFile,
-            isDirectory: $isDir,
+            isFile: $type === UnixFileType::RegularFile,
+            isDirectory: $type === UnixFileType::Directory,
             isSymbolicLink: false,
-            mode: $status['mode'] & 0777,
-            size: $status['size'],
-            mtime: $status['mtime'],
+            mode: UnixFileMode::permissions($mode),
+            size: $this->statInt($status, 'size'),
+            mtime: $this->statInt($status, 'mtime'),
         );
     }
 
@@ -147,32 +152,32 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'lstat', $path);
 
         $status = $this->driver->getLinkStatus($realPath);
+
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, lstat '%s'", $path));
         }
 
-        $isLink = ($status['mode'] & 0120000) === 0120000;
-        if ($isLink) {
+        $mode = $this->statInt($status, 'mode');
+        $type = UnixFileMode::type($mode);
+
+        if ($type === UnixFileType::SymbolicLink) {
             return new FsStat(
                 isFile: false,
                 isDirectory: false,
                 isSymbolicLink: true,
-                mode: 0777,
-                size: $status['size'],
-                mtime: $status['mtime'],
+                mode: UnixFileMode::FULL_PERMISSIONS,
+                size: $this->statInt($status, 'size'),
+                mtime: $this->statInt($status, 'mtime'),
             );
         }
 
-        $isDir = ($status['mode'] & 0040000) !== 0;
-        $isFile = ($status['mode'] & 0100000) !== 0;
-
         return new FsStat(
-            isFile: $isFile,
-            isDirectory: $isDir,
+            isFile: $type === UnixFileType::RegularFile,
+            isDirectory: $type === UnixFileType::Directory,
             isSymbolicLink: false,
-            mode: $status['mode'] & 0777,
-            size: $status['size'],
-            mtime: $status['mtime'],
+            mode: UnixFileMode::permissions($mode),
+            size: $this->statInt($status, 'size'),
+            mtime: $this->statInt($status, 'mtime'),
         );
     }
 
@@ -184,8 +189,9 @@ final class ReadWriteFs implements FileSystemInterface
         $recursive = $options['recursive'] ?? false;
 
         $status = $this->driver->getStatus($realPath);
+
         if ($status !== null) {
-            if (($status['mode'] & 0100000) !== 0) {
+            if (UnixFileMode::isRegularFile($this->statInt($status, 'mode'))) {
                 throw new RuntimeException(sprintf("EEXIST: file already exists, mkdir '%s'", $path));
             }
 
@@ -221,11 +227,12 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'scandir', $path);
 
         $status = $this->driver->getStatus($realPath);
+
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, scandir '%s'", $path));
         }
 
-        if (($status['mode'] & 0040000) === 0) {
+        if (! UnixFileMode::isDirectory($this->statInt($status, 'mode'))) {
             throw new RuntimeException(sprintf("ENOTDIR: not a directory, scandir '%s'", $path));
         }
 
@@ -236,13 +243,15 @@ final class ReadWriteFs implements FileSystemInterface
         }
 
         $entries = [];
+
         foreach ($names as $name) {
             $childPath = $realPath.DIRECTORY_SEPARATOR.$name;
             $childStatus = $this->driver->getLinkStatus($childPath);
 
-            $isLink = $childStatus !== null && ($childStatus['mode'] & 0120000) === 0120000;
-            $isDir = $childStatus !== null && ($childStatus['mode'] & 0040000) !== 0;
-            $isFile = $childStatus !== null && ($childStatus['mode'] & 0100000) !== 0;
+            $childType = $childStatus !== null ? UnixFileMode::type($this->statInt($childStatus, 'mode')) : null;
+            $isLink = $childType === UnixFileType::SymbolicLink;
+            $isDir = $childType === UnixFileType::Directory;
+            $isFile = $childType === UnixFileType::RegularFile;
 
             $entries[] = new DirentEntry(
                 name: $name,
@@ -266,6 +275,7 @@ final class ReadWriteFs implements FileSystemInterface
         $recursive = $options['recursive'] ?? false;
 
         $status = $this->driver->getLinkStatus($realPath);
+
         if ($status === null) {
             if ($force) {
                 return;
@@ -274,17 +284,20 @@ final class ReadWriteFs implements FileSystemInterface
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, rm '%s'", $path));
         }
 
-        $isLink = ($status['mode'] & 0120000) === 0120000;
-        $isDir = ($status['mode'] & 0040000) !== 0;
+        $rmType = UnixFileMode::type($this->statInt($status, 'mode'));
+        $isLink = $rmType === UnixFileType::SymbolicLink;
+        $isDir = $rmType === UnixFileType::Directory;
 
         if ($isDir && ! $isLink) {
             $children = $this->readdir($path);
+
             if ($children !== []) {
                 if (! $recursive) {
                     throw new RuntimeException(sprintf("ENOTEMPTY: directory not empty, rm '%s'", $path));
                 }
 
                 $normalized = $this->normalizePath($path);
+
                 foreach ($children as $child) {
                     $childPath = $normalized === '/' ? '/'.$child : sprintf('%s/%s', $normalized, $child);
                     $this->rm($childPath, $options);
@@ -316,12 +329,14 @@ final class ReadWriteFs implements FileSystemInterface
         $recursive = $options['recursive'] ?? false;
 
         $status = $this->driver->getStatus($srcReal);
+
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, cp '%s'", $src));
         }
 
-        $isFile = ($status['mode'] & 0100000) !== 0;
-        $isDir = ($status['mode'] & 0040000) !== 0;
+        $cpType = UnixFileMode::type($this->statInt($status, 'mode'));
+        $isFile = $cpType === UnixFileType::RegularFile;
+        $isDir = $cpType === UnixFileType::Directory;
 
         if ($isFile) {
             $destDir = dirname($destReal);
@@ -339,6 +354,7 @@ final class ReadWriteFs implements FileSystemInterface
             $srcNorm = $this->normalizePath($src);
             $destNorm = $this->normalizePath($dest);
             $children = $this->readdir($src);
+
             foreach ($children as $child) {
                 $srcChild = $srcNorm === '/' ? '/'.$child : sprintf('%s/%s', $srcNorm, $child);
                 $destChild = $destNorm === '/' ? '/'.$child : sprintf('%s/%s', $destNorm, $child);
@@ -357,6 +373,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($destReal, 'rename', $dest);
 
         $status = $this->driver->getStatus($srcReal);
+
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, rename '%s'", $src));
         }
@@ -398,6 +415,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'chmod', $path);
 
         $status = $this->driver->getStatus($realPath);
+
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, chmod '%s'", $path));
         }
@@ -416,12 +434,13 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realLinkPath, 'symlink', $linkPath);
 
         $status = $this->driver->getLinkStatus($realLinkPath);
+
         if ($status !== null) {
             throw new RuntimeException(sprintf("EEXIST: file already exists, symlink '%s'", $linkPath));
         }
 
         try {
-            $this->driver->createSymlink($target, $realLinkPath);
+            $this->driver->createSymlink($this->normalizeSymlinkTarget($target), $realLinkPath);
         } catch (FilesystemException $e) {
             throw new RuntimeException(sprintf("EACCES: permission denied, symlink '%s'", $linkPath), 0, $e);
         }
@@ -437,15 +456,17 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($newReal, 'link', $newPath);
 
         $status = $this->driver->getStatus($existingReal);
+
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, link '%s'", $existingPath));
         }
 
-        if (($status['mode'] & 0100000) === 0) {
+        if (! UnixFileMode::isRegularFile($this->statInt($status, 'mode'))) {
             throw new RuntimeException(sprintf("EPERM: operation not permitted, link '%s'", $existingPath));
         }
 
         $newStatus = $this->driver->getLinkStatus($newReal);
+
         if ($newStatus !== null) {
             throw new RuntimeException(sprintf("EEXIST: file already exists, link '%s'", $newPath));
         }
@@ -464,21 +485,24 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'readlink', $path);
 
         $status = $this->driver->getLinkStatus($realPath);
+
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
         }
 
-        $isLink = ($status['mode'] & 0120000) === 0120000;
+        $isLink = UnixFileMode::isSymbolicLink($this->statInt($status, 'mode'));
+
         if (! $isLink) {
             throw new RuntimeException(sprintf("EINVAL: invalid argument, readlink '%s'", $path));
         }
 
         $target = readlink($realPath);
+
         if ($target === false) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
         }
 
-        return $target;
+        return $this->virtualizeSymlinkTarget($target);
     }
 
     public function realpath(string $path): string
@@ -488,6 +512,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'realpath', $path);
 
         $resolved = realpath($realPath);
+
         if ($resolved === false) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, realpath '%s'", $path));
         }
@@ -510,6 +535,7 @@ final class ReadWriteFs implements FileSystemInterface
         $this->assertContained($realPath, 'utimes', $path);
 
         $status = $this->driver->getStatus($realPath);
+
         if ($status === null) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, utimes '%s'", $path));
         }
@@ -528,6 +554,7 @@ final class ReadWriteFs implements FileSystemInterface
         }
 
         $normalized = $path;
+
         if (str_ends_with($normalized, '/') && $normalized !== '/') {
             $normalized = rtrim($normalized, '/');
         }
@@ -553,6 +580,7 @@ final class ReadWriteFs implements FileSystemInterface
     private function toRealPath(string $virtualPath): string
     {
         $normalized = $this->normalizePath($virtualPath);
+
         if ($normalized === '/') {
             return $this->rootDir;
         }
@@ -582,6 +610,7 @@ final class ReadWriteFs implements FileSystemInterface
     private function ensureDirectory(string $realDir, string $userPath): void
     {
         $status = $this->driver->getStatus($realDir);
+
         if ($status === null) {
             try {
                 $this->driver->createDirectoryRecursively($realDir, 0755);
@@ -589,6 +618,48 @@ final class ReadWriteFs implements FileSystemInterface
                 throw new RuntimeException(sprintf("ENOENT: no such file or directory, write '%s'", $userPath), 0, $e);
             }
         }
+    }
+
+    private function normalizeSymlinkTarget(string $target): string
+    {
+        if (! str_starts_with($target, '/')) {
+            return $target;
+        }
+
+        $this->validatePath($target, 'symlink');
+        $realTarget = $this->toRealPath($target);
+        $this->assertContained($realTarget, 'symlink', $target);
+
+        return $realTarget;
+    }
+
+    private function virtualizeSymlinkTarget(string $target): string
+    {
+        if ($target === $this->rootDir) {
+            return '/';
+        }
+
+        if (str_starts_with($target, $this->rootDir.'/')) {
+            return substr($target, strlen($this->rootDir));
+        }
+
+        return $target;
+    }
+
+    /**
+     * Extract an integer value from a stat array by key.
+     *
+     * @param  array<string|int, mixed>  $stat
+     */
+    private function statInt(array $stat, string $key): int
+    {
+        $value = $stat[$key] ?? 0;
+
+        if (is_int($value)) {
+            return $value;
+        }
+
+        return is_scalar($value) ? (int) $value : 0;
     }
 
     /**
@@ -599,7 +670,8 @@ final class ReadWriteFs implements FileSystemInterface
         $paths[] = $virtualDir;
 
         $status = $this->driver->getStatus($realDir);
-        if ($status === null || ($status['mode'] & 0040000) === 0) {
+
+        if ($status === null || ! UnixFileMode::isDirectory($this->statInt($status, 'mode'))) {
             return;
         }
 
@@ -615,8 +687,9 @@ final class ReadWriteFs implements FileSystemInterface
             $paths[] = $childVirtual;
 
             $childStatus = $this->driver->getLinkStatus($childReal);
-            $isDir = $childStatus !== null && ($childStatus['mode'] & 0040000) !== 0;
-            $isLink = $childStatus !== null && ($childStatus['mode'] & 0120000) === 0120000;
+            $childType = $childStatus !== null ? UnixFileMode::type($this->statInt($childStatus, 'mode')) : null;
+            $isDir = $childType === UnixFileType::Directory;
+            $isLink = $childType === UnixFileType::SymbolicLink;
 
             if ($isDir && ! $isLink) {
                 $this->collectPaths($childReal, $childVirtual, $paths);

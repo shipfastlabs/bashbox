@@ -26,8 +26,10 @@ use BashBox\Ast\Parts\SingleQuotedPart;
 use BashBox\Ast\Parts\TildeExpansionPart;
 use BashBox\Ast\WordNode;
 use BashBox\Ast\WordPart;
+use BashBox\Exceptions\UnboundVariableException;
 use BashBox\Interpreter\Interpreter;
 use BashBox\Interpreter\InterpreterState;
+use RuntimeException;
 
 final readonly class WordExpander
 {
@@ -52,12 +54,27 @@ final readonly class WordExpander
      */
     public function expandToList(WordNode $word): array
     {
-        $expanded = $this->expand($word);
-
-        // Word split by IFS
         $ifs = $this->state->getVar('IFS') ?? " \t\n";
+        $results = [];
+        $quoted = $this->isQuotedWord($word);
 
-        return $this->splitByIFS($expanded, $ifs);
+        foreach ($this->expandWordVariants($word) as $expanded) {
+            $globbed = ($quoted || ($this->state->shellOpts['noglob'] ?? false))
+                ? [$expanded]
+                : $this->expandGlob($expanded);
+
+            foreach ($globbed as $value) {
+                if ($quoted) {
+                    $results[] = $value;
+
+                    continue;
+                }
+
+                array_push($results, ...$this->splitByIFS($value, $ifs));
+            }
+        }
+
+        return $results === [] ? [''] : $results;
     }
 
     private function expandPart(WordPart $part): string
@@ -76,6 +93,7 @@ final readonly class WordExpander
 
         if ($part instanceof DoubleQuotedPart) {
             $result = '';
+
             foreach ($part->parts as $inner) {
                 $result .= $this->expandPart($inner);
             }
@@ -112,10 +130,117 @@ final readonly class WordExpander
         }
 
         if ($part instanceof BraceExpansionPart) {
-            return $this->expandBrace($part);
+            return implode(' ', $this->expandBrace($part));
         }
 
         return '';
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function expandWordVariants(WordNode $word): array
+    {
+        $variants = [''];
+
+        foreach ($word->parts as $part) {
+            $next = [];
+
+            foreach ($variants as $prefix) {
+                foreach ($this->expandPartVariants($part) as $suffix) {
+                    $next[] = $prefix.$suffix;
+                }
+            }
+
+            $variants = $next;
+        }
+
+        return $variants;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function expandPartVariants(WordPart $part): array
+    {
+        if ($part instanceof LiteralPart) {
+            return array_map(
+                fn (string $value): string => $this->expandLiteralValue($value),
+                $this->expandBraceString($part->value),
+            );
+        }
+
+        if ($part instanceof SingleQuotedPart) {
+            return [$part->value];
+        }
+
+        if ($part instanceof EscapedPart) {
+            return [$part->value];
+        }
+
+        if ($part instanceof DoubleQuotedPart) {
+            $variants = [''];
+
+            foreach ($part->parts as $inner) {
+                $next = [];
+
+                foreach ($variants as $prefix) {
+                    foreach ($this->expandPartVariants($inner) as $suffix) {
+                        $next[] = $prefix.$suffix;
+                    }
+                }
+                $variants = $next;
+            }
+
+            return $variants;
+        }
+
+        if ($part instanceof ParameterExpansionPart) {
+            return [$this->expandParameter($part)];
+        }
+
+        if ($part instanceof CommandSubstitutionPart) {
+            $result = $this->interpreter->executeScript($part->body);
+
+            return [rtrim($result->stdout, "\n")];
+        }
+
+        if ($part instanceof ArithmeticExpansionPart) {
+            return [(string) $this->interpreter->evaluateArithmeticExpression($part->expression)];
+        }
+
+        if ($part instanceof TildeExpansionPart) {
+            if ($part->user === null) {
+                return [$this->state->getVar('HOME') ?? '/home/user'];
+            }
+
+            return ['/home/'.$part->user];
+        }
+
+        if ($part instanceof GlobPart) {
+            return [$part->pattern];
+        }
+
+        if ($part instanceof BraceExpansionPart) {
+            return $this->expandBrace($part);
+        }
+
+        return [''];
+    }
+
+    private function isQuotedWord(WordNode $word): bool
+    {
+        foreach ($word->parts as $part) {
+            if ($part instanceof SingleQuotedPart || $part instanceof DoubleQuotedPart) {
+                return true;
+            }
+
+            if ($part instanceof LiteralPart && preg_match('/^(["\']).*\1$/s', $part->value) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function expandLiteralValue(string $value): string
@@ -129,6 +254,7 @@ final readonly class WordExpander
         // Tilde expansion at start of word
         if ($len > 0 && $value[0] === '~') {
             $slashPos = strpos($value, '/', 1);
+
             if ($len === 1 || $slashPos === 1) {
                 // ~ or ~/...
                 $home = $this->state->getVar('HOME') ?? '/home/user';
@@ -142,6 +268,7 @@ final readonly class WordExpander
             } elseif (ctype_alnum(substr($value, 1)) || $value === '~') {
                 // ~user (no slash)
                 $user = substr($value, 1);
+
                 if ($user === '') {
                     $result .= $this->state->getVar('HOME') ?? '/home/user';
                 } else {
@@ -174,6 +301,7 @@ final readonly class WordExpander
             if ($value[$i] === "'" && $i < $len) {
                 // Single-quoted section in literal
                 $i++;
+
                 while ($i < $len && $value[$i] !== "'") {
                     $result .= $value[$i];
                     $i++;
@@ -189,6 +317,7 @@ final readonly class WordExpander
             if ($value[$i] === '"') {
                 // Double-quoted section in literal
                 $i++;
+
                 while ($i < $len && $value[$i] !== '"') {
                     if ($value[$i] === '$' && $i + 1 < $len) {
                         $expanded = $this->expandDollarInLiteral($value, $i);
@@ -200,6 +329,7 @@ final readonly class WordExpander
 
                     if ($value[$i] === '\\' && $i + 1 < $len) {
                         $next = $value[$i + 1];
+
                         if (in_array($next, ['"', '$', '\\', '`'], true)) {
                             $result .= $next;
                             $i += 2;
@@ -223,6 +353,7 @@ final readonly class WordExpander
                 // Backtick command substitution
                 $i++;
                 $cmd = '';
+
                 while ($i < $len && $value[$i] !== '`') {
                     if ($value[$i] === '\\' && $i + 1 < $len) {
                         $cmd .= $value[$i + 1];
@@ -298,6 +429,7 @@ final readonly class WordExpander
                     $depth++;
                 } elseif ($value[$i] === ')') {
                     $depth--;
+
                     if ($depth === 0) {
                         $i++;
 
@@ -325,6 +457,7 @@ final readonly class WordExpander
                     $depth++;
                 } elseif ($value[$i] === '}') {
                     $depth--;
+
                     if ($depth === 0) {
                         $i++;
 
@@ -344,6 +477,7 @@ final readonly class WordExpander
         // $var
         if (ctype_alpha($ch) || $ch === '_') {
             $varName = '';
+
             while ($i < $len && (ctype_alnum($value[$i]) || $value[$i] === '_')) {
                 $varName .= $value[$i];
                 $i++;
@@ -354,11 +488,13 @@ final readonly class WordExpander
                 $i++;
                 $subscript = '';
                 $bracketDepth = 1;
+
                 while ($i < $len) {
                     if ($value[$i] === '[') {
                         $bracketDepth++;
                     } elseif ($value[$i] === ']') {
                         $bracketDepth--;
+
                         if ($bracketDepth === 0) {
                             $i++;
 
@@ -371,18 +507,13 @@ final readonly class WordExpander
                 }
 
                 if ($subscript === '@' || $subscript === '*') {
-                    $arr = $this->state->arrays[$varName] ?? [];
-
-                    return ['value' => implode(' ', $arr), 'pos' => $i];
+                    return ['value' => implode(' ', $this->getOrderedArrayValues($varName)), 'pos' => $i];
                 }
 
-                $arr = $this->state->arrays[$varName] ?? [];
-                $idx = is_numeric($subscript) ? (int) $subscript : $subscript;
-
-                return ['value' => (string) ($arr[$idx] ?? ''), 'pos' => $i];
+                return ['value' => $this->getArrayElement($varName, $subscript), 'pos' => $i];
             }
 
-            $val = $this->state->getVar($varName) ?? $this->state->getSpecialVar($varName) ?? '';
+            $val = $this->getBoundValue($varName);
 
             return ['value' => $val, 'pos' => $i];
         }
@@ -393,6 +524,7 @@ final readonly class WordExpander
 
             if (ctype_digit($ch)) {
                 $idx = (int) $ch;
+
                 if ($idx === 0) {
                     return ['value' => 'bashbox', 'pos' => $i];
                 }
@@ -430,10 +562,7 @@ final readonly class WordExpander
                     return (string) count($this->state->arrays[$arrayName] ?? []);
                 }
 
-                $arr = $this->state->arrays[$arrayName] ?? [];
-                $idx = is_numeric($subscript) ? (int) $subscript : $subscript;
-
-                return (string) strlen((string) ($arr[$idx] ?? ''));
+                return (string) strlen($this->getArrayElement($arrayName, $subscript));
             }
 
             return (string) strlen($val);
@@ -442,6 +571,14 @@ final readonly class WordExpander
         // Handle ! prefix (indirection)
         if (str_starts_with($content, '!')) {
             $varName = substr($content, 1);
+
+            if (preg_match('/^([a-zA-Z_]\w*)\[(\*|@)\]$/', $varName, $matches) === 1) {
+                return implode(' ', array_map(
+                    fn (int|string $key): string => (string) $key,
+                    $this->getOrderedArrayKeys($matches[1]),
+                ));
+            }
+
             $intermediate = $this->state->getVar($varName) ?? '';
 
             return $this->state->getVar($intermediate) ?? '';
@@ -450,6 +587,7 @@ final readonly class WordExpander
         // Find operator position
         foreach ([':-', ':=', ':?', ':+', '-', '=', '?', '+'] as $op) {
             $opPos = strpos($content, $op);
+
             if ($opPos !== false && $opPos > 0) {
                 $varName = substr($content, 0, $opPos);
                 $word = substr($content, $opPos + strlen($op));
@@ -480,6 +618,7 @@ final readonly class WordExpander
         // Pattern operations
         foreach (['%%', '##', '%', '#'] as $op) {
             $opPos = strpos($content, $op);
+
             if ($opPos !== false && $opPos > 0) {
                 $varName = substr($content, 0, $opPos);
                 $pattern = substr($content, $opPos + strlen($op));
@@ -494,12 +633,30 @@ final readonly class WordExpander
 
         // Substring: ${var:offset} or ${var:offset:length}
         $colonPos = strpos($content, ':');
+
         if ($colonPos !== false && $colonPos > 0) {
             $varName = substr($content, 0, $colonPos);
             $rest = substr($content, $colonPos + 1);
 
             // Check it's not an operator like :- :+ := :?
             if ($rest !== '' && ! in_array($rest[0], ['-', '+', '=', '?'], true)) {
+                if (preg_match('/^([a-zA-Z_]\w*)\[(\*|@)\]$/', $varName, $matches) === 1) {
+                    $parts = explode(':', $rest, 2);
+                    $offset = (int) $parts[0];
+                    $length = isset($parts[1]) ? (int) $parts[1] : null;
+                    $values = $this->getOrderedArrayValues($matches[1]);
+
+                    if ($offset < 0) {
+                        $offset = max(0, count($values) + $offset);
+                    }
+
+                    $slice = $length !== null
+                        ? array_slice($values, $offset, $length)
+                        : array_slice($values, $offset);
+
+                    return implode(' ', $slice);
+                }
+
                 $val = $this->state->getVar($varName) ?? '';
                 $parts = explode(':', $rest, 2);
                 $offset = (int) $parts[0];
@@ -525,6 +682,7 @@ final readonly class WordExpander
 
         // Pattern replacement: ${var/pattern/replacement} or ${var//pattern/replacement}
         $slashPos = strpos($content, '/');
+
         if ($slashPos !== false && $slashPos > 0) {
             $varName = substr($content, 0, $slashPos);
             $rest = substr($content, $slashPos + 1);
@@ -545,6 +703,7 @@ final readonly class WordExpander
 
         // Case modification: ${var^}, ${var^^}, ${var,}, ${var,,}
         $len = strlen($content);
+
         if ($len >= 2) {
             $lastTwo = substr($content, -2);
             $lastOne = $content[$len - 1];
@@ -581,23 +740,22 @@ final readonly class WordExpander
         // Handle array subscripts
         if (str_contains($content, '[')) {
             $bracketPos = strpos($content, '[');
+
+            if ($bracketPos === false) {
+                return $this->getBoundValue($content);
+            }
             $arrayName = substr($content, 0, $bracketPos);
             $subscript = substr($content, $bracketPos + 1, -1);
 
             if ($subscript === '@' || $subscript === '*') {
-                $arr = $this->state->arrays[$arrayName] ?? [];
-
-                return implode(' ', $arr);
+                return implode(' ', $this->getOrderedArrayValues($arrayName));
             }
 
-            $arr = $this->state->arrays[$arrayName] ?? [];
-            $idx = is_numeric($subscript) ? (int) $subscript : $subscript;
-
-            return (string) ($arr[$idx] ?? '');
+            return $this->getArrayElement($arrayName, $subscript);
         }
 
         // Simple variable
-        return $this->state->getVar($content) ?? $this->state->getSpecialVar($content) ?? '';
+        return $this->getBoundValue($content);
     }
 
     private function expandParameter(ParameterExpansionPart $part): string
@@ -624,6 +782,7 @@ final readonly class WordExpander
 
         if ($op instanceof AssignDefaultOp) {
             $shouldApply = $op->checkEmpty && $val === '';
+
             if ($shouldApply) {
                 $expanded = $this->expand($op->word);
                 $this->state->setVar($part->parameter, $expanded);
@@ -642,8 +801,10 @@ final readonly class WordExpander
 
         if ($op instanceof ErrorIfUnsetOp) {
             $shouldApply = $op->checkEmpty && $val === '';
+
             if ($shouldApply) {
                 $msg = $op->word instanceof \BashBox\Ast\WordNode ? $this->expand($op->word) : 'parameter null or not set';
+
                 throw new \BashBox\Exceptions\BashException(sprintf('bash: %s: %s', $part->parameter, $msg));
             }
 
@@ -695,7 +856,10 @@ final readonly class WordExpander
         return $val;
     }
 
-    private function expandBrace(BraceExpansionPart $part): string
+    /**
+     * @return list<string>
+     */
+    private function expandBrace(BraceExpansionPart $part): array
     {
         $results = [];
 
@@ -709,6 +873,7 @@ final readonly class WordExpander
 
                 if (is_int($start) && is_int($end)) {
                     $step = max(1, abs($step));
+
                     if ($start <= $end) {
                         for ($j = $start; $j <= $end; $j += $step) {
                             $results[] = (string) $j;
@@ -722,7 +887,32 @@ final readonly class WordExpander
             }
         }
 
-        return implode(' ', $results);
+        return $results;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function expandBraceString(string $value): array
+    {
+        $brace = $this->findFirstExpandableBrace($value);
+
+        if ($brace === null) {
+            return [$value];
+        }
+
+        ['start' => $start, 'end' => $end, 'options' => $options] = $brace;
+        $prefix = substr($value, 0, $start);
+        $suffix = substr($value, $end + 1);
+        $results = [];
+
+        foreach ($options as $option) {
+            foreach ($this->expandBraceString($prefix.$option.$suffix) as $expanded) {
+                $results[] = $expanded;
+            }
+        }
+
+        return $results;
     }
 
     private function applyPatternRemoval(string $val, string $pattern, string $side, bool $greedy): string
@@ -780,6 +970,313 @@ final readonly class WordExpander
     /**
      * @return list<string>
      */
+    private function expandGlob(string $pattern): array
+    {
+        if (! preg_match('/[*?]/', $pattern)) {
+            return [$pattern];
+        }
+
+        $isAbsolute = str_starts_with($pattern, '/');
+        $resolved = $isAbsolute
+            ? $pattern
+            : $this->interpreter->resolvePath($this->state->cwd, $pattern);
+
+        $baseDir = dirname($resolved);
+        $basenamePattern = basename($resolved);
+        $regex = '/^'.$this->globToRegex($basenamePattern).'$/';
+
+        try {
+            $entries = $this->interpreter->listDirectory($baseDir);
+        } catch (RuntimeException) {
+            return [$pattern];
+        }
+
+        $matches = [];
+
+        foreach ($entries as $entry) {
+            if (preg_match($regex, $entry) === 1) {
+                $matches[] = $isAbsolute
+                    ? ($baseDir === '/' ? '/'.$entry : $baseDir.'/'.$entry)
+                    : $entry;
+            }
+        }
+
+        if ($matches === []) {
+            return [$pattern];
+        }
+
+        sort($matches);
+
+        return $matches;
+    }
+
+    private function globToRegex(string $pattern): string
+    {
+        return str_replace(['\*', '\?'], ['[^\/]*', '[^\/]'], preg_quote($pattern, '/'));
+    }
+
+    private function getBoundValue(string $name): string
+    {
+        $value = $this->state->getVar($name) ?? $this->state->getSpecialVar($name);
+
+        if ($value === null) {
+            $this->assertBound($name);
+
+            return '';
+        }
+
+        return $value;
+    }
+
+    private function getArrayElement(string $arrayName, string $subscript): string
+    {
+        $key = $this->normalizeArrayKey($subscript);
+        $array = $this->state->arrays[$arrayName] ?? null;
+
+        if ($array === null || ! array_key_exists($key, $array)) {
+            $this->assertBound(sprintf('%s[%s]', $arrayName, $subscript));
+
+            return '';
+        }
+
+        return (string) $array[$key];
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function getOrderedArrayValues(string $arrayName): array
+    {
+        return array_values($this->getOrderedArrayEntries($arrayName));
+    }
+
+    /**
+     * @return list<int|string>
+     */
+    private function getOrderedArrayKeys(string $arrayName): array
+    {
+        return array_keys($this->getOrderedArrayEntries($arrayName));
+    }
+
+    /**
+     * @return array<int|string, string>
+     */
+    private function getOrderedArrayEntries(string $arrayName): array
+    {
+        $array = $this->state->arrays[$arrayName] ?? [];
+
+        if ($array === []) {
+            return [];
+        }
+
+        $keys = array_keys($array);
+        $numeric = array_reduce(
+            $keys,
+            fn (bool $carry, int|string $key): bool => $carry && is_int($key),
+            true,
+        );
+
+        if ($numeric) {
+            ksort($array);
+        }
+
+        return $array;
+    }
+
+    private function normalizeArrayKey(string $subscript): int|string
+    {
+        return preg_match('/^-?\d+$/', $subscript) === 1 ? (int) $subscript : $subscript;
+    }
+
+    private function assertBound(string $name): void
+    {
+        if ($this->state->shellOpts['nounset'] ?? false) {
+            throw new UnboundVariableException($name);
+        }
+    }
+
+    /**
+     * @return array{start: int, end: int, options: list<string>}|null
+     */
+    private function findFirstExpandableBrace(string $value): ?array
+    {
+        $len = strlen($value);
+        $quote = null;
+
+        for ($i = 0; $i < $len; $i++) {
+            $char = $value[$i];
+
+            if ($char === '\\') {
+                $i++;
+
+                continue;
+            }
+
+            if ($quote !== null) {
+                if ($char === $quote) {
+                    $quote = null;
+                }
+
+                continue;
+            }
+
+            if ($char === "'" || $char === '"') {
+                $quote = $char;
+
+                continue;
+            }
+
+            if ($char !== '{') {
+                continue;
+            }
+
+            if ($i > 0 && $value[$i - 1] === '$') {
+                continue;
+            }
+
+            $depth = 1;
+
+            for ($j = $i + 1; $j < $len; $j++) {
+                if ($value[$j] === '\\') {
+                    $j++;
+
+                    continue;
+                }
+
+                if ($value[$j] === '{') {
+                    $depth++;
+                } elseif ($value[$j] === '}') {
+                    $depth--;
+
+                    if ($depth === 0) {
+                        $body = substr($value, $i + 1, $j - $i - 1);
+                        $options = $this->parseBraceBody($body);
+
+                        if ($options !== null) {
+                            return ['start' => $i, 'end' => $j, 'options' => $options];
+                        }
+
+                        break;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @return list<string>|null
+     */
+    private function parseBraceBody(string $body): ?array
+    {
+        $parts = $this->splitTopLevelBraceItems($body);
+
+        if (count($parts) > 1) {
+            return $parts;
+        }
+
+        if (preg_match('/^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$/', $body, $matches) === 1) {
+            return $this->expandNumericBraceRange((int) $matches[1], (int) $matches[2], isset($matches[3]) ? (int) $matches[3] : 1);
+        }
+
+        if (preg_match('/^([a-zA-Z])\.\.([a-zA-Z])(?:\.\.(-?\d+))?$/', $body, $matches) === 1) {
+            return $this->expandAlphaBraceRange($matches[1], $matches[2], isset($matches[3]) ? (int) $matches[3] : 1);
+        }
+
+        return null;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function splitTopLevelBraceItems(string $body): array
+    {
+        $parts = [];
+        $current = '';
+        $depth = 0;
+        $len = strlen($body);
+
+        for ($i = 0; $i < $len; $i++) {
+            $char = $body[$i];
+
+            if ($char === '\\' && $i + 1 < $len) {
+                $current .= $char.$body[$i + 1];
+                $i++;
+
+                continue;
+            }
+
+            if ($char === '{') {
+                $depth++;
+            } elseif ($char === '}') {
+                $depth--;
+            } elseif ($char === ',' && $depth === 0) {
+                $parts[] = $current;
+                $current = '';
+
+                continue;
+            }
+
+            $current .= $char;
+        }
+
+        $parts[] = $current;
+
+        return $parts;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function expandNumericBraceRange(int $start, int $end, int $step): array
+    {
+        $step = max(1, abs($step));
+        $results = [];
+
+        if ($start <= $end) {
+            for ($value = $start; $value <= $end; $value += $step) {
+                $results[] = (string) $value;
+            }
+
+            return $results;
+        }
+
+        for ($value = $start; $value >= $end; $value -= $step) {
+            $results[] = (string) $value;
+        }
+
+        return $results;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function expandAlphaBraceRange(string $start, string $end, int $step): array
+    {
+        $step = max(1, abs($step));
+        $results = [];
+        $startOrd = ord($start);
+        $endOrd = ord($end);
+
+        if ($startOrd <= $endOrd) {
+            for ($value = $startOrd; $value <= $endOrd; $value += $step) {
+                $results[] = chr($value);
+            }
+
+            return $results;
+        }
+
+        for ($value = $startOrd; $value >= $endOrd; $value -= $step) {
+            $results[] = chr($value);
+        }
+
+        return $results;
+    }
+
+    /**
+     * @return list<string>
+     */
     private function splitByIFS(string $str, string $ifs): array
     {
         if ($str === '') {
@@ -798,6 +1295,7 @@ final readonly class WordExpander
             if (str_contains($ifs, $str[$i])) {
                 $parts[] = $current;
                 $current = '';
+
                 // Skip consecutive IFS whitespace
                 while ($i + 1 < $len && str_contains($ifs, $str[$i + 1]) && ctype_space($str[$i + 1])) {
                     $i++;

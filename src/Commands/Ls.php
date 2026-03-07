@@ -19,6 +19,7 @@ final class Ls extends AbstractCommand
         // Handle -1 separately since PHP coerces '1' key to int
         $onePerLine = false;
         $filtered = [];
+
         foreach ($args as $arg) {
             if ($arg === '-1') {
                 $onePerLine = true;

@@ -104,9 +104,11 @@ test('readdirWithFileTypes includes mount points as directories', function (): v
     expect($names)->toContain('usb');
 
     $usbEntry = null;
+
     foreach ($entries as $entry) {
         if ($entry->name === 'usb') {
             $usbEntry = $entry;
+
             break;
         }
     }

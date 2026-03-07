@@ -23,6 +23,7 @@ final class Curl_ extends AbstractCommand
         }
 
         $parsed = $this->parseArgs($args);
+
         if ($parsed === null) {
             return $this->failure("curl: no URL specified\n");
         }
@@ -54,6 +55,7 @@ final class Curl_ extends AbstractCommand
 
         if ($showHeaders || $headOnly) {
             $output .= sprintf("HTTP/1.1 %d\r\n", $response['statusCode']);
+
             foreach ($response['headers'] as $name => $value) {
                 $output .= sprintf("%s: %s\r\n", $name, $value);
             }
@@ -94,6 +96,7 @@ final class Curl_ extends AbstractCommand
         $headOnly = false;
 
         $i = 0;
+
         while ($i < count($args)) {
             $arg = $args[$i];
 
@@ -110,6 +113,7 @@ final class Curl_ extends AbstractCommand
                     $i++;
                     $headerLine = $args[$i] ?? '';
                     $colonPos = strpos($headerLine, ':');
+
                     if ($colonPos !== false) {
                         $name = trim(substr($headerLine, 0, $colonPos));
                         $value = trim(substr($headerLine, $colonPos + 1));
@@ -123,6 +127,7 @@ final class Curl_ extends AbstractCommand
                 case '--data-raw':
                     $i++;
                     $body = $args[$i] ?? '';
+
                     if ($method === 'GET') {
                         $method = 'POST';
                     }
