@@ -16,9 +16,18 @@ final class Tail extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, ['n' => '10']);
-        $numLines = (int) $parsed['flags']['n'];
+        $parsed = $this->parseFlags($args, [
+            'n' => '',
+            'c' => '',
+        ]);
+
+        $flags = $parsed['flags'];
         $files = $parsed['args'];
+
+        // Determine if we're using bytes (-c) or lines (-n)
+        $useBytes = $flags['c'] !== '';
+        $numBytes = $useBytes ? (int) $flags['c'] : 0;
+        $numLines = $flags['n'] !== '' ? (int) $flags['n'] : 10;
 
         if ($files === []) {
             $files = ['-'];
@@ -55,20 +64,36 @@ final class Tail extends AbstractCommand
                 $output .= "==> {$file} <==\n";
             }
 
-            $lines = explode("\n", $content);
+            if ($useBytes) {
+                // Byte mode: get last N bytes
+                if ($numBytes <= 0) {
+                    continue;
+                }
 
-            // If content ends with a newline, the last element is an empty string
-            $endsWithNewline = $content !== '' && str_ends_with($content, "\n");
+                $contentLength = strlen($content);
 
-            if ($endsWithNewline) {
-                array_pop($lines);
-            }
-
-            if ($numLines >= count($lines)) {
-                $output .= $content;
+                if ($numBytes >= $contentLength) {
+                    $output .= $content;
+                } else {
+                    $output .= substr($content, -$numBytes);
+                }
             } else {
-                $selected = array_slice($lines, -$numLines);
-                $output .= implode("\n", $selected).($endsWithNewline ? "\n" : '');
+                // Line mode
+                $lines = explode("\n", $content);
+
+                // If content ends with a newline, the last element is an empty string
+                $endsWithNewline = $content !== '' && str_ends_with($content, "\n");
+
+                if ($endsWithNewline) {
+                    array_pop($lines);
+                }
+
+                if ($numLines >= count($lines)) {
+                    $output .= $content;
+                } else {
+                    $selected = array_slice($lines, -$numLines);
+                    $output .= implode("\n", $selected).($endsWithNewline ? "\n" : '');
+                }
             }
         }
 

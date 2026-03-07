@@ -354,6 +354,7 @@ final class Interpreter
                     limits: $this->interpreterState->limits,
                     exec: fn (string $script): ExecResult => $this->execSubcommand($script),
                     fetch: $this->secureHttpClient,
+                    registry: $this->commandRegistry,
                 );
 
                 $result = $cmd->execute($args, $commandContext);
@@ -967,6 +968,7 @@ final class Interpreter
                 limits: $this->interpreterState->limits,
                 exec: fn (string $script): ExecResult => $this->execSubcommand($script),
                 fetch: $this->secureHttpClient,
+                registry: $this->commandRegistry,
             );
 
             return $cmd->execute($commandArgs, $commandContext);
@@ -1174,6 +1176,7 @@ final class Interpreter
                 limits: $this->interpreterState->limits,
                 exec: fn (string $script): ExecResult => $this->execSubcommand($script),
                 fetch: $this->secureHttpClient,
+                registry: $this->commandRegistry,
             );
             $result = $cmd->execute($commandArgs, $commandContext);
             $this->writeStdout($result->stdout);

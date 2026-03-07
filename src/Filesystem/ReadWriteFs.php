@@ -319,11 +319,9 @@ final readonly class ReadWriteFs implements FileSystemInterface
         $destReal = $this->toRealPath($dest);
         $this->assertContained($srcReal, 'cp', $src);
         $this->assertContained($destReal, 'cp', $dest);
-        $recursive = $options['recursive'] ?? false;
 
-        if (! file_exists($srcReal)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, cp '%s'", $src));
-        }
+        $recursive = $options['recursive'] ?? false;
+        $preserve = $options['preserve'] ?? false;
 
         $status = @stat($srcReal);
 
@@ -332,12 +330,9 @@ final readonly class ReadWriteFs implements FileSystemInterface
         }
 
         $cpType = UnixFileMode::type($status['mode']);
-        $isFile = $cpType === UnixFileType::RegularFile;
-        $isDir = $cpType === UnixFileType::Directory;
 
-        if ($isFile) {
-            $destDir = dirname($destReal);
-            $this->ensureDirectory($destDir, $dest);
+        if ($cpType === UnixFileType::RegularFile) {
+            $this->ensureDirectory(dirname($destReal), $dest);
 
             $content = @file_get_contents($srcReal);
 
@@ -345,12 +340,15 @@ final readonly class ReadWriteFs implements FileSystemInterface
                 throw new RuntimeException(sprintf("ENOENT: no such file or directory, cp '%s'", $src));
             }
 
-            $result = @file_put_contents($destReal, $content);
-
-            if ($result === false) {
+            if (@file_put_contents($destReal, $content) === false) {
                 throw new RuntimeException(sprintf("EACCES: permission denied, cp '%s'", $dest));
             }
-        } elseif ($isDir) {
+
+            if ($preserve) {
+                @chmod($destReal, $status['mode']);
+                @touch($destReal, $status['mtime']);
+            }
+        } elseif ($cpType === UnixFileType::Directory) {
             if (! $recursive) {
                 throw new RuntimeException(sprintf("EISDIR: is a directory, cp '%s'", $src));
             }
@@ -359,9 +357,8 @@ final readonly class ReadWriteFs implements FileSystemInterface
 
             $srcNorm = $this->normalizePath($src);
             $destNorm = $this->normalizePath($dest);
-            $children = $this->readdir($src);
 
-            foreach ($children as $child) {
+            foreach ($this->readdir($src) as $child) {
                 $srcChild = $srcNorm === '/' ? '/'.$child : sprintf('%s/%s', $srcNorm, $child);
                 $destChild = $destNorm === '/' ? '/'.$child : sprintf('%s/%s', $destNorm, $child);
                 $this->cp($srcChild, $destChild, $options);

@@ -23,5 +23,6 @@ final readonly class CommandContext
         public Limits $limits,
         public Closure $exec,
         public ?SecureHttpClient $fetch = null,
+        public ?CommandRegistry $registry = null,
     ) {}
 }

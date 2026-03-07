@@ -217,3 +217,87 @@ test('fizzbuzz', function (): void {
     expect($lines[4])->toBe('Buzz');
     expect($lines[14])->toBe('FizzBuzz');
 });
+
+// ===== which extended =====
+test('which not found returns exit code 1', function (): void {
+    expect($this->bash->exec('which nonexistent_command_xyz')->exitCode)->toBe(1);
+});
+
+// ===== seq extended =====
+test('seq with format flag', function (): void {
+    $result = $this->bash->exec('seq -f "num:%g" 3');
+    expect($result->stdout)->toContain('num:1', 'num:2', 'num:3');
+});
+
+test('seq with separator flag', function (): void {
+    expect($this->bash->exec('seq -s "," 3')->stdout)->toBe("1,2,3\n");
+});
+
+// ===== xargs extended =====
+test('xargs with -n option splits into chunks', function (): void {
+    expect($this->bash->exec('echo "a b c d" | xargs -n2 echo')->stdout)->toBe("a b\nc d\n");
+});
+
+// ===== cut extended =====
+test('cut with -b bytes flag', function (): void {
+    expect($this->bash->exec('echo "hello world" | cut -b1-5')->stdout)->toBe("hello\n");
+});
+
+test('cut -b counts bytes for multibyte input', function (): void {
+    expect(bin2hex($this->bash->exec('printf "éx" | cut -b1')->stdout))->toBe('c30a');
+});
+
+test('cut with --complement flag', function (): void {
+    expect($this->bash->exec('echo "a:b:c" | cut -d: --complement -f2')->stdout)->toBe("a:c\n");
+});
+
+// ===== head/tail extended =====
+test('head with -c bytes flag', function (): void {
+    expect($this->bash->exec('echo "hello world" | head -c5')->stdout)->toBe('hello');
+});
+
+test('head -c counts bytes for multibyte input', function (): void {
+    expect(bin2hex($this->bash->exec('printf "é" | head -c1')->stdout))->toBe('c3');
+});
+
+test('tail with -c bytes flag', function (): void {
+    expect($this->bash->exec('echo "hello world" | tail -c5')->stdout)->toBe("orld\n");
+});
+
+test('tail -c counts bytes for multibyte input', function (): void {
+    expect(bin2hex($this->bash->exec('printf "é" | tail -c1')->stdout))->toBe('a9');
+});
+
+test('tail -c0 returns empty output', function (): void {
+    expect($this->bash->exec('printf "hello" | tail -c0')->stdout)->toBe('');
+});
+
+test('seq with invalid format flag fails cleanly', function (): void {
+    $result = $this->bash->exec('seq -f "%q" 3');
+
+    expect($result->exitCode)->toBe(1);
+    expect($result->stderr)->toContain('invalid format string');
+});
+
+// ===== ls extended =====
+test('ls with -d directory flag', function (): void {
+    $this->bash->exec('mkdir -p /tmp/lsdtest');
+    $result = $this->bash->exec('ls -d /tmp/lsdtest');
+    expect($result->exitCode)->toBe(0);
+    expect(trim((string) $result->stdout))->toBe('lsdtest');
+});
+
+// ===== cp/mv extended =====
+test('cp with -p preserve flag', function (): void {
+    $this->bash->exec('echo "preserve" > /tmp/cppreserve.txt');
+    $result = $this->bash->exec('cp -p /tmp/cppreserve.txt /tmp/cppreserve2.txt');
+    expect($result->exitCode)->toBe(0);
+    expect($this->bash->exec('test -f /tmp/cppreserve2.txt')->exitCode)->toBe(0);
+});
+
+test('mv with -f force flag', function (): void {
+    $this->bash->exec('echo "old" > /tmp/mvforce.txt');
+    $this->bash->exec('echo "new" > /tmp/mvforce2.txt');
+    expect($this->bash->exec('mv -f /tmp/mvforce2.txt /tmp/mvforce.txt')->exitCode)->toBe(0);
+    expect($this->bash->exec('cat /tmp/mvforce.txt')->stdout)->toContain('new');
+});

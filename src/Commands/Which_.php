@@ -19,12 +19,24 @@ final class Which_ extends AbstractCommand
             return $this->failure();
         }
 
-        $output = '';
+        $registry = $commandContext->registry;
+        $lines = [];
+        $notFound = false;
 
         foreach ($args as $arg) {
-            $output .= sprintf('/usr/bin/%s%s', $arg, PHP_EOL);
+            if ($registry?->has($arg)) {
+                $lines[] = sprintf('/usr/bin/%s', $arg);
+            } else {
+                $notFound = true;
+            }
         }
 
-        return $this->success($output);
+        $output = implode(PHP_EOL, $lines);
+
+        if ($output !== '') {
+            $output .= PHP_EOL;
+        }
+
+        return $notFound ? $this->failure($output, 1) : $this->success($output);
     }
 }

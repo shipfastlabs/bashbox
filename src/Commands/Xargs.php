@@ -17,6 +17,7 @@ final class Xargs extends AbstractCommand
     {
         $parsed = $this->parseFlags($args, [
             'I' => '',
+            'n' => '',
         ]);
 
         $flags = $parsed['flags'];
@@ -25,6 +26,7 @@ final class Xargs extends AbstractCommand
         $stdin = $commandContext->stdin;
 
         $replaceStr = (string) $flags['I'];
+        $maxArgs = $flags['n'] !== '' ? (int) $flags['n'] : 0;
 
         // Split stdin into items
         $items = $this->splitInput($stdin);
@@ -43,6 +45,17 @@ final class Xargs extends AbstractCommand
         $stderr = '';
         $exitCode = 0;
 
+        $runCommand = function (array $cmdParts) use ($commandContext, &$output, &$stderr, &$exitCode): void {
+            $cmdLine = implode(' ', array_map($this->shellQuote(...), $cmdParts));
+            $result = ($commandContext->exec)($cmdLine);
+            $output .= $result->stdout;
+            $stderr .= $result->stderr;
+
+            if ($result->exitCode !== 0) {
+                $exitCode = $result->exitCode;
+            }
+        };
+
         if ($replaceStr !== '') {
             // -I mode: run the command once per line, replacing the placeholder
             $lineItems = array_filter(explode("\n", $stdin), fn (string $s): bool => trim($s) !== '');
@@ -54,24 +67,16 @@ final class Xargs extends AbstractCommand
                 foreach ($remaining as $part) {
                     $cmdParts[] = str_replace($replaceStr, $lineItem, $part);
                 }
-
-                $cmdLine = implode(' ', array_map($this->shellQuote(...), $cmdParts));
-                $result = ($commandContext->exec)($cmdLine);
-                $output .= $result->stdout;
-                $stderr .= $result->stderr;
-
-                if ($result->exitCode !== 0) {
-                    $exitCode = $result->exitCode;
-                }
+                $runCommand($cmdParts);
+            }
+        } elseif ($maxArgs > 0) {
+            // -n mode: split items into chunks and run command for each chunk
+            foreach (array_chunk($items, $maxArgs) as $chunk) {
+                $runCommand(array_merge($remaining, $chunk));
             }
         } else {
             // Default mode: pass all items as arguments to a single command invocation
-            $cmdParts = array_merge($remaining, $items);
-            $cmdLine = implode(' ', array_map($this->shellQuote(...), $cmdParts));
-            $result = ($commandContext->exec)($cmdLine);
-            $output .= $result->stdout;
-            $stderr .= $result->stderr;
-            $exitCode = $result->exitCode;
+            $runCommand(array_merge($remaining, $items));
         }
 
         return new ExecResult(stdout: $output, stderr: $stderr, exitCode: $exitCode);

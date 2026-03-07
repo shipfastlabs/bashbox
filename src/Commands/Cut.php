@@ -16,23 +16,42 @@ final class Cut extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, [
+        $complement = false;
+        $filteredArgs = [];
+
+        foreach ($args as $arg) {
+            if ($arg === '--complement') {
+                $complement = true;
+            } else {
+                $filteredArgs[] = $arg;
+            }
+        }
+
+        $parsed = $this->parseFlags($filteredArgs, [
             'd' => '',
             'f' => '',
+            'b' => '',
             'c' => '',
         ]);
 
         $flags = $parsed['flags'];
         $files = $parsed['args'];
 
+        $bytesSpec = (string) $flags['b'];
         $fieldsSpec = (string) $flags['f'];
         $charsSpec = (string) $flags['c'];
 
         /** @var non-empty-string $delimiter */
         $delimiter = $flags['d'] !== '' && $flags['d'] !== false ? (string) $flags['d'] : "\t";
 
-        if ($fieldsSpec === '' && $charsSpec === '') {
+        if ($fieldsSpec === '' && $charsSpec === '' && $bytesSpec === '') {
             return $this->failure("cut: you must specify a list of bytes, characters, or fields\n");
+        }
+
+        $specCount = ($fieldsSpec !== '' ? 1 : 0) + ($charsSpec !== '' ? 1 : 0) + ($bytesSpec !== '' ? 1 : 0);
+
+        if ($specCount > 1) {
+            return $this->failure("cut: only one type of list may be specified\n");
         }
 
         $input = '';
@@ -63,16 +82,35 @@ final class Cut extends AbstractCommand
 
         $output = '';
 
-        if ($charsSpec !== '') {
+        if ($bytesSpec !== '') {
+            $positions = $this->parseRangeSpec($bytesSpec);
+
+            foreach ($lines as $line) {
+                $bytes = str_split($line);
+                $selected = [];
+
+                foreach ($bytes as $index => $byte) {
+                    $position = $index + 1;
+
+                    if ($this->shouldSelectPosition($position, $positions, $complement)) {
+                        $selected[] = $byte;
+                    }
+                }
+
+                $output .= implode('', $selected)."\n";
+            }
+        } elseif ($charsSpec !== '') {
             $positions = $this->parseRangeSpec($charsSpec);
 
             foreach ($lines as $line) {
                 $chars = mb_str_split($line);
                 $selected = [];
 
-                foreach ($positions as $position) {
-                    if ($position >= 1 && $position <= count($chars)) {
-                        $selected[] = $chars[$position - 1];
+                foreach ($chars as $index => $char) {
+                    $position = $index + 1;
+
+                    if ($this->shouldSelectPosition($position, $positions, $complement)) {
+                        $selected[] = $char;
                     }
                 }
 
@@ -92,9 +130,11 @@ final class Cut extends AbstractCommand
                 $fields = explode($delimiter, $line);
                 $selected = [];
 
-                foreach ($fieldPositions as $fieldPosition) {
-                    if ($fieldPosition >= 1 && $fieldPosition <= count($fields)) {
-                        $selected[] = $fields[$fieldPosition - 1];
+                foreach ($fields as $index => $field) {
+                    $position = $index + 1;
+
+                    if ($this->shouldSelectPosition($position, $fieldPositions, $complement)) {
+                        $selected[] = $field;
                     }
                 }
 
@@ -134,5 +174,15 @@ final class Cut extends AbstractCommand
         sort($positions);
 
         return array_values(array_unique($positions));
+    }
+
+    /**
+     * @param  list<int>  $positions
+     */
+    private function shouldSelectPosition(int $position, array $positions, bool $complement): bool
+    {
+        $isSelected = in_array($position, $positions, true);
+
+        return $complement ? ! $isSelected : $isSelected;
     }
 }

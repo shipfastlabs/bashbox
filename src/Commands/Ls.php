@@ -32,11 +32,13 @@ final class Ls extends AbstractCommand
             'l' => false,
             'a' => false,
             'R' => false,
+            'd' => false,
         ]);
 
         $longFormat = (bool) $parsed['flags']['l'];
         $showAll = (bool) $parsed['flags']['a'];
         $recursive = (bool) $parsed['flags']['R'];
+        $directoryItself = (bool) $parsed['flags']['d'];
         $paths = $parsed['args'];
 
         if ($paths === []) {
@@ -60,7 +62,7 @@ final class Ls extends AbstractCommand
                 continue;
             }
 
-            if ($stat->isFile) {
+            if ($stat->isFile || ($stat->isDirectory && $directoryItself)) {
                 if ($longFormat) {
                     $output .= $this->formatLong($commandContext, $resolved, basename($target))."\n";
                 } else {
@@ -70,7 +72,7 @@ final class Ls extends AbstractCommand
                 continue;
             }
 
-            if ($stat->isDirectory) {
+            if ($stat->isDirectory && ! $directoryItself) {
                 $output .= $this->listDirectory(
                     $commandContext,
                     $resolved,
@@ -123,7 +125,7 @@ final class Ls extends AbstractCommand
         if (! $showAll) {
             $entries = array_values(array_filter(
                 $entries,
-                fn (\BashBox\Filesystem\DirentEntry $direntEntry): bool => ! str_starts_with($direntEntry->name, '.'),
+                fn ($e) => ! str_starts_with($e->name, '.'),
             ));
         }
 
@@ -135,7 +137,7 @@ final class Ls extends AbstractCommand
                 $output .= $this->formatLong($commandContext, $childPath, $entry->name)."\n";
             }
         } else {
-            $names = array_map(fn (\BashBox\Filesystem\DirentEntry $direntEntry): string => $direntEntry->name, $entries);
+            $names = array_map(fn ($e) => $e->name, $entries);
 
             if ($onePerLine) {
                 foreach ($names as $name) {

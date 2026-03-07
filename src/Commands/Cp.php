@@ -19,9 +19,11 @@ final class Cp extends AbstractCommand
         $parsed = $this->parseFlags($args, [
             'r' => false,
             'R' => false,
+            'p' => false,
         ]);
 
         $recursive = (bool) $parsed['flags']['r'] || (bool) $parsed['flags']['R'];
+        $preserve = (bool) $parsed['flags']['p'];
         $operands = $parsed['args'];
 
         if (count($operands) < 2) {
@@ -58,7 +60,7 @@ final class Cp extends AbstractCommand
             }
 
             try {
-                $commandContext->fs->cp($srcPath, $targetPath, ['recursive' => $recursive]);
+                $commandContext->fs->cp($srcPath, $targetPath, ['recursive' => $recursive, 'preserve' => $preserve]);
             } catch (RuntimeException $e) {
                 $stderr .= sprintf('cp: %s%s', $e->getMessage(), PHP_EOL);
                 $exitCode = 1;

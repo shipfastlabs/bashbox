@@ -16,12 +16,19 @@ final class Mv extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        if (count($args) < 2) {
+        $parsed = $this->parseFlags($args, [
+            'f' => false,
+        ]);
+
+        $force = (bool) $parsed['flags']['f'];
+        $operands = $parsed['args'];
+
+        if (count($operands) < 2) {
             return $this->failure("mv: missing operand\n");
         }
 
-        $dest = array_pop($args);
-        $sources = $args;
+        $dest = array_pop($operands);
+        $sources = $operands;
         $destPath = $this->resolvePath($commandContext, $dest);
 
         $destIsDir = false;

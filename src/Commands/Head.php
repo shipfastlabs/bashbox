@@ -16,9 +16,18 @@ final class Head extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, ['n' => '10']);
-        $numLines = (int) $parsed['flags']['n'];
+        $parsed = $this->parseFlags($args, [
+            'n' => '',
+            'c' => '',
+        ]);
+
+        $flags = $parsed['flags'];
         $files = $parsed['args'];
+
+        // Determine if we're using bytes (-c) or lines (-n)
+        $useBytes = $flags['c'] !== '';
+        $numBytes = $useBytes ? (int) $flags['c'] : 0;
+        $numLines = $flags['n'] !== '' ? (int) $flags['n'] : 10;
 
         if ($files === []) {
             $files = ['-'];
@@ -55,13 +64,19 @@ final class Head extends AbstractCommand
                 $output .= "==> {$file} <==\n";
             }
 
-            $lines = explode("\n", $content);
-
-            if ($numLines >= count($lines)) {
-                $output .= $content;
+            if ($useBytes) {
+                // Byte mode
+                $output .= substr($content, 0, max(0, $numBytes));
             } else {
-                $selected = array_slice($lines, 0, $numLines);
-                $output .= implode("\n", $selected)."\n";
+                // Line mode
+                $lines = explode("\n", $content);
+
+                if ($numLines >= count($lines)) {
+                    $output .= $content;
+                } else {
+                    $selected = array_slice($lines, 0, $numLines);
+                    $output .= implode("\n", $selected)."\n";
+                }
             }
         }
 
