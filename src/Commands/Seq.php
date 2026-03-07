@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
+use ValueError;
 
 final class Seq extends AbstractCommand
 {
@@ -80,11 +81,11 @@ final class Seq extends AbstractCommand
         $formattedNumbers = [];
 
         try {
-            foreach ($numbers as $num) {
-                $formattedNumbers[] = $this->formatNumber($num, $format);
+            foreach ($numbers as $number) {
+                $formattedNumbers[] = $this->formatNumber($number, $format);
             }
-        } catch (\ValueError) {
-            return $this->failure("seq: invalid format string: {$format}\n");
+        } catch (ValueError) {
+            return $this->failure(sprintf('seq: invalid format string: %s%s', $format, PHP_EOL));
         }
 
         $output = implode($separator, $formattedNumbers);

@@ -125,7 +125,7 @@ final class Ls extends AbstractCommand
         if (! $showAll) {
             $entries = array_values(array_filter(
                 $entries,
-                fn ($e) => ! str_starts_with($e->name, '.'),
+                fn (\BashBox\Filesystem\DirentEntry $direntEntry): bool => ! str_starts_with($direntEntry->name, '.'),
             ));
         }
 
@@ -137,7 +137,7 @@ final class Ls extends AbstractCommand
                 $output .= $this->formatLong($commandContext, $childPath, $entry->name)."\n";
             }
         } else {
-            $names = array_map(fn ($e) => $e->name, $entries);
+            $names = array_map(fn (\BashBox\Filesystem\DirentEntry $direntEntry): string => $direntEntry->name, $entries);
 
             if ($onePerLine) {
                 foreach ($names as $name) {

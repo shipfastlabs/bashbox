@@ -244,7 +244,7 @@ test('cut with -b bytes flag', function (): void {
 });
 
 test('cut -b counts bytes for multibyte input', function (): void {
-    expect(bin2hex($this->bash->exec('printf "éx" | cut -b1')->stdout))->toBe('c30a');
+    expect(bin2hex((string) $this->bash->exec('printf "éx" | cut -b1')->stdout))->toBe('c30a');
 });
 
 test('cut with --complement flag', function (): void {
@@ -257,7 +257,7 @@ test('head with -c bytes flag', function (): void {
 });
 
 test('head -c counts bytes for multibyte input', function (): void {
-    expect(bin2hex($this->bash->exec('printf "é" | head -c1')->stdout))->toBe('c3');
+    expect(bin2hex((string) $this->bash->exec('printf "é" | head -c1')->stdout))->toBe('c3');
 });
 
 test('tail with -c bytes flag', function (): void {
@@ -265,7 +265,7 @@ test('tail with -c bytes flag', function (): void {
 });
 
 test('tail -c counts bytes for multibyte input', function (): void {
-    expect(bin2hex($this->bash->exec('printf "é" | tail -c1')->stdout))->toBe('a9');
+    expect(bin2hex((string) $this->bash->exec('printf "é" | tail -c1')->stdout))->toBe('a9');
 });
 
 test('tail -c0 returns empty output', function (): void {
@@ -298,6 +298,7 @@ test('cp with -p preserve flag', function (): void {
 test('mv with -f force flag', function (): void {
     $this->bash->exec('echo "old" > /tmp/mvforce.txt');
     $this->bash->exec('echo "new" > /tmp/mvforce2.txt');
+
     expect($this->bash->exec('mv -f /tmp/mvforce2.txt /tmp/mvforce.txt')->exitCode)->toBe(0);
     expect($this->bash->exec('cat /tmp/mvforce.txt')->stdout)->toContain('new');
 });

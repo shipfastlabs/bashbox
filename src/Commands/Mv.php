@@ -19,8 +19,6 @@ final class Mv extends AbstractCommand
         $parsed = $this->parseFlags($args, [
             'f' => false,
         ]);
-
-        $force = (bool) $parsed['flags']['f'];
         $operands = $parsed['args'];
 
         if (count($operands) < 2) {

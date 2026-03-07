@@ -47,12 +47,12 @@ final class Xargs extends AbstractCommand
 
         $runCommand = function (array $cmdParts) use ($commandContext, &$output, &$stderr, &$exitCode): void {
             $cmdLine = implode(' ', array_map($this->shellQuote(...), $cmdParts));
-            $result = ($commandContext->exec)($cmdLine);
-            $output .= $result->stdout;
-            $stderr .= $result->stderr;
+            $execResult = ($commandContext->exec)($cmdLine);
+            $output .= $execResult->stdout;
+            $stderr .= $execResult->stderr;
 
-            if ($result->exitCode !== 0) {
-                $exitCode = $result->exitCode;
+            if ($execResult->exitCode !== 0) {
+                $exitCode = $execResult->exitCode;
             }
         };
 
@@ -67,6 +67,7 @@ final class Xargs extends AbstractCommand
                 foreach ($remaining as $part) {
                     $cmdParts[] = str_replace($replaceStr, $lineItem, $part);
                 }
+
                 $runCommand($cmdParts);
             }
         } elseif ($maxArgs > 0) {
