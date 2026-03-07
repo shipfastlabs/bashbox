@@ -24,7 +24,6 @@ final class Head extends AbstractCommand
         $flags = $parsed['flags'];
         $files = $parsed['args'];
 
-        // Determine if we're using bytes (-c) or lines (-n)
         $useBytes = $flags['c'] !== '';
         $numBytes = $useBytes ? (int) $flags['c'] : 0;
         $numLines = $flags['n'] !== '' ? (int) $flags['n'] : 10;
@@ -39,21 +38,14 @@ final class Head extends AbstractCommand
         $exitCode = 0;
 
         foreach ($files as $idx => $file) {
-            $content = '';
+            try {
+                $reader = $this->createInputReader();
+                $input = $reader->read([$file], $commandContext);
+            } catch (RuntimeException) {
+                $stderr .= "head: cannot open '{$file}' for reading: No such file or directory\n";
+                $exitCode = 1;
 
-            if ($file === '-') {
-                $content = $commandContext->stdin;
-            } else {
-                $path = $this->resolvePath($commandContext, $file);
-
-                try {
-                    $content = $commandContext->fs->readFile($path);
-                } catch (RuntimeException) {
-                    $stderr .= "head: cannot open '{$file}' for reading: No such file or directory\n";
-                    $exitCode = 1;
-
-                    continue;
-                }
+                continue;
             }
 
             if ($multiFile) {
@@ -64,20 +56,7 @@ final class Head extends AbstractCommand
                 $output .= "==> {$file} <==\n";
             }
 
-            if ($useBytes) {
-                // Byte mode
-                $output .= substr($content, 0, max(0, $numBytes));
-            } else {
-                // Line mode
-                $lines = explode("\n", $content);
-
-                if ($numLines >= count($lines)) {
-                    $output .= $content;
-                } else {
-                    $selected = array_slice($lines, 0, $numLines);
-                    $output .= implode("\n", $selected)."\n";
-                }
-            }
+            $output .= $this->formatContent($input->content, $useBytes, $numBytes, $numLines);
         }
 
         if ($exitCode !== 0) {
@@ -85,5 +64,22 @@ final class Head extends AbstractCommand
         }
 
         return $this->success($output);
+    }
+
+    private function formatContent(string $content, bool $useBytes, int $numBytes, int $numLines): string
+    {
+        if ($useBytes) {
+            return substr($content, 0, max(0, $numBytes));
+        }
+
+        $lines = explode("\n", $content);
+
+        if ($numLines >= count($lines)) {
+            return $content;
+        }
+
+        $selected = array_slice($lines, 0, $numLines);
+
+        return implode("\n", $selected)."\n";
     }
 }

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class GroupNode implements CompoundCommandNode
+final readonly class GroupNode implements CompoundCommandNode
 {
     /**
      * @param  list<StatementNode>  $body

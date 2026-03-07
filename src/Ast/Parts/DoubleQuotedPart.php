@@ -6,7 +6,7 @@ namespace BashBox\Ast\Parts;
 
 use BashBox\Ast\WordPart;
 
-final class DoubleQuotedPart implements WordPart
+final readonly class DoubleQuotedPart implements WordPart
 {
     /**
      * @param  list<WordPart>  $parts

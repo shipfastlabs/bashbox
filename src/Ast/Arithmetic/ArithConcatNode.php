@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast\Arithmetic;
 
-final class ArithConcatNode implements ArithExpr
+final readonly class ArithConcatNode implements ArithExpr
 {
     /**
      * @param  list<ArithExpr>  $parts

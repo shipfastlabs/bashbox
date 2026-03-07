@@ -7,7 +7,7 @@ namespace BashBox\Ast\Parts;
 use BashBox\Ast\ScriptNode;
 use BashBox\Ast\WordPart;
 
-final class ProcessSubstitutionPart implements WordPart
+final readonly class ProcessSubstitutionPart implements WordPart
 {
     public function __construct(
         public ScriptNode $body,

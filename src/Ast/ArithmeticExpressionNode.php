@@ -6,7 +6,7 @@ namespace BashBox\Ast;
 
 use BashBox\Ast\Arithmetic\ArithExpr;
 
-final class ArithmeticExpressionNode implements Node
+final readonly class ArithmeticExpressionNode implements Node
 {
     public function __construct(
         public ArithExpr $expression,

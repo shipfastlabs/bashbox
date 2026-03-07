@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast\Arithmetic;
 
-final class ArithArrayElementNode implements ArithExpr
+final readonly class ArithArrayElementNode implements ArithExpr
 {
     public function __construct(
         public string $array,

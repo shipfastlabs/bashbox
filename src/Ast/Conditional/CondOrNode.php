@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast\Conditional;
 
-final class CondOrNode implements ConditionalExpressionNode
+final readonly class CondOrNode implements ConditionalExpressionNode
 {
     public function __construct(
         public ConditionalExpressionNode $left,

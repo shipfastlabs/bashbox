@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Commands;
 
+use BashBox\Commands\Input\InputContent;
 use BashBox\ExecResult;
 use RuntimeException;
 
@@ -33,40 +34,44 @@ final class Cat extends AbstractCommand
             $files = ['-'];
         }
 
+        try {
+            $reader = $this->createInputReader();
+            $input = $reader->read($files, $commandContext);
+        } catch (RuntimeException $runtimeException) {
+            preg_match('/No such file/', $runtimeException->getMessage(), $matches);
+            $filename = $files[0];
+
+            return $this->failure("cat: {$filename}: No such file or directory\n");
+        }
+
+        $output = $this->formatOutput($input, $numberLines);
+
+        return $this->success($output);
+    }
+
+    private function formatOutput(InputContent $inputContent, bool $numberLines): string
+    {
+        if (! $numberLines) {
+            return $inputContent->content;
+        }
+
         $output = '';
         $lineNum = 1;
 
-        foreach ($files as $file) {
-            $content = '';
+        foreach ($inputContent->files as $fileData) {
+            $content = $fileData['content'];
+            $lines = explode("\n", $content);
+            $last = array_pop($lines);
 
-            if ($file === '-') {
-                $content = $commandContext->stdin;
-            } else {
-                $path = $this->resolvePath($commandContext, $file);
-
-                try {
-                    $content = $commandContext->fs->readFile($path);
-                } catch (RuntimeException) {
-                    return $this->failure("cat: {$file}: No such file or directory\n");
-                }
+            foreach ($lines as $line) {
+                $output .= sprintf("%6d\t%s\n", $lineNum++, $line);
             }
 
-            if ($numberLines) {
-                $lines = explode("\n", $content);
-                $last = array_pop($lines);
-
-                foreach ($lines as $line) {
-                    $output .= sprintf("%6d\t%s\n", $lineNum++, $line);
-                }
-
-                if ($last !== '') {
-                    $output .= sprintf("%6d\t%s", $lineNum++, $last);
-                }
-            } else {
-                $output .= $content;
+            if ($last !== '') {
+                $output .= sprintf("%6d\t%s", $lineNum++, $last);
             }
         }
 
-        return $this->success($output);
+        return $output;
     }
 }

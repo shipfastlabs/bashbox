@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class SimpleCommandNode implements Node
+final readonly class SimpleCommandNode implements Node
 {
     /**
      * @param  list<AssignmentNode>  $assignments

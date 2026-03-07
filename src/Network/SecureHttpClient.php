@@ -11,9 +11,8 @@ final readonly class SecureHttpClient
 {
     private AllowList $allowList;
 
-    public function __construct(
-        private NetworkConfig $networkConfig = new NetworkConfig,
-    ) {
+    public function __construct(private NetworkConfig $networkConfig = new NetworkConfig)
+    {
         $this->allowList = new AllowList($this->networkConfig);
     }
 
@@ -70,7 +69,6 @@ final readonly class SecureHttpClient
             throw new RuntimeException('HTTP request failed: '.$error);
         }
 
-        // Ensure $response is a string (PHPStan doesn't know curl_exec returns string on success with CURLOPT_RETURNTRANSFER)
         if (! is_string($response)) {
             throw new RuntimeException('Unexpected curl_exec return type');
         }

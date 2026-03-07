@@ -6,7 +6,7 @@ namespace BashBox\Ast;
 
 use BashBox\Ast\Conditional\ConditionalExpressionNode;
 
-final class ConditionalCommandNode implements CompoundCommandNode
+final readonly class ConditionalCommandNode implements CompoundCommandNode
 {
     /**
      * @param  list<RedirectionNode>  $redirections

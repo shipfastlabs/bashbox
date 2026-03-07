@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class ScriptNode implements Node
+final readonly class ScriptNode implements Node
 {
     /**
      * @param  list<StatementNode>  $statements

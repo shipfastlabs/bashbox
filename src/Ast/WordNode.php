@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class WordNode implements Node
+final readonly class WordNode implements Node
 {
     /**
      * @param  list<WordPart>  $parts

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class IfNode implements CompoundCommandNode
+final readonly class IfNode implements CompoundCommandNode
 {
     /**
      * @param  list<IfClause>  $clauses

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BashBox\Commands;
 
+use BashBox\Commands\Input\InputReaderFactory;
+use BashBox\Commands\Input\InputReaderInterface;
 use BashBox\ExecResult;
 
 abstract class AbstractCommand implements CommandInterface
@@ -108,5 +110,10 @@ abstract class AbstractCommand implements CommandInterface
         }
 
         return ['lines' => $lines, 'trailingNewline' => $trailingNewline];
+    }
+
+    protected function createInputReader(bool $allowMultiple = true): InputReaderInterface
+    {
+        return InputReaderFactory::create($allowMultiple);
     }
 }

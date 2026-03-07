@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class ForNode implements CompoundCommandNode
+final readonly class ForNode implements CompoundCommandNode
 {
     /**
      * @param  list<WordNode>|null  $words

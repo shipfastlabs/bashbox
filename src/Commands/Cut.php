@@ -54,31 +54,20 @@ final class Cut extends AbstractCommand
             return $this->failure("cut: only one type of list may be specified\n");
         }
 
-        $input = '';
+        try {
+            $reader = $this->createInputReader();
+            $input = $reader->read($files, $commandContext);
+        } catch (RuntimeException) {
+            $filename = $files[0] ?? 'unknown';
 
-        if ($files !== []) {
-            foreach ($files as $file) {
-                if ($file === '-') {
-                    $input .= $commandContext->stdin;
-                } else {
-                    $path = $this->resolvePath($commandContext, $file);
-
-                    try {
-                        $input .= $commandContext->fs->readFile($path);
-                    } catch (RuntimeException) {
-                        return $this->failure("cut: {$file}: No such file or directory\n");
-                    }
-                }
-            }
-        } else {
-            $input = $commandContext->stdin;
+            return $this->failure("cut: {$filename}: No such file or directory\n");
         }
 
-        if ($input === '') {
+        if ($input->content === '') {
             return $this->success('');
         }
 
-        ['lines' => $lines] = $this->splitLines($input);
+        ['lines' => $lines] = $this->splitLines($input->content);
 
         $output = '';
 
@@ -121,7 +110,6 @@ final class Cut extends AbstractCommand
 
             foreach ($lines as $line) {
                 if (! str_contains($line, $delimiter)) {
-                    // Lines without delimiter are printed as-is
                     $output .= $line."\n";
 
                     continue;

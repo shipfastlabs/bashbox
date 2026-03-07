@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class StatementNode implements Node
+final readonly class StatementNode implements Node
 {
     /**
      * @param  list<PipelineNode>  $pipelines

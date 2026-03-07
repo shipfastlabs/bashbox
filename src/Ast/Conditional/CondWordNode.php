@@ -6,7 +6,7 @@ namespace BashBox\Ast\Conditional;
 
 use BashBox\Ast\WordNode;
 
-final class CondWordNode implements ConditionalExpressionNode
+final readonly class CondWordNode implements ConditionalExpressionNode
 {
     public function __construct(
         public WordNode $word,

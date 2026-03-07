@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class AssignmentNode implements Node
+final readonly class AssignmentNode implements Node
 {
     /**
      * @param  list<WordNode>|null  $array

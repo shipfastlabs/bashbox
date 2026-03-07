@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class CaseNode implements CompoundCommandNode
+final readonly class CaseNode implements CompoundCommandNode
 {
     /**
      * @param  list<CaseItemNode>  $items

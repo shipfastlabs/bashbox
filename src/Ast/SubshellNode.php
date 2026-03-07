@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class SubshellNode implements CompoundCommandNode
+final readonly class SubshellNode implements CompoundCommandNode
 {
     /**
      * @param  list<StatementNode>  $body

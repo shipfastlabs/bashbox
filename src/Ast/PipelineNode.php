@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class PipelineNode implements Node
+final readonly class PipelineNode implements Node
 {
     /**
      * @param  list<SimpleCommandNode|CompoundCommandNode|FunctionDefNode>  $commands

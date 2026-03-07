@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class CStyleForNode implements CompoundCommandNode
+final readonly class CStyleForNode implements CompoundCommandNode
 {
     /**
      * @param  list<StatementNode>  $body

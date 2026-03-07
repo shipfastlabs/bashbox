@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class CaseItemNode implements Node
+final readonly class CaseItemNode implements Node
 {
     /**
      * @param  list<WordNode>  $patterns

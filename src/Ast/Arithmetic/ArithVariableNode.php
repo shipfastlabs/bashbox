@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast\Arithmetic;
 
-final class ArithVariableNode implements ArithExpr
+final readonly class ArithVariableNode implements ArithExpr
 {
     public function __construct(
         public string $name,

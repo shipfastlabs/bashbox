@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class WhileNode implements CompoundCommandNode
+final readonly class WhileNode implements CompoundCommandNode
 {
     /**
      * @param  list<StatementNode>  $condition

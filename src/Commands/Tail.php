@@ -24,7 +24,6 @@ final class Tail extends AbstractCommand
         $flags = $parsed['flags'];
         $files = $parsed['args'];
 
-        // Determine if we're using bytes (-c) or lines (-n)
         $useBytes = $flags['c'] !== '';
         $numBytes = $useBytes ? (int) $flags['c'] : 0;
         $numLines = $flags['n'] !== '' ? (int) $flags['n'] : 10;
@@ -39,21 +38,14 @@ final class Tail extends AbstractCommand
         $exitCode = 0;
 
         foreach ($files as $idx => $file) {
-            $content = '';
+            try {
+                $reader = $this->createInputReader();
+                $input = $reader->read([$file], $commandContext);
+            } catch (RuntimeException) {
+                $stderr .= "tail: cannot open '{$file}' for reading: No such file or directory\n";
+                $exitCode = 1;
 
-            if ($file === '-') {
-                $content = $commandContext->stdin;
-            } else {
-                $path = $this->resolvePath($commandContext, $file);
-
-                try {
-                    $content = $commandContext->fs->readFile($path);
-                } catch (RuntimeException) {
-                    $stderr .= "tail: cannot open '{$file}' for reading: No such file or directory\n";
-                    $exitCode = 1;
-
-                    continue;
-                }
+                continue;
             }
 
             if ($multiFile) {
@@ -64,37 +56,7 @@ final class Tail extends AbstractCommand
                 $output .= "==> {$file} <==\n";
             }
 
-            if ($useBytes) {
-                // Byte mode: get last N bytes
-                if ($numBytes <= 0) {
-                    continue;
-                }
-
-                $contentLength = strlen($content);
-
-                if ($numBytes >= $contentLength) {
-                    $output .= $content;
-                } else {
-                    $output .= substr($content, -$numBytes);
-                }
-            } else {
-                // Line mode
-                $lines = explode("\n", $content);
-
-                // If content ends with a newline, the last element is an empty string
-                $endsWithNewline = $content !== '' && str_ends_with($content, "\n");
-
-                if ($endsWithNewline) {
-                    array_pop($lines);
-                }
-
-                if ($numLines >= count($lines)) {
-                    $output .= $content;
-                } else {
-                    $selected = array_slice($lines, -$numLines);
-                    $output .= implode("\n", $selected).($endsWithNewline ? "\n" : '');
-                }
-            }
+            $output .= $this->formatContent($input->content, $useBytes, $numBytes, $numLines);
         }
 
         if ($exitCode !== 0) {
@@ -102,5 +64,38 @@ final class Tail extends AbstractCommand
         }
 
         return $this->success($output);
+    }
+
+    private function formatContent(string $content, bool $useBytes, int $numBytes, int $numLines): string
+    {
+        if ($useBytes) {
+            if ($numBytes <= 0) {
+                return '';
+            }
+
+            $contentLength = strlen($content);
+
+            if ($numBytes >= $contentLength) {
+                return $content;
+            }
+
+            return substr($content, -$numBytes);
+        }
+
+        $lines = explode("\n", $content);
+
+        $endsWithNewline = $content !== '' && str_ends_with($content, "\n");
+
+        if ($endsWithNewline) {
+            array_pop($lines);
+        }
+
+        if ($numLines >= count($lines)) {
+            return $content;
+        }
+
+        $selected = array_slice($lines, -$numLines);
+
+        return implode("\n", $selected).($endsWithNewline ? "\n" : '');
     }
 }

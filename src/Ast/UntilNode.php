@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class UntilNode implements CompoundCommandNode
+final readonly class UntilNode implements CompoundCommandNode
 {
     /**
      * @param  list<StatementNode>  $condition

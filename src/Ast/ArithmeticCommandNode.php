@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class ArithmeticCommandNode implements CompoundCommandNode
+final readonly class ArithmeticCommandNode implements CompoundCommandNode
 {
     /**
      * @param  list<RedirectionNode>  $redirections

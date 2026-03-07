@@ -25,27 +25,21 @@ final class Uniq_ extends AbstractCommand
         $flags = $parsed['flags'];
         $files = $parsed['args'];
 
-        $input = '';
+        try {
+            $reader = $this->createInputReader();
+            $input = $reader->read($files, $commandContext);
+        } catch (RuntimeException) {
+            $filename = $files[0] ?? 'unknown';
 
-        if ($files !== []) {
-            $path = $this->resolvePath($commandContext, $files[0]);
-
-            try {
-                $input = $commandContext->fs->readFile($path);
-            } catch (RuntimeException) {
-                return $this->failure("uniq: {$files[0]}: No such file or directory\n");
-            }
-        } else {
-            $input = $commandContext->stdin;
+            return $this->failure("uniq: {$filename}: No such file or directory\n");
         }
 
-        if ($input === '') {
+        if ($input->content === '') {
             return $this->success('');
         }
 
-        ['lines' => $lines] = $this->splitLines($input);
+        ['lines' => $lines] = $this->splitLines($input->content);
 
-        // Group consecutive identical lines
         /** @var list<array{line: string, count: int}> $groups */
         $groups = [];
 

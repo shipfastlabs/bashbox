@@ -29,7 +29,6 @@ final class Wc extends AbstractCommand
         $showWords = (bool) $flags['w'];
         $showBytes = (bool) $flags['c'];
 
-        // If no flags given, show all three
         if (! $showLines && ! $showWords && ! $showBytes) {
             $showLines = true;
             $showWords = true;
@@ -47,18 +46,14 @@ final class Wc extends AbstractCommand
         $multiFile = count($files) > 1;
 
         foreach ($files as $file) {
-            if ($file === '-') {
-                $content = $commandContext->stdin;
-            } else {
-                $path = $this->resolvePath($commandContext, $file);
+            try {
+                $reader = $this->createInputReader();
+                $input = $reader->read([$file], $commandContext);
+                $content = $input->content;
+            } catch (RuntimeException) {
+                $output .= "wc: {$file}: No such file or directory\n";
 
-                try {
-                    $content = $commandContext->fs->readFile($path);
-                } catch (RuntimeException) {
-                    $output .= "wc: {$file}: No such file or directory\n";
-
-                    continue;
-                }
+                continue;
             }
 
             $lines = $content !== '' ? substr_count($content, "\n") : 0;

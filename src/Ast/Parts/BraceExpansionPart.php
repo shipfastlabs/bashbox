@@ -6,7 +6,7 @@ namespace BashBox\Ast\Parts;
 
 use BashBox\Ast\WordPart;
 
-final class BraceExpansionPart implements WordPart
+final readonly class BraceExpansionPart implements WordPart
 {
     /**
      * @param  list<array{type: string, word?: \BashBox\Ast\WordNode, start?: string|int, end?: string|int, step?: int, startStr?: string, endStr?: string}>  $items

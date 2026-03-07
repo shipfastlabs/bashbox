@@ -7,7 +7,7 @@ namespace BashBox\Ast\Parts;
 use BashBox\Ast\ParameterOps\ParameterOperation;
 use BashBox\Ast\WordPart;
 
-final class ParameterExpansionPart implements WordPart
+final readonly class ParameterExpansionPart implements WordPart
 {
     public function __construct(
         public string $parameter,

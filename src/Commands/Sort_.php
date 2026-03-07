@@ -27,27 +27,20 @@ final class Sort_ extends AbstractCommand
         $flags = $parsed['flags'];
         $files = $parsed['args'];
 
-        $input = '';
+        try {
+            $reader = $this->createInputReader();
+            $input = $reader->read($files, $commandContext);
+        } catch (RuntimeException) {
+            $filename = $files[0] ?? 'unknown';
 
-        if ($files !== []) {
-            foreach ($files as $file) {
-                $path = $this->resolvePath($commandContext, $file);
-
-                try {
-                    $input .= $commandContext->fs->readFile($path);
-                } catch (RuntimeException) {
-                    return $this->failure("sort: cannot read: {$file}: No such file or directory\n");
-                }
-            }
-        } else {
-            $input = $commandContext->stdin;
+            return $this->failure("sort: cannot read: {$filename}: No such file or directory\n");
         }
 
-        if ($input === '') {
+        if ($input->content === '') {
             return $this->success('');
         }
 
-        ['lines' => $lines, 'trailingNewline' => $trailingNewline] = $this->splitLines($input);
+        ['lines' => $lines, 'trailingNewline' => $trailingNewline] = $this->splitLines($input->content);
 
         $delimiter = $flags['t'] !== '' && $flags['t'] !== false ? (string) $flags['t'] : '';
         $keySpec = $flags['k'] !== '' && $flags['k'] !== false ? (string) $flags['k'] : '';
@@ -86,7 +79,6 @@ final class Sort_ extends AbstractCommand
             return $line;
         }
 
-        // Parse key spec like "2" or "2,3"
         $parts = explode(',', $keySpec);
         $startField = max(1, (int) $parts[0]);
         $endField = isset($parts[1]) ? (int) $parts[1] : $startField;
@@ -96,7 +88,6 @@ final class Sort_ extends AbstractCommand
         if ($delimiter !== '') {
             $fields = explode($sep, $line);
         } else {
-            // Default: split on whitespace runs
             $fields = preg_split('/\s+/', $line, -1, PREG_SPLIT_NO_EMPTY) ?: [];
         }
 
