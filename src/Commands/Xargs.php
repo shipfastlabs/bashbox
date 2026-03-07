@@ -48,10 +48,12 @@ final class Xargs extends AbstractCommand
         $runCommand = function (array $cmdParts) use ($commandContext, &$output, &$stderr, &$exitCode): void {
             $quotedParts = [];
 
-            foreach ($cmdParts as $part) {
-                /** @var string $part */
-                $quotedParts[] = $this->shellQuote($part);
+            foreach ($cmdParts as $cmdPart) {
+                if (is_string($cmdPart)) {
+                    $quotedParts[] = $this->shellQuote($cmdPart);
+                }
             }
+
             $cmdLine = implode(' ', $quotedParts);
             $execResult = ($commandContext->exec)($cmdLine);
             $output .= $execResult->stdout;
