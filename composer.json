@@ -1,0 +1,66 @@
+{
+    "name": "shipfastlabs/bashbox",
+    "description": "A sandboxed bash interpreter for AI agents, written in pure PHP 8.4+",
+    "keywords": ["bash", "interpreter", "sandbox", "ai", "agents"],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Pushpak Chhajed"
+        }
+    ],
+    "require": {
+        "php": "^8.4.0",
+        "amphp/amp": "^3.0",
+        "amphp/byte-stream": "^2.0",
+        "amphp/file": "^3.0",
+        "amphp/http-client": "^5.0",
+        "revolt/event-loop": "^1.0"
+    },
+    "require-dev": {
+        "laravel/pint": "^1.24.0",
+        "peckphp/peck": "^0.1.3",
+        "pestphp/pest": "^4.1.0",
+        "pestphp/pest-plugin-type-coverage": "^4.0.2",
+        "phpstan/phpstan": "^2.1.26",
+        "rector/rector": "^2.1.7",
+        "symfony/var-dumper": "^7.3.3"
+    },
+    "suggest": {
+        "ext-ffi": "Required for RE2 regex engine (libre2). Falls back to PCRE with strict limits."
+    },
+    "autoload": {
+        "psr-4": {
+            "BashBox\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "BashBox\\Tests\\": "tests/"
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "config": {
+        "sort-packages": true,
+        "preferred-install": "dist",
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "scripts": {
+        "lint": "pint",
+        "refactor": "rector",
+        "test:type-coverage": "pest --type-coverage --min=100",
+        "test:typos": "peck",
+        "test:lint": "pint --test",
+        "test:unit": "pest --coverage",
+        "test:types": "phpstan",
+        "test:refactor": "rector --dry-run",
+        "test": [
+            "@test:lint",
+            "@test:types",
+            "@test:unit",
+            "@test:typos"
+        ]
+    }
+}

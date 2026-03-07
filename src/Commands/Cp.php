@@ -1,0 +1,73 @@
+<?php
+
+declare(strict_types=1);
+
+namespace BashBox\Commands;
+
+use BashBox\ExecResult;
+use RuntimeException;
+
+final class Cp extends AbstractCommand
+{
+    public function getName(): string
+    {
+        return 'cp';
+    }
+
+    public function execute(array $args, CommandContext $ctx): ExecResult
+    {
+        $parsed = $this->parseFlags($args, [
+            'r' => false,
+            'R' => false,
+        ]);
+
+        $recursive = (bool) $parsed['flags']['r'] || (bool) $parsed['flags']['R'];
+        $operands = $parsed['args'];
+
+        if (count($operands) < 2) {
+            return $this->failure("cp: missing operand\n");
+        }
+
+        $dest = array_pop($operands);
+        $destPath = $this->resolvePath($ctx, $dest);
+
+        $destIsDir = false;
+
+        try {
+            $destStat = $ctx->fs->stat($destPath);
+            $destIsDir = $destStat->isDirectory;
+        } catch (RuntimeException) {
+            // destination does not exist
+        }
+
+        if (count($operands) > 1 && ! $destIsDir) {
+            return $this->failure("cp: target '{$dest}' is not a directory\n");
+        }
+
+        $stderr = '';
+        $exitCode = 0;
+
+        foreach ($operands as $src) {
+            $srcPath = $this->resolvePath($ctx, $src);
+
+            $targetPath = $destPath;
+            if ($destIsDir) {
+                $basename = basename($src);
+                $targetPath = $destPath === '/' ? '/'.$basename : sprintf('%s/%s', $destPath, $basename);
+            }
+
+            try {
+                $ctx->fs->cp($srcPath, $targetPath, ['recursive' => $recursive]);
+            } catch (RuntimeException $e) {
+                $stderr .= sprintf('cp: %s%s', $e->getMessage(), PHP_EOL);
+                $exitCode = 1;
+            }
+        }
+
+        if ($exitCode !== 0) {
+            return $this->failure($stderr, $exitCode);
+        }
+
+        return $this->success();
+    }
+}
