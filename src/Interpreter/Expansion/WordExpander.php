@@ -1263,6 +1263,7 @@ final readonly class WordExpander
 
         if ($startOrd <= $endOrd) {
             for ($value = $startOrd; $value <= $endOrd; $value += $step) {
+                /** @var int<0, 255> $value */
                 $results[] = chr($value);
             }
 
@@ -1270,6 +1271,7 @@ final readonly class WordExpander
         }
 
         for ($value = $startOrd; $value >= $endOrd; $value -= $step) {
+            /** @var int<0, 255> $value */
             $results[] = chr($value);
         }
 

@@ -120,6 +120,9 @@ final class Echo_ extends AbstractCommand
             return "\0";
         }
 
-        return chr((int) octdec($octal));
+        $codepoint = (int) octdec($octal) & 0xFF;
+
+        /** @var int<0, 255> $codepoint */
+        return chr($codepoint);
     }
 }
