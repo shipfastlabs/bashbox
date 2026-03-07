@@ -37,7 +37,7 @@ interface FileSystemInterface
     public function rm(string $path, array $options = []): void;
 
     /**
-     * @param  array{recursive?: bool}  $options
+     * @param  array{recursive?: bool, preserve?: bool}  $options
      */
     public function cp(string $src, string $dest, array $options = []): void;
 
