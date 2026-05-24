@@ -1,7 +1,7 @@
 name: Formats
 
 on: ["push", "pull_request"]
-
+permissions: write-all
 jobs:
   ci:
     runs-on: ubuntu-latest
