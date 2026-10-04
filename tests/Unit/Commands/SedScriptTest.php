@@ -109,6 +109,7 @@ test('sed idioms, blocks, branches and file commands', $sed)->with([
     ["sed 'p}' b.txt", '', "sed: -e expression #1, char 2: unexpected `}'\n", 1],
     ["sed '1}' b.txt", '', "sed: -e expression #1, char 2: unexpected `}'\n", 1],
     ["sed '{p};}' b.txt", '', "sed: -e expression #1, char 5: unexpected `}'\n", 1],
+    ["sed '{p;1}' b.txt", '', "sed: -e expression #1, char 5: `}' doesn't want any addresses\n", 1],
     ["sed -n '{p}#x' b.txt", "one\ntwo\nthree\n"],
     ["sed -n '/x/{p' b.txt", '', "sed: -e expression #1, char 0: unmatched `{'\n", 1],
     ["sed -n '1{2{p}}' b.txt", ''],
