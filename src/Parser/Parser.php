@@ -40,6 +40,7 @@ use BashBox\Ast\WordNode;
 use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\Exceptions\ParseException;
 use BashBox\Limits;
+use LogicException;
 
 final class Parser
 {
@@ -443,7 +444,7 @@ final class Parser
         $token = $this->advance();
 
         // The lexer only emits ASSIGNMENT_WORD for NAME[subscript]+?=value.
-        preg_match('/^([a-zA-Z_]\w*(?:\[.*?\])?)(\+?)=(.*)$/s', $token->value, $m);
+        preg_match('/^([a-zA-Z_]\w*(?:\[.*?\])?)(\+?)=(.*)$/s', $token->value, $m) ?: throw new LogicException('ASSIGNMENT_WORD is not an assignment');
         [, $lhs, $plus, $rhs] = $m;
         $append = $plus === '+';
 

@@ -14,6 +14,7 @@ use Closure;
 use DateTimeImmutable;
 use DateTimeZone;
 use Exception;
+use LogicException;
 use RuntimeException;
 
 /** GNU find (findutils 4.10), visiting directory entries in sorted order where GNU takes the directory's own order. */
@@ -1225,7 +1226,7 @@ final class Find_ extends AbstractCommand
                 continue;
             }
 
-            preg_match('/\G%([-+ #]*\d*(?:\.\d*)?)/', $format, $m, 0, $i);
+            preg_match('/\G%([-+ #]*\d*(?:\.\d*)?)/', $format, $m, 0, $i) ?: throw new LogicException('format directive always starts at a percent sign');
             $end = $i + strlen($m[0]);
             $directive = $format[$end] ?? '';
             $timed = $directive !== '' && str_contains('ABCT', $directive);
@@ -1273,7 +1274,7 @@ final class Find_ extends AbstractCommand
 
     private function directive(FindEntry $findEntry, string $flags, string $directive): string
     {
-        preg_match('/^([-+ #]*)(\d*)(?:\.(\d*))?$/', $flags, $f, PREG_UNMATCHED_AS_NULL);
+        preg_match('/^([-+ #]*)(\d*)(?:\.(\d*))?$/', $flags, $f, PREG_UNMATCHED_AS_NULL) ?: throw new LogicException('flags were matched by the directive pattern');
         $mode = $findEntry->stat->mode & 07777;
 
         // %d and %m are numbers that honour the + and # flags; everything else is a string.

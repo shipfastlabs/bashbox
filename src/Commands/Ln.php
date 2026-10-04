@@ -182,7 +182,7 @@ final class Ln extends AbstractCommand
 
         if ($flags['f'] && $existing instanceof FsStat) {
             // The same directory entry; for -s, which stats the target, a symlink named twice is not the same file.
-            if ($this->canonicalName($fs, $targetPath) === $this->canonicalName($fs, $linkPath) && ! ($flags['s'] && $existing->isSymbolicLink)) {
+            if ($this->canonicalName($fs, $targetPath) === $this->canonicalName($fs, $linkPath) && (! $flags['s'] || ! $existing->isSymbolicLink)) {
                 return sprintf("'%s' and '%s' are the same file", $target, $linkName);
             }
 

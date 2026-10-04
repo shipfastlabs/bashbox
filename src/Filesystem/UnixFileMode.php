@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BashBox\Filesystem;
 
+use LogicException;
+
 final class UnixFileMode
 {
     /** The nine `ls -l` permission characters, with set-id and sticky bits: rwxr-sr-T */
@@ -38,7 +40,7 @@ final class UnixFileMode
         $new = $mode & 07777;
 
         foreach (explode(',', $spec) as $clause) {
-            preg_match('/^([ugoa]*)(.*)$/', $clause, $m);
+            preg_match('/^([ugoa]*)(.*)$/', $clause, $m) ?: throw new LogicException('pattern matches any clause');
             $affected = 0;
 
             foreach (str_split($m[1]) as $who) {

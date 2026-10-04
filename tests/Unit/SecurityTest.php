@@ -129,8 +129,8 @@ test('no dangerous function calls in codebase', function (): void {
 
         $content = file_get_contents($file->getPathname());
 
-        foreach ($dangerousFunctions as $dangerouFunction) {
-            expect($content)->not->toMatch('/'.$dangerouFunction.'/');
+        foreach ($dangerousFunctions as $dangerousFunction) {
+            expect($content)->not->toMatch('/'.$dangerousFunction.'/');
         }
     }
 });

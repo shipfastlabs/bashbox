@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
+use LogicException;
 
 final class Printf_ extends AbstractCommand
 {
@@ -93,7 +94,7 @@ final class Printf_ extends AbstractCommand
             return '%';
         }
 
-        preg_match('/^%([-+ 0#\']*)(\*|\d*)(?:(\.)(\*|\d*))?[hlLjzt]*(?:\(([^)]*)\))?(.?)$/s', $spec, $m);
+        preg_match('/^%([-+ 0#\']*)(\*|\d*)(?:(\.)(\*|\d*))?[hlLjzt]*(?:\(([^)]*)\))?(.?)$/s', $spec, $m) ?: throw new LogicException('spec is a single conversion');
         [, $flags, $width, $dot, $precision, $timeFormat, $conversion] = $m;
 
         if ($conversion === '') {
@@ -323,7 +324,7 @@ final class Printf_ extends AbstractCommand
             return ord($text[1] ?? "\0");
         }
 
-        preg_match('/^\s*([-+]?)(?:0x([\da-f]+)|(0[0-7]*)|(\d+))?/i', $text, $m, PREG_UNMATCHED_AS_NULL);
+        preg_match('/^\s*([-+]?)(?:0x([\da-f]+)|(0[0-7]*)|(\d+))?/i', $text, $m, PREG_UNMATCHED_AS_NULL) ?: throw new LogicException('pattern matches any text');
         $digits = ltrim($m[4] ?? '', '0');
 
         if (strlen($digits) > 19 || (strlen($digits) === 19 && $digits > ($m[1] === '-' ? '9223372036854775808' : '9223372036854775807'))) {
@@ -353,7 +354,7 @@ final class Printf_ extends AbstractCommand
         [$value, $prefix] = self::strtold($text);
 
         // Overflow, or underflow of a number that is not zero.
-        preg_match('/^\s*[-+]?(?:0x([\da-f.]*)|([\d.]*))/i', $prefix, $digits);
+        preg_match('/^\s*[-+]?(?:0x([\da-f.]*)|([\d.]*))/i', $prefix, $digits) ?: throw new LogicException('pattern matches any text');
 
         if (strpbrk($digits[1].($digits[2] ?? ''), '123456789abcdefABCDEF') !== false && (is_infinite($value) || abs($value) < PHP_FLOAT_MIN)) {
             $this->stderr .= "printf: {$text}: Result too large\n";
