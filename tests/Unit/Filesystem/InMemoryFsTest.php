@@ -172,13 +172,11 @@ test('readdirWithFileTypes returns typed entries', function (): void {
         }
     }
 
-    expect($fileEntry)->not->toBeNull();
-    expect($fileEntry->isFile)->toBeTrue();
-    expect($fileEntry->isDirectory)->toBeFalse();
+    expect($fileEntry?->isFile)->toBeTrue();
+    expect($fileEntry?->isDirectory)->toBeFalse();
 
-    expect($dirEntry)->not->toBeNull();
-    expect($dirEntry->isDirectory)->toBeTrue();
-    expect($dirEntry->isFile)->toBeFalse();
+    expect($dirEntry?->isDirectory)->toBeTrue();
+    expect($dirEntry?->isFile)->toBeFalse();
 });
 
 test('operations on a missing path fail with ENOENT naming the operation', function (Closure $operation, string $message): void {

@@ -107,9 +107,8 @@ test('readdirWithFileTypes includes mount points as directories', function (): v
         }
     }
 
-    expect($usbEntry)->not->toBeNull();
-    expect($usbEntry->isDirectory)->toBeTrue();
-    expect($usbEntry->isFile)->toBeFalse();
+    expect($usbEntry?->isDirectory)->toBeTrue();
+    expect($usbEntry?->isFile)->toBeFalse();
 });
 
 test('readdir merges default fs entries with mount point entries', function (): void {
