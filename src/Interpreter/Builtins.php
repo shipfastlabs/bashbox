@@ -100,7 +100,7 @@ final class Builtins
             'shopt' => $this->builtinShopt(...),
             'cd' => $this->builtinCd(...),
             'source', '.' => $this->builtinSource(...),
-            'eval' => fn (array $args, StdinStream $stdinStream): ExecResult => $this->interpreter->captureInShell(implode(' ', $args), $stdinStream, $this->interpreterState->currentLine, errorPrefix: 'bash: eval: '),
+            'eval' => $this->builtinEval(...),
             'declare', 'typeset' => $this->builtinDeclare(...),
             'printf' => $this->builtinPrintf(...),
             'read' => $this->builtinRead(...),
@@ -477,6 +477,12 @@ final class Builtins
 
         // `cd -` reports where it landed
         return new ExecResult(stdout: $arg === '-' ? $target."\n" : '');
+    }
+
+    /** @param array<int, string> $args */
+    private function builtinEval(array $args, StdinStream $stdinStream): ExecResult
+    {
+        return $this->interpreter->captureInShell(implode(' ', $args), $stdinStream, $this->interpreterState->currentLine, errorPrefix: 'bash: eval: ');
     }
 
     /** @param array<int, string> $args */
@@ -1732,7 +1738,7 @@ final class Builtins
                 // Any case, and a SIG prefix is optional for real signals only (not EXIT, DEBUG, ERR, RETURN)
                 $upper = strtoupper($arg);
                 $unprefixed = str_starts_with($upper, 'SIG') ? substr($upper, 3) : '';
-                $number = $numbers[$upper] ?? (in_array($unprefixed, $signals, true) ? $numbers[$unprefixed] : null);
+                $number = $numbers[$upper] ?? (in_array($unprefixed, $signals, true) ? ($numbers[$unprefixed] ?? null) : null);
                 $name = $number === null ? null : (string) $number;
             }
 

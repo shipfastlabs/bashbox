@@ -136,9 +136,11 @@ final class Test_ extends AbstractCommand
         if ($arg === '(') {
             $result = $this->orExpr();
 
-            if (($this->args[$this->pos++] ?? null) !== ')') {
+            if (($this->args[$this->pos] ?? null) !== ')') {
                 throw new RuntimeException("`)' expected");
             }
+
+            $this->pos++;
 
             return $result;
         }

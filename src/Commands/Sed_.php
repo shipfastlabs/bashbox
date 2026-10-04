@@ -320,7 +320,7 @@ final class Sed_ extends AbstractCommand
                 }
 
                 $long = (string) array_key_first($matches);
-                [$short, $hasArgument] = $matches[$long];
+                [$short, $hasArgument] = reset($matches);
 
                 if ($hasArgument === 0 && $value !== null) {
                     throw $this->usage(sprintf("sed: option '--%s' doesn't allow an argument\n", $long));
