@@ -179,9 +179,9 @@ final class Od extends AbstractCommand
 
     private function format(string $type, string $bytes, int $width): string
     {
-        $byte = ord($bytes);
-
         if ($type === 'a') {
+            $byte = ord($bytes);
+
             return match (true) {
                 ($byte & 0x7F) === 0x7F => 'del',
                 ($byte & 0x7F) <= 0x20 => self::NAMES[$byte & 0x7F],
@@ -190,6 +190,8 @@ final class Od extends AbstractCommand
         }
 
         if ($type === 'c') {
+            $byte = ord($bytes);
+
             return self::ESCAPES[$bytes] ?? ($byte >= 0x20 && $byte < 0x7F ? $bytes : sprintf('%03o', $byte));
         }
 
