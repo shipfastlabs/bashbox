@@ -162,10 +162,10 @@ test('symlinks are resolved physically and may wander anywhere inside the root',
     expect($this->fs->readFile('/root/a/b/file.txt'))->toBe('deep');
     expect($this->fs->readlink('/root'))->toBe('/');
     expect($this->fs->readFile('/chain/file.txt'))->toBe('deep');
-    // Inside the target, ".." walks up from /a/b, not from the link's own directory
+    // Inside the target, ".." walks up from /a/b, not from the link's own directory.
     $this->fs->symlink('/short/..', '/parent');
     expect($this->fs->readdir('/parent'))->toBe(['b', 'up']);
-    // "." and empty segments in a target are no-ops
+    // "." and empty segments in a target are no-ops.
     $this->fs->symlink('./b/.//file.txt', '/a/dotted');
     expect($this->fs->readFile('/a/dotted'))->toBe('deep');
 });
@@ -376,7 +376,7 @@ test('the quota counts the bytes the sandbox adds to the disk', function (): voi
         ->and(filesize($this->tmpDir.'/a'))->toBe(100)
         ->and(file_exists($this->tmpDir.'/copy'))->toBeFalse();
 
-    // Rewriting gives back the old size; removing a file gives back its data, existing files included
+    // Rewriting gives back the old size; removing a file gives back its data, existing files included.
     $fs->writeFile('/a', 'x');
     $fs->writeFile('/b', str_repeat('x', 90));
     $fs->rm('/seed');

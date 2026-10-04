@@ -26,7 +26,7 @@ class Head extends AbstractCommand
     {
         $name = $this->getName();
 
-        // Obsolete `-N` shorthand for `-n N`
+        // Obsolete `-N` shorthand for `-n N`.
         if (preg_match('/^-\d+$/', $args[0] ?? '') === 1) {
             $args[0] = '-n'.substr($args[0], 1);
         }
@@ -55,7 +55,7 @@ class Head extends AbstractCommand
                 $output .= ($output === '' ? '' : "\n").sprintf("==> %s <==\n", $files[$i] === '-' ? 'standard input' : $files[$i]);
             }
 
-            // Units keep their line terminators, so joining them reproduces the input exactly
+            // Units keep their line terminators, so joining them reproduces the input exactly.
             $units = $useBytes ? str_split($content) : (preg_split('/(?<=\n)/', $content, -1, PREG_SPLIT_NO_EMPTY) ?: []);
             $output .= implode('', $this->select($units, $count));
         }
@@ -69,7 +69,7 @@ class Head extends AbstractCommand
      */
     protected function select(array $units, string $count): array
     {
-        // A negative count means "all but the last N"
+        // A negative count means "all but the last N".
         return array_slice($units, 0, (int) $count);
     }
 }

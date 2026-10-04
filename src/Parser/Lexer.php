@@ -308,15 +308,17 @@ final class Lexer
         $start = $pos;
         $value = '';
         $len = strlen($this->input);
+        $subscriptEnd = null;
 
         while ($pos < $len) {
             $ch = $this->input[$pos];
             $opener = $this->opener($pos);
 
             if ($opener !== null || ($ch === '[' && $this->assignmentAcceptable() && preg_match('/^[a-zA-Z_]\w*$/', $value) === 1)) {
-                // Where an assignment can start, `name[...]` takes a whole subscript, blanks included
+                // Where an assignment can start, `name[...]` takes a whole subscript, blanks included.
                 $end = $opener === null ? $this->subscriptEnd($pos) : $this->skipQuoted($pos, $opener);
                 $value .= substr($this->input, $pos, $end - $pos);
+                $subscriptEnd ??= $opener === null ? strlen($value) : null;
                 $pos = $end;
             } elseif ($this->isWordBoundary($ch)) {
                 break;
@@ -334,7 +336,7 @@ final class Lexer
         // Quotes, substitutions and continuations may span lines.
         $this->line += substr_count($this->input, "\n", $start, $pos - $start);
 
-        return new Token($this->classifyWord($value), $value, $start, $pos, $startLine);
+        return new Token($this->classifyWord($value, $subscriptEnd), $value, $start, $pos, $startLine);
     }
 
     /** Whether the next word is in command position, where bash takes `name[...]=` as an assignment. */
@@ -389,11 +391,7 @@ final class Lexer
         return new self($text, 1, $limits)->skipQuoted($pos, $open);
     }
 
-    /**
-     * The position just past what $open opens at $pos; inside "..." only `...`, $(...) and ${...} nest.
-     * A command substitution ends where its command list does, as bash parses it; with $countParens (or a
-     * list that doesn't parse, which is reported when it runs) parentheses are counted instead.
-     */
+    /** Just past what $open opens at $pos; a command substitution ends where its list does, as bash parses it, unless $countParens or the list doesn't parse. */
     private function skipQuoted(int $pos, string $open, ?int $depth = null, bool $countParens = false): int
     {
         $depth ??= $this->depth;
@@ -476,92 +474,20 @@ final class Lexer
         return $nul === false ? $decoded : substr($decoded, 0, $nul);
     }
 
-    /** A quoted word is never a number, reserved word or name, since those can't hold quotes. */
-    private function classifyWord(string $value): TokenType
+    /** A quoted word is never a number, reserved word or name; $subscriptEnd is where a leading `name[...]` ends, as readWord() found it. */
+    private function classifyWord(string $value, ?int $subscriptEnd): TokenType
     {
+        $assignment = $subscriptEnd === null
+            ? preg_match('/^[a-zA-Z_]\w*\+?=/', $value) === 1
+            : preg_match('/^\+?=/', substr($value, $subscriptEnd)) === 1;
+
         return match (true) {
-            $this->looksLikeAssignment($value) => TokenType::ASSIGNMENT_WORD,
+            $assignment => TokenType::ASSIGNMENT_WORD,
             ctype_digit($value) => TokenType::NUMBER,
             isset(self::RESERVED_WORDS[$value]) => self::RESERVED_WORDS[$value],
             preg_match('/^[a-zA-Z_]\w*$/', $value) === 1 => TokenType::NAME,
             default => TokenType::WORD,
         };
-    }
-
-    private function looksLikeAssignment(string $value): bool
-    {
-        $eqPos = $this->findAssignmentEquals($value);
-
-        if ($eqPos === -1) {
-            return false;
-        }
-
-        $lhs = substr($value, 0, $eqPos);
-
-        // Handle += by stripping trailing +
-        if (str_ends_with($lhs, '+')) {
-            $lhs = substr($lhs, 0, -1);
-        }
-
-        return $this->isValidAssignmentLHS($lhs);
-    }
-
-    private function findAssignmentEquals(string $str): int
-    {
-        $depth = 0;
-        $len = strlen($str);
-
-        for ($i = 0; $i < $len; $i++) {
-            $c = $str[$i];
-
-            if ($c === '[') {
-                $depth++;
-            } elseif ($c === ']') {
-                $depth--;
-            } elseif ($depth === 0 && $c === '=') {
-                return $i;
-            } elseif ($depth === 0 && $c === '+' && ($i + 1 < $len) && $str[$i + 1] === '=') {
-                return $i + 1;
-            }
-        }
-
-        return -1;
-    }
-
-    private function isValidAssignmentLHS(string $str): bool
-    {
-        if (! preg_match('/^[a-zA-Z_]\w*/', $str, $matches)) {
-            return false;
-        }
-
-        $afterName = substr($str, strlen($matches[0]));
-
-        if ($afterName === '') {
-            return true;
-        }
-
-        if ($afterName[0] === '[') {
-            $depth = 0;
-            $len = strlen($afterName);
-            $i = 0;
-
-            for (; $i < $len; $i++) {
-                if ($afterName[$i] === '[') {
-                    $depth++;
-                } elseif ($afterName[$i] === ']') {
-                    $depth--;
-
-                    if ($depth === 0) {
-                        break;
-                    }
-                }
-            }
-
-            // $afterName is bracket-balanced (see findAssignmentEquals), so the loop always breaks
-            return $i === $len - 1;
-        }
-
-        return false;
     }
 
     /** The delimiter after << without its quotes, so E"OF" ends at EOF; any quoting leaves the body unexpanded. */

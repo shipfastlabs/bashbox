@@ -17,7 +17,7 @@ beforeEach(function (): void {
     $this->bash = new Bash(new BashOptions(fs: $this->fs, cwd: '/home/user', env: ['HOME' => '/home/user']));
 });
 
-// Expected output from GNU coreutils 9 `ln` (gln), LC_ALL=C, run on the same tree
+// Expected output from GNU coreutils 9 `ln` (gln), LC_ALL=C, run on the same tree.
 test('ln behaves like GNU', function (string $script, string $stdout, string $stderr, int $exitCode): void {
     $result = $this->bash->exec($script);
 

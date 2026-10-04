@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use BashBox\Bash;
 
-// <(cmd) and >(cmd) become /dev/fd/N files in the virtual filesystem for as long as the command runs.
 // Every expected value is bash 5.3's (`bash -c`, LC_ALL=en_US.UTF-8), with "bash: line N:" shortened to "bash:".
 test('process substitution behaves like bash', function (string $script, string $stdout, string $stderr = '', int $exitCode = 0): void {
     $bashExecResult = (new Bash)->exec($script);

@@ -7,9 +7,7 @@ use BashBox\BashOptions;
 use BashBox\Network\NetworkConfig;
 use BashBox\Tests\Fixtures\TestHttpServer;
 
-/**
- * A shell whose curl may reach the local test server ($BASE).
- */
+/** A shell whose curl may reach the local test server ($BASE). */
 function curlShell(int $maxResponseSize = 1024): Bash
 {
     return new Bash(new BashOptions(

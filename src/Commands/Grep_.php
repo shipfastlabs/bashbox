@@ -11,9 +11,7 @@ use BashBox\Regex\SafePcreRegex;
 use InvalidArgumentException;
 use RuntimeException;
 
-/**
- * GNU grep with options -E -F -G -e -i -v -w -x -c -l -n -o -q -h -H -r.
- */
+/** GNU grep with options -E -F -G -e -i -v -w -x -c -l -n -o -q -h -H -r. */
 final class Grep_ extends AbstractCommand
 {
     private const string USAGE = "Usage: grep [OPTION]... PATTERNS [FILE]...\nTry 'grep --help' for more information.\n";
@@ -99,7 +97,7 @@ final class Grep_ extends AbstractCommand
         $stderr = '';
         $targets = [];
 
-        // grep -r with no operand searches '.' but prints names without the './' prefix
+        // grep -r with no operand searches '.' but prints names without the './' prefix.
         $operands = $files === [] ? [['', '.']] : array_map(fn (string $file): array => [$file, $file], $files);
 
         foreach ($operands as [$label, $file]) {
@@ -124,7 +122,7 @@ final class Grep_ extends AbstractCommand
                 continue;
             }
 
-            // File names are shown for several operands or files found by recursion, unless -h; -H forces them
+            // File names are shown for several operands or files found by recursion, unless -h; -H forces them.
             $withName = $flags['H'] || (! $flags['h'] && (count($files) > 1 || $target['recursed']));
             $result = $this->grepContent($content, $target['label'], $regex, $flags, $withName);
             $output .= $result->stdout;
@@ -167,7 +165,7 @@ final class Grep_ extends AbstractCommand
             if (! $flags['o']) {
                 $output .= $prefix.$line."\n";
             } elseif (! $flags['v']) {
-                // -o prints each non-empty match on its own line
+                // -o prints each non-empty match on its own line.
                 foreach (array_filter(SafePcreRegex::matchAll($regex, $line), fn (string $match): bool => $match !== '') as $match) {
                     $output .= $prefix.$match."\n";
                 }

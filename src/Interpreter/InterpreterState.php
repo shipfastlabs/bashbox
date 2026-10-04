@@ -57,8 +57,7 @@ final class InterpreterState
     ];
 
     /**
-     * shopt options with bash's defaults for a non-interactive shell. Only the glob and match ones,
-     * expand_aliases and lastpipe change anything here; the rest are listed and stored.
+     * shopt options with bash's non-interactive defaults; only the glob and match ones, expand_aliases and lastpipe do anything.
      *
      * @var array<string, bool>
      */
@@ -177,13 +176,18 @@ final class InterpreterState
 
     public function isArray(string $name): bool
     {
-        return isset($this->arrays[$name]) || $this->hasAttribute($name, 'a') || $this->hasAttribute($name, 'A');
+        if (isset($this->arrays[$name])) {
+            return true;
+        }
+
+        if ($this->hasAttribute($name, 'a')) {
+            return true;
+        }
+
+        return $this->hasAttribute($name, 'A');
     }
 
-    /**
-     * The variable a name stands for: itself, or the end of its nameref chain, which may be an element (`a[1]`).
-     * A chain that comes back to $name is null, and reported unless $quiet.
-     */
+    /** The variable a name stands for: itself, or the end of its nameref chain (maybe `a[1]`); a circular chain is null, reported unless $quiet. */
     public function resolve(string $name, bool $quiet = false): ?string
     {
         $target = $name;
@@ -360,6 +364,13 @@ final class InterpreterState
         }
     }
 
+    public function limitOutput(int $size): void
+    {
+        if ($size > $this->limits->maxOutputSize) {
+            throw new ExecutionLimitException(sprintf('Output size limit exceeded (%d bytes)', $this->limits->maxOutputSize));
+        }
+    }
+
     /** Refuses an array or word list longer than maxArrayElements. */
     public function limitCount(int $count): void
     {
@@ -475,11 +486,7 @@ final class InterpreterState
         return array_intersect_key($this->env, $this->exported);
     }
 
-    /**
-     * Enters a function or sourced file, keeping FUNCNAME, BASH_LINENO and BASH_SOURCE in step (innermost first).
-     * The frame records the current line as the call's; $file is where the function was defined, or the sourced file.
-     * Leaving it with popFrame() puts $LINENO back on the calling line.
-     */
+    /** Enters a function (defined in $file) or sourced $file, keeping FUNCNAME, BASH_LINENO and BASH_SOURCE in step. */
     public function pushFrame(string $function, string $file): void
     {
         $this->callStack[] = ['line' => $this->currentLine, 'function' => $function, 'file' => $file];
@@ -510,10 +517,7 @@ final class InterpreterState
         }
     }
 
-    /**
-     * Values the shell provides when no variable of that name is set. `$!` and `$_` stay unset: there are no
-     * background jobs, and the last argument isn't tracked.
-     */
+    /** Values the shell provides when no variable of that name is set; `$!` and `$_` stay unset, as there are no jobs and no tracking. */
     public function getSpecialVar(string $name): ?string
     {
         return match ($name) {

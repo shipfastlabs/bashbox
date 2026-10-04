@@ -12,7 +12,7 @@ beforeEach(function (): void {
     $this->bash = new Bash(new BashOptions(fs: $this->fs, cwd: '/home/user', env: ['HOME' => '/home/user']));
 });
 
-// ===== realpath (expected outputs from GNU coreutils grealpath) =====
+// Expected outputs from GNU coreutils grealpath.
 test('realpath resolves like GNU', function (string $script, string $stdout, string $stderr, int $exitCode): void {
     $this->fs->mkdir('/home/user/d', ['recursive' => true]);
     $this->fs->symlink('d', '/home/user/link');
@@ -34,7 +34,7 @@ test('realpath resolves like GNU', function (string $script, string $stdout, str
     'missing operand' => ['realpath', '', "realpath: missing operand\nTry 'realpath --help' for more information.\n", 1],
 ]);
 
-// ===== mktemp (expected outputs from GNU coreutils gmktemp, LC_ALL=C quoting) =====
+// Expected outputs from GNU coreutils gmktemp, with LC_ALL=C quoting.
 test('mktemp creates a private file or directory', function (string $script, string $pattern, bool $directory, int $mode): void {
     $this->bash->exec('mkdir -p /x');
     $result = $this->bash->exec($script);

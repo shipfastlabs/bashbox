@@ -28,7 +28,7 @@ test('tee reports files it cannot write but still copies stdin', function (): vo
         ->and($bash->getFilesystem()->stat('/home/user/d')->isDirectory)->toBeTrue();
 });
 
-// GNU coreutils tee messages; the input still reaches stdout
+// GNU coreutils tee messages; the input still reaches stdout.
 test('tee reports files it cannot open and keeps going', function (): void {
     $bashExecResult = new Bash(new BashOptions(cwd: '/home/user'))->exec('touch file; mkdir dir; echo y | tee nodir/x file/x dir ok; echo "rc=$?"; cat ok; ls -d nodir 2>/dev/null');
 

@@ -7,10 +7,7 @@ namespace BashBox\Regex;
 /**
  * Translates POSIX basic/extended regular expressions (GNU flavour, as used by grep and sed) into PCRE.
  *
- * In brackets, single-character collating elements [.c.] and equivalence classes [=c=] are that character, as in
- * the C locale; glibc rejects longer names.
- * Limitation: PCRE returns its first match, not POSIX's leftmost-longest one: `a|ab` and `a?(ab)?` match only "a" of "ab".
- * Matching exactly like glibc needs a POSIX (DFA/NFA) engine in place of PCRE.
+ * Limitation: PCRE returns its first match, not POSIX's leftmost-longest one, so `a|ab` matches only "a" of "ab".
  */
 final class PosixRegex
 {
@@ -30,8 +27,7 @@ final class PosixRegex
     ];
 
     /**
-     * Returns a '/'-delimited PCRE pattern body (without delimiters or modifiers). A pattern glibc would reject
-     * yields a body that fails to compile and that error() reports with glibc's message.
+     * Returns a '/'-delimited PCRE pattern body, one that fails to compile (with glibc's message via error()) for a pattern glibc would reject.
      *
      * @param  bool  $ignoreLeadingOps  GNU grep's leniency: drop ERE `*`, `+` and `?` at the start of an expression and take
      *                                  malformed intervals literally, where sed (glibc regcomp()) rejects both
@@ -45,7 +41,7 @@ final class PosixRegex
         $len = strlen($pattern);
         // At the start of an expression or group a quantifier is literal, and a BRE '^' is an anchor.
         $atStart = true;
-        // Where the last repeatable item starts in $out, and whether it already has a quantifier
+        // Where the last repeatable item starts in $out, and whether it already has a quantifier.
         $atom = null;
         $repeated = false;
         $groups = [];
@@ -64,7 +60,7 @@ final class PosixRegex
                 $ch = $pattern[++$i];
             }
 
-            // One token: ( ) | a quantifier, or an anchor or atom
+            // One token: ( ) | a quantifier, or an anchor or atom.
             $special = $extended ? ! $escaped && str_contains('()|*+?{', $ch) : ($escaped ? str_contains('()|{+?', $ch) : $ch === '*');
             $kind = $special ? (str_contains('()|', $ch) ? $ch : 'repeat') : 'atom';
 
@@ -86,10 +82,10 @@ final class PosixRegex
                 }
 
                 if ($wasStart && $extended && $ch !== '{') {
-                    // GNU grep ignores a leading quantifier
+                    // GNU grep ignores a leading quantifier.
                     $atStart = true;
                 } elseif ($wasStart || $atom === null || (is_string($interval) && $ignoreLeadingOps)) {
-                    // Literal: a BRE quantifier with nothing to repeat, or one of grep's malformed intervals
+                    // Literal: a BRE quantifier with nothing to repeat, or one of grep's malformed intervals.
                     [$atom, $repeated] = [strlen($out), false];
                     $out .= '\\'.$ch;
                 } elseif (is_string($interval)) {
@@ -97,7 +93,7 @@ final class PosixRegex
                 } elseif ($repeated && ! $extended && ! $ignoreLeadingOps) {
                     return self::invalid('Invalid preceding regular expression');
                 } else {
-                    // POSIX applies stacked quantifiers in turn; in PCRE a second one would make the first lazy or possessive
+                    // POSIX applies stacked quantifiers in turn; in PCRE a second one would make the first lazy or possessive.
                     $out = $repeated ? substr($out, 0, $atom).'(?:'.substr($out, $atom).')' : $out;
                     [$out, $i, $repeated] = [$out.$interval[0], $interval[1], true];
                 }
@@ -106,13 +102,13 @@ final class PosixRegex
                 [$atom, $repeated] = [strlen($out), false];
                 $out .= $class;
             } elseif (! $escaped && ($ch === '^' || $ch === '$')) {
-                // In a BRE, ^ anchors only at the start and $ only at the end of an expression
+                // In a BRE, ^ anchors only at the start and $ only at the end of an expression.
                 $rest = substr($pattern, $i + 1);
                 $anchor = $extended || ($ch === '^' ? $wasStart : $rest === '' || str_starts_with($rest, '\)') || str_starts_with($rest, '\|'));
                 [$atom, $repeated] = $anchor ? [null, false] : [strlen($out), false];
                 $out .= match (true) {
                     ! $anchor => '\\'.$ch,
-                    // PCRE's multiline ^ would not match after a final newline, nor at a NUL
+                    // PCRE's multiline ^ would not match after a final newline, nor at a NUL.
                     $separator !== null => $ch === '^' ? sprintf('(?<![^%s])', $separator) : sprintf('(?![^%s])', $separator),
                     default => $ch,
                 };
@@ -124,10 +120,10 @@ final class PosixRegex
                     ! $escaped => preg_quote($ch, '/'),
                     $ch === '<' => '\b(?=\w)',
                     $ch === '>' => '\b(?<=\w)',
-                    // sed -z with M searches each NUL-separated record on its own
+                    // sed -z with M searches each NUL-separated record on its own.
                     $ch === '`' => $multiline === "\0" ? '(?<![^\x00])' : '\A',
                     $ch === "'" => $multiline === "\0" ? '(?![^\x00])' : '\z',
-                    // GNU treats other letters after a backslash as "stray" and matches them literally
+                    // GNU treats other letters after a backslash as "stray" and matches them literally.
                     ctype_alpha($ch) && ! str_contains('wWsSbB', $ch) => $ch,
                     default => '\\'.$ch,
                 };
@@ -149,7 +145,7 @@ final class PosixRegex
         $start = self::intervalNumber($pattern, $j, $extended, $token);
 
         if ($start === -1) {
-            // {,n} is {0,n}; {} is invalid
+            // {,n} is {0,n}; {} is invalid.
             $start = $token === ',' ? 0 : -2;
         }
 
@@ -197,9 +193,7 @@ final class PosixRegex
         return '(?#posix-error:'.$message.')(';
     }
 
-    /**
-     * Null when PCRE compiles the pattern, else the matching glibc regcomp() message (as GNU grep and sed print it).
-     */
+    /** Null when PCRE compiles the pattern, else the matching glibc regcomp() message (as GNU grep and sed print it). */
     public static function error(string $regex): ?string
     {
         $warning = null;
@@ -262,7 +256,7 @@ final class PosixRegex
 
                 if ($close !== false) {
                     $name = substr($pattern, $i + 2, $close - $i - 2);
-                    // PCRE rejects longer collating names, which error() reports as glibc does
+                    // [.c.] and [=c=] are the character itself, as in the C locale; PCRE rejects longer names, which error() reports as glibc does.
                     $out .= $pattern[$i + 1] !== ':' && strlen($name) === 1 ? preg_quote($name, '/') : substr($pattern, $i, $close + 2 - $i);
                     $i = $close + 1;
 

@@ -19,6 +19,7 @@ test('stat', function (string $script, string $stdout, string $stderr = '', int 
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'names are quoted, an empty one names no file' => ["stat 'n o' ''", '', "stat: cannot stat 'n o': No such file or directory\nstat: cannot stat '': No such file or directory\n", 1],
     'model: name, size and type (directories have size 0)' => ["stat -c '%n %s %F' f e d l", "f 6 regular file\ne 0 regular empty file\nd 0 directory\nl 1 symbolic link\n"],
     'permissions' => ["stat -c '%a %A %#a' f d", "640 -rw-r----- 0640\n755 drwxr-xr-x 0755\n"],
     'quoted name' => ["stat -c '%N' f l \"it's\"", "'f'\n'l' -> 'f'\n\"it's\"\n"],

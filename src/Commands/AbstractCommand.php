@@ -99,7 +99,7 @@ abstract class AbstractCommand implements CommandInterface
             return ['No such file or directory', 127];
         }
 
-        // `command` skips functions; the only builtins it can reach run the registered command anyway
+        // `command` skips functions; the only builtins it can reach run the registered command anyway.
         return ($commandContext->exec)('command '.implode(' ', array_map(fn (string $arg): string => "'".str_replace("'", "'\\''", $arg)."'", $argv)), $env, $stdin);
     }
 
@@ -147,8 +147,7 @@ abstract class AbstractCommand implements CommandInterface
     }
 
     /**
-     * Write a command's output file. The filesystem API creates missing parents (convenient for seeding),
-     * so this checks the parent itself, like open(2) would.
+     * Write a command's output file, checking the parent like open(2) does since the filesystem API creates missing parents.
      *
      * @throws RuntimeException with an errno message, for describeError()
      */
@@ -231,12 +230,12 @@ abstract class AbstractCommand implements CommandInterface
             return $arg;
         }
 
-        // A single quote is double-quoted when nothing else in the argument is special inside double quotes
+        // A single quote is double-quoted when nothing else in the argument is special inside double quotes.
         if (str_contains($arg, "'") && preg_match('/^(?:'.$bare.'|[ \']|(?<!.)[#~])+$/s', $arg) === 1) {
             return '"'.$arg.'"';
         }
 
-        // Control characters go in $'...' runs between the single-quoted parts
+        // Control characters go in $'...' runs between the single-quoted parts.
         $quoted = "'";
         $dollar = false;
 

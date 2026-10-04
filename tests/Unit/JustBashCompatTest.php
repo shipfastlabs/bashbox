@@ -5,9 +5,7 @@ declare(strict_types=1);
 use BashBox\Bash;
 use BashBox\BashOptions;
 
-// Behaviour ported from just-bash bug fixes, plus the shell fixes they exposed here.
-// Expected output was recorded from GNU bash 5.3 with GNU coreutils, each script run in an empty directory;
-// three sed cases use GNU sed's documented output instead, because the recording host only had BSD sed.
+// Expected output was recorded from GNU bash 5.3 and coreutils in an empty directory, except three sed cases from GNU sed's docs.
 
 test('matches bash', function (string $script, string $expected): void {
     $bash = new Bash(new BashOptions(cwd: '/home/user', env: ['TMPDIR' => '/tmp']));

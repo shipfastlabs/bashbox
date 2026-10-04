@@ -30,13 +30,13 @@ final class Sleep_ extends AbstractCommand
         $stderr = '';
 
         foreach ($operands as $operand) {
-            // strtod syntax (decimal, hex, infinity) plus a unit; only a zero may be negative
+            // strtod syntax (decimal, hex, infinity) plus a unit; only a zero may be negative.
             $valid = preg_match('/^\s*([-+]?)(?:(\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?|0x([\da-f]+\.?[\da-f]*|\.[\da-f]+)(?:p[-+]?\d+)?|inf(?:inity)?)[smhd]?$/i', $operand, $m) === 1
                 && ($m[1] !== '-' || preg_match('/^0*\.?0*$/', ($m[2] ?? '').($m[3] ?? '')) === 1 && ($m[2] ?? '').($m[3] ?? '') !== '');
             $stderr .= $valid ? '' : sprintf("sleep: invalid time interval '%s'\n", $operand);
         }
 
-        // ponytail: never actually sleeps, so scripts can't stall the sandbox
+        // The sandbox never sleeps: a valid interval returns at once, so a script can't stall it.
         return $stderr === '' ? $this->success() : $this->failure($stderr."Try 'sleep --help' for more information.\n");
     }
 }

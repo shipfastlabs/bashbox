@@ -45,7 +45,7 @@ final class Checksum extends AbstractCommand
 
         $flags = array_column($options, 1, 0);
         $check = isset($flags['c']);
-        // -b and -t override each other; the last one given wins
+        // -b and -t override each other; the last one given wins.
         $modes = array_values(array_filter(array_column($options, 0), fn (string $option): bool => $option === 'b' || $option === 't'));
         $binary = end($modes) ?: null;
 
@@ -103,7 +103,11 @@ final class Checksum extends AbstractCommand
         foreach ($lines as $number => $line) {
             $line = ltrim(rtrim($line, "\r"), " \t");
 
-            if ($line === '' || $line[0] === '#') {
+            if ($line === '') {
+                continue;
+            }
+
+            if ($line[0] === '#') {
                 continue;
             }
 
@@ -124,6 +128,7 @@ final class Checksum extends AbstractCommand
             }
 
             $counts['formatted']++;
+
             if (isset($flags['ignore-missing']) && $name !== '-' && ! $commandContext->fs->exists($this->resolvePath($commandContext, $name))) {
                 continue;
             }
@@ -171,7 +176,7 @@ final class Checksum extends AbstractCommand
             return $this->readOperand($commandContext, $file);
         } catch (RuntimeException $runtimeException) {
             $error = $this->describeError($runtimeException);
-            // GNU reads a checksum file line by line and reports a failed read without its cause
+            // GNU reads a checksum file line by line and reports a failed read without its cause.
             $this->stderr .= sprintf("%s: %s: %s\n", $this->getName(), $this->quote($file), $checksumFile && $error === 'Is a directory' ? 'read error' : $error);
 
             return null;

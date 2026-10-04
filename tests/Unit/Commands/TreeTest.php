@@ -59,7 +59,7 @@ test('tree marks unreadable subdirectories', function (): void {
         chmod($root.'/top/locked', 0755);
         rmdir($root.'/top/locked');
         rmdir($root.'/top');
-        @rmdir($root.'/tmp'); // created by Bash on startup
+        @rmdir($root.'/tmp'); // Created by Bash on startup
         rmdir($root);
     }
 

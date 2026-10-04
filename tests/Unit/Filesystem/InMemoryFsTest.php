@@ -452,7 +452,7 @@ test('hard links share one inode: writes, mode and mtime show through every name
         $stat = $this->fs->stat($name);
         expect($this->fs->readFile($name))->toBe($content)
             ->and($stat)->toMatchObject(['mode' => $mode, 'nlink' => 2])
-            // null: the write stamped a fresh mtime
+            // A null mtime means the write stamped a fresh one.
             ->and($mtime === null ? $stat->mtime >= $start : $stat->mtime === $mtime)->toBeTrue();
     }
 

@@ -38,7 +38,7 @@ final class Dirname_ extends AbstractCommand
         $lastSlash = strrpos($trimmed, '/');
 
         if ($lastSlash === false) {
-            // "/" itself trims to "", a bare name has no directory part
+            // "/" itself trims to "", a bare name has no directory part.
             return $trimmed === '' && $path !== '' ? '/' : '.';
         }
 

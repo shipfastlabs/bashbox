@@ -8,9 +8,7 @@ use BashBox\Network\NetworkConfig;
 use BashBox\Network\SecureHttpClient;
 use BashBox\Tests\Fixtures\TestHttpServer;
 
-/**
- * A client allowed to reach the local test server only.
- */
+/** A client allowed to reach the local test server only. */
 function localClient(int $maxRedirects = 5, int $maxResponseSize = 1024): SecureHttpClient
 {
     return new SecureHttpClient(new NetworkConfig(
@@ -175,8 +173,6 @@ test('the request itself is validated against the allow-list', function (): void
     expect(fn (): array => localClient()->request('GET', 'http://example.com/'))
         ->toThrow(NetworkAccessDeniedException::class, 'URL "http://example.com/" is not in the allowed URL prefixes');
 });
-
-// ===== SSRF protection (denyPrivateRanges, the default) =====
 
 function ssrfProtectedClient(): SecureHttpClient
 {

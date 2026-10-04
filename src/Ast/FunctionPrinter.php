@@ -14,11 +14,7 @@ use BashBox\Ast\Conditional\CondUnaryNode;
 use BashBox\Ast\Conditional\CondWordNode;
 use Closure;
 
-/**
- * Prints a function the way `type` and `declare -f` do: a port of bash's print_cmd.c, so the layout
- * (4-space indents, `;` placement, here-document bodies after the line that opens them) matches.
- * Lists are printed as bash's left-nested connections, which decides where here-document bodies go.
- */
+/** Prints a function the way `type` and `declare -f` do, as a port of bash's print_cmd.c so the layout matches. */
 final class FunctionPrinter
 {
     private string $out = '';
@@ -83,7 +79,7 @@ final class FunctionPrinter
             $ops[] = $statement->background ? '&' : ';';
         }
 
-        // A trailing `;` is just the end of the list; a trailing `&` stays
+        // A trailing `;` is just the end of the list; a trailing `&` stays.
         if (end($ops) === ';') {
             array_pop($ops);
         }
@@ -106,7 +102,7 @@ final class FunctionPrinter
         $items = [];
 
         foreach ($pipelineNode->commands as $i => $command) {
-            // `a |& b` is `a 2>&1 | b`
+            // `a |& b` is `a 2>&1 | b`.
             $extra = ($pipelineNode->pipeStderr[$i] ?? false) ? [new RedirectionNode('>&', new WordNode([new Parts\LiteralPart('1')]), 2)] : [];
             $items[] = fn (string $prefix) => $this->command($command, $prefix, $extra);
         }
@@ -115,8 +111,7 @@ final class FunctionPrinter
     }
 
     /**
-     * Items joined by connectors, nested to the left like bash's parse tree. Only the chain's start is
-     * indented; the items after a connector follow it on the same line, or on a new line after `;`.
+     * Items joined by connectors, nested to the left like bash's parse tree; only the chain's start is indented.
      *
      * @param  list<Closure(string): void>  $items
      * @param  list<string>  $ops  one fewer than the items, or as many for a trailing `&`
@@ -162,7 +157,7 @@ final class FunctionPrinter
                 $this->out .= ';';
             }
 
-            // Always inside a function definition: one command per line
+            // Always inside a function definition: one command per line.
             $this->out .= "\n";
 
             return;
@@ -202,7 +197,7 @@ final class FunctionPrinter
 
         assert($commandNode instanceof CompoundCommandNode);
 
-        // The parser builds only these compound commands
+        // The parser builds only these compound commands.
         match (true) { // @phpstan-ignore match.unhandled
             $commandNode instanceof ForNode => $this->forCommand($commandNode),
             $commandNode instanceof CStyleForNode => $this->cStyleFor($commandNode),
@@ -254,7 +249,7 @@ final class FunctionPrinter
 
     private function cStyleFor(CStyleForNode $cStyleForNode): void
     {
-        // An empty part reads as 1
+        // An empty part reads as 1.
         $parts = array_map(fn (?ArithmeticExpressionNode $arithmeticExpressionNode): string => $arithmeticExpressionNode->originalText ?? '1', [$cStyleForNode->init, $cStyleForNode->condition, $cStyleForNode->update]);
         $this->out .= 'for (('.implode('; ', $parts).'))';
         $this->loopBody($cStyleForNode->body);
@@ -377,14 +372,13 @@ final class FunctionPrinter
             $conditionalExpressionNode instanceof CondGroupNode => '( '.$this->condition($conditionalExpressionNode->expression).' )',
             $conditionalExpressionNode instanceof CondUnaryNode => $conditionalExpressionNode->operator.' '.$this->word($conditionalExpressionNode->operand),
             $conditionalExpressionNode instanceof CondBinaryNode => $this->word($conditionalExpressionNode->left).' '.$conditionalExpressionNode->operator.' '.$this->word($conditionalExpressionNode->right),
-            // A lone word is a -n test
+            // A lone word is a -n test.
             $conditionalExpressionNode instanceof CondWordNode => '-n '.$this->word($conditionalExpressionNode->word),
         };
     }
 
     /**
-     * Here-document headers print in place; their bodies follow the redirections, or the connector after the
-     * command when it's part of a list.
+     * Here-document bodies follow the redirections, or the connector after the command when it's part of a list.
      *
      * @param  list<RedirectionNode>  $redirections
      */
@@ -416,7 +410,7 @@ final class FunctionPrinter
         $fd = $redirectionNode->fd ?? 1;
         $op = $redirectionNode->operator;
         $target = $redirectionNode->target;
-        // The fd as written: `{name}` always shows, a number only when it isn't the operator's default
+        // The fd as written: `{name}` always shows, a number only when it isn't the operator's default.
         $named = $redirectionNode->fdVariable === null ? null : '{'.$redirectionNode->fdVariable.'}';
         $prefix = fn (int $default): string => $named ?? ($fd === $default ? '' : (string) $fd);
 
@@ -431,7 +425,7 @@ final class FunctionPrinter
         return match ($op) {
             '<', '<>', '<<<' => $prefix(0).$op.' '.$word,
             '&>', '&>>' => $op.' '.$word,
-            // `>&2` is stored as fd 1; numbers and `-` always show the fd, a word only when it isn't the default
+            // `>&2` is stored as fd 1; numbers and `-` always show the fd, a word only when it isn't the default.
             '>&', '<&' => $named !== null || preg_match('/^(\d+-?|-)$/', $word) === 1 || $fd !== ($op === '>&' ? 1 : 0)
                 ? ($named ?? $fd).($word === '-' ? '>&' : $op).$word
                 : $op.$word,

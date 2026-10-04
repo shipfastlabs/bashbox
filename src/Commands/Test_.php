@@ -7,10 +7,7 @@ namespace BashBox\Commands;
 use BashBox\ExecResult;
 use RuntimeException;
 
-/**
- * POSIX test: argument count decides the parse for up to four arguments, longer
- * expressions use the -o / -a / ! / ( ) grammar, as in bash's test.c.
- */
+/** POSIX test: the argument count decides the parse up to four arguments, longer expressions use test.c's -o -a ! ( ) grammar. */
 final class Test_ extends AbstractCommand
 {
     private const array UNARY = ['-z', '-n', '-e', '-a', '-f', '-d', '-r', '-w', '-x', '-s', '-h', '-L', '-u', '-g', '-k', '-O', '-G', '-b', '-c', '-p', '-S', '-t'];
@@ -62,9 +59,7 @@ final class Test_ extends AbstractCommand
         return $result ? $this->success() : $this->failure();
     }
 
-    /**
-     * POSIX rules for 1-3 arguments starting at $start.
-     */
+    /** POSIX rules for 1-3 arguments starting at $start. */
     private function countBased(int $start, int $count): bool
     {
         $a = $this->args[$start];
@@ -170,7 +165,7 @@ final class Test_ extends AbstractCommand
             return ($value === '') === ($op === '-z');
         }
 
-        // the sandbox has no devices, pipes, sockets or terminals
+        // The sandbox has no devices, pipes, sockets or terminals.
         if (in_array($op, ['-b', '-c', '-p', '-S', '-t'], true)) {
             return false;
         }
@@ -206,7 +201,7 @@ final class Test_ extends AbstractCommand
             '!=' => $left !== $right,
             '<' => strcmp($left, $right) < 0,
             '>' => strcmp($left, $right) > 0,
-            // A missing file counts as older than any existing one
+            // A missing file counts as older than any existing one.
             '-nt' => ($this->stat($left)->mtime ?? PHP_INT_MIN) > ($this->stat($right)->mtime ?? PHP_INT_MIN),
             '-ot' => ($this->stat($left)->mtime ?? PHP_INT_MIN) < ($this->stat($right)->mtime ?? PHP_INT_MIN),
             '-ef' => ($real = $this->realpath($left)) !== null && $real === $this->realpath($right),

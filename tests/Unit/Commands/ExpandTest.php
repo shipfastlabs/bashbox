@@ -15,6 +15,7 @@ test('expand', function (string $script, string $stdout, string $stderr = '', in
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'names are quoted when needed' => ["expand 'a b'", '', "expand: 'a b': No such file or directory\n", 1],
     'default 8' => ['expand t', "a       b       c\n        x\n"],
     'tab size' => ['expand -t 4 t', "a   b   c\n    x\n"],
     'tab list' => ['expand -t 2,5,9 t', "a b  c\n  x\n"],

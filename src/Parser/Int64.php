@@ -9,12 +9,12 @@ final class Int64
 {
     public static function add(int $a, int $b): int
     {
-        // Well inside the range (judged in floating point), PHP's own + can't overflow
+        // Well inside the range (judged in floating point), PHP's own + can't overflow.
         if (abs((float) $a + $b) < 4.0e18) {
             return $a + $b;
         }
 
-        // Add as unsigned 32-bit halves and keep the low 64 bits
+        // Add as unsigned 32-bit halves and keep the low 64 bits.
         $low = ($a & 0xFFFFFFFF) + ($b & 0xFFFFFFFF);
         $high = (($a >> 32) & 0xFFFFFFFF) + (($b >> 32) & 0xFFFFFFFF) + ($low >> 32);
 
@@ -32,7 +32,7 @@ final class Int64
             return $a * $b;
         }
 
-        // a * b mod 2^64, taking b 16 bits at a time so no partial product overflows
+        // a * b mod 2^64, taking b 16 bits at a time so no partial product overflows.
         $result = 0;
 
         for ($shift = 0; $shift < 64; $shift += 16) {

@@ -7,13 +7,7 @@ namespace BashBox\Interpreter;
 use BashBox\Filesystem\FileSystemInterface;
 use RuntimeException;
 
-/**
- * Shared, consumable stdin: `read` takes a line, a command that reads stdin takes the rest,
- * so every statement in a loop body sees what the previous one left behind.
- *
- * Also an open file description for `exec 3<file` / `3<>file`: a file-backed stream reads the
- * file's current content, and a writable one writes at the shared offset like a real fd.
- */
+/** Shared, consumable input (stdin, or a file opened by `3<file` / `3<>file`): each reader gets what the last one left. */
 final class StdinStream
 {
     private int $offset = 0;
@@ -36,8 +30,7 @@ final class StdinStream
     }
 
     /**
-     * Returns the next record without its delimiter, or null at EOF. $terminated reports
-     * whether the delimiter was found (bash's `read` fails on an unterminated last line).
+     * The next record without its delimiter, or null at EOF; $terminated says whether the delimiter was found.
      *
      * @param-out bool $terminated
      */
@@ -66,9 +59,7 @@ final class StdinStream
     }
 
     /**
-     * `read -n`/`-N`: consumes up to $count characters, stopping early at an unescaped $delimiter
-     * (consumed, not returned; null for -N) or EOF. A backslash and the character it escapes count
-     * as one, and backslash-newline as none, unless $raw. Returns the text as read, escapes included.
+     * `read -n`/`-N`: up to $count characters as read, an escape pair counting as one unless $raw; stops at an unescaped $delimiter or EOF.
      *
      * @param-out bool $terminated false when EOF came first
      */
@@ -125,10 +116,7 @@ final class StdinStream
         $this->fileSystem?->writeFile($this->path, $this->data);
     }
 
-    /**
-     * The open stream behind this fd 0 slot, for `3<&0`: later redirecting this slot (`exec <file`)
-     * must not change what the duplicate reads.
-     */
+    /** The stream behind this fd 0 slot, for `3<&0`: a later `exec <file` must not change what the duplicate reads. */
     public function dup(): self
     {
         return $this->stdinStream ??= clone $this;

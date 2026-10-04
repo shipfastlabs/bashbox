@@ -6,11 +6,7 @@ namespace BashBox\Filesystem;
 
 use RuntimeException;
 
-/**
- * Keeps /dev in memory over any filesystem, so nothing under it (/dev/null, the /dev/fd files of
- * process substitution) reaches the wrapped one. /dev/null reads empty and discards writes, and
- * symlinks are followed across both, so a link to /dev/null behaves as /dev/null.
- */
+/** Keeps /dev in memory over any filesystem, so /dev/null and process substitution's /dev/fd files never reach the wrapped one. */
 final readonly class DevFs implements FileSystemInterface
 {
     private const string NULL = '/dev/null';
@@ -244,9 +240,7 @@ final readonly class DevFs implements FileSystemInterface
     }
 
     /**
-     * The layer holding a path, after following symlinks of both layers (the last only when $followLast),
-     * and the path to hand it: resolved for /dev, or as given while only the wrapped filesystem's links
-     * were followed, so it resolves (and contains) them itself and reports errors on the caller's path.
+     * The layer holding a path after both layers' symlinks (the last only when $followLast), and the path to hand it so the wrapped filesystem contains its own links.
      *
      * @return array{FileSystemInterface, string}
      */

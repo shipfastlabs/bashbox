@@ -240,10 +240,6 @@ test('local variables in function', function (): void {
     expect($result->stdout)->toBe("inner\nouter\n");
 });
 
-// =========================================================================
-// READONLY
-// =========================================================================
-
 test('readonly variable cannot be reassigned', function (): void {
     $result = $this->bash->exec("readonly x=5\nx=10\necho \$x");
 
@@ -277,10 +273,6 @@ test('declare -r enforces readonly', function (): void {
     expect($result->stderr)->toContain('readonly variable');
     expect($result->stdout)->toBe("42\n");
 });
-
-// =========================================================================
-// TRAP
-// =========================================================================
 
 test('trap EXIT runs on script exit', function (): void {
     $result = $this->bash->exec('trap "echo goodbye" EXIT; echo hello');
@@ -325,14 +317,9 @@ test('trap RETURN set at top level does not fire for functions', function (): vo
     expect($result->stdout)->toBe("inside\nafter\n");
 });
 
-// =========================================================================
-// BUILTIN COMMAND
-// =========================================================================
-
 test('builtin command delegates to builtin', function (): void {
     $result = $this->bash->exec('builtin echo hello');
 
-    // echo is not a builtin in our system, but type/cd etc are
     $result = $this->bash->exec('builtin cd /tmp && pwd');
 
     expect($result->stdout)->toBe("/tmp\n");
@@ -344,10 +331,6 @@ test('builtin command errors for non-builtins', function (): void {
     expect($result->exitCode)->toBe(1);
     expect($result->stderr)->toContain('not a shell builtin');
 });
-
-// =========================================================================
-// EXEC BUILTIN
-// =========================================================================
 
 test('exec replaces shell with command', function (): void {
     $result = $this->bash->exec('exec echo done; echo should_not_appear');
@@ -361,10 +344,6 @@ test('exec with no args returns success', function (): void {
 
     expect($result->stdout)->toBe("still_here\n");
 });
-
-// =========================================================================
-// PUSHD / POPD / DIRS
-// =========================================================================
 
 test('pushd and popd manage directory stack', function (): void {
     $result = $this->bash->exec('mkdir -p /tmp/a /tmp/b; pushd /tmp/a; pushd /tmp/b; popd; pwd');
@@ -383,7 +362,7 @@ test('dirs -c clears stack', function (): void {
 
     $lines = array_filter(explode("\n", (string) $result->stdout));
     $lastLine = end($lines);
-    // After dirs -c, only cwd remains (no stack entries)
+    // After dirs -c, only cwd remains (no stack entries).
     expect($lastLine)->toBe('/tmp/d2');
 });
 
@@ -393,10 +372,6 @@ test('popd on empty stack errors', function (): void {
     expect($result->exitCode)->toBe(1);
     expect($result->stderr)->toContain('directory stack empty');
 });
-
-// =========================================================================
-// CALLER
-// =========================================================================
 
 test('caller reports the calling function', function (): void {
     $result = $this->bash->exec('g() { caller 0; }; f() { g; }; f');
@@ -410,10 +385,6 @@ test('caller outside function returns error', function (): void {
 
     expect($result->exitCode)->toBe(1);
 });
-
-// =========================================================================
-// HELP
-// =========================================================================
 
 test('help lists builtins', function (): void {
     $result = $this->bash->exec('help');
@@ -430,10 +401,6 @@ test('help with pattern filters', function (): void {
     expect($result->stdout)->toContain('Change');
 });
 
-// =========================================================================
-// ENABLE
-// =========================================================================
-
 test('enable -n disables builtin', function (): void {
     $result = $this->bash->exec('enable -n help; help');
 
@@ -445,10 +412,6 @@ test('enable re-enables builtin', function (): void {
 
     expect($result->exitCode)->toBe(0);
 });
-
-// =========================================================================
-// STUB BUILTINS
-// =========================================================================
 
 test('wait returns 0', function (): void {
     $result = $this->bash->exec('wait');
@@ -544,10 +507,6 @@ test('type recognizes new builtins', function (): void {
     $result = $this->bash->exec('type pushd');
     expect($result->stdout)->toContain('pushd is a shell builtin');
 });
-
-// =========================================================================
-// ARRAYS, SET, HEREDOCS, AND EXEC STATE
-// =========================================================================
 
 test('read -a splits stdin into an array', function (): void {
     $result = $this->bash->exec(<<<'BASH'

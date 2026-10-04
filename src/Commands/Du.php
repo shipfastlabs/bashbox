@@ -55,7 +55,7 @@ final class Du extends AbstractCommand
         $this->unit = 1024;
         $depth = null;
 
-        // -b, -k and -h each set the unit, so the last one wins
+        // -b, -k and -h each set the unit, so the last one wins.
         foreach ($options as [$option]) {
             $this->unit = ['b' => 1, 'k' => 1024, 'h' => 0][$option] ?? $this->unit;
         }
@@ -102,7 +102,7 @@ final class Du extends AbstractCommand
                 continue;
             }
 
-            // With several operands everything is remembered, so a repeated or nested operand is counted once
+            // With several operands everything is remembered, so a repeated or nested operand is counted once.
             [$blocks, $bytes] = $this->walk($commandContext, $path, $stat, $operand, 0, count($operands) > 1);
             $total = [$total[0] + $blocks, $total[1] + $bytes];
         }
@@ -158,7 +158,11 @@ final class Du extends AbstractCommand
     /** GNU's -h: powers of 1024, rounded up, with one decimal below 10. */
     private function human(int $bytes): string
     {
-        for ($power = 0; $bytes >= 1024 ** ($power + 1) && $power < 8; $power++);
+        $power = 0;
+
+        while ($bytes >= 1024 ** ($power + 1) && $power < 8) {
+            $power++;
+        }
 
         if ($power === 0) {
             return (string) $bytes;

@@ -100,7 +100,7 @@ test('[ requires a closing bracket', function (string $script, string $stderr, i
     'test does not strip ]' => ['test x ]', "bash: test: x: unary operator expected\n", 2],
 ]);
 
-// Results from bash 5.3's test builtin on the same tree (-g/-G as on Linux, where the sandbox user owns every file and group)
+// Results from bash 5.3's test builtin on the same tree (-g/-G as on Linux, where the sandbox user owns every file and group).
 test('test file-type and mode operators', function (string $expr, int $status): void {
     $result = $this->bash->exec('echo x > f; mkdir d; ln -s f lnk; touch su sg st; chmod 4755 su; chmod 2755 sg; chmod 1777 st; test '.$expr);
 

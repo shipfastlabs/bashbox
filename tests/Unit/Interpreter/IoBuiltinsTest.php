@@ -5,8 +5,7 @@ declare(strict_types=1);
 use BashBox\Bash;
 use BashBox\ExecOptions;
 
-// Expected outputs come from GNU bash 5.3 (`bash -c '<script>'` fed the given stdin), with bash's
-// "bash: line N:" shortened to the "bash:" BashBox reports; the few deliberate differences are commented.
+// Expected outputs come from GNU bash 5.3 (`bash -c '<script>'` fed the given stdin), with "bash: line N:" shortened to "bash:".
 
 test('fds, read, umask, kill and help', function (string $script, string $stdin, string $stdout, string $stderr, int $exitCode): void {
     $bashExecResult = (new Bash)->exec($script, new ExecOptions(stdin: $stdin));
@@ -53,9 +52,9 @@ test('fds, read, umask, kill and help', function (string $script, string $stdin,
     'command -v output follows its redirections' => ['command -v echo >f; cat f; command -v echo >&-; echo $?', '', "echo\n0\n", '', 0],
     'an arithmetic command error follows its redirections' => ['(( 1/0 )) 2>/dev/null; echo $?', '', "1\n", '', 0],
     'xtrace follows the shell stderr' => ['{ set -x; echo a; set +x; } 2>t; cat t', '', "a\n+ echo a\n+ set +x\n", '', 0],
-    // bash on macOS runs BSD head ("head: stdout: ..."); GNU head (checked with ghead) says "write error"
+    // bash on macOS runs BSD head ("head: stdout: ..."); GNU head (checked with ghead) says "write error".
     'writing to a closed fd fails for external commands too' => ['echo hi >&-; echo "rc=$?"; : >in; exec 3<in; echo hi >&3; echo "rc=$?"; printf x >&-; echo "rc=$?"; echo x | head -1 >&-; echo "rc=$?"', '', "rc=1\nrc=1\nrc=1\nrc=1\n", "bash: echo: write error: Bad file descriptor\nbash: echo: write error: Bad file descriptor\nbash: printf: write error: Bad file descriptor\nhead: write error: Bad file descriptor\n", 0],
-    // bash also prints "line 1:" here
+    // bash also prints "line 1:" here.
     'swapping works for a single command too' => ['cd /nonexistent-dir 3>&1 1>&2 2>&3 | tr a-z A-Z', '', "BASH: CD: /NONEXISTENT-DIR: NO SUCH FILE OR DIRECTORY\n", '', 0],
     '-n stops after N characters, the rest stays for the next read' => ['read -n 3 a; echo "[$a]"; read b; echo "[$b]"', "abcdef\nxyz\n", "[abc]\n[def]\n", '', 0],
     '-n stops early at the delimiter' => ['read -n 10 a; echo "[$a]"; read b; echo "[$b]"', "ab\ncd\n", "[ab]\n[cd]\n", '', 0],
@@ -104,7 +103,7 @@ test('fds, read, umask, kill and help', function (string $script, string $stdin,
     'umask rejects bad modes and keeps the old one' => ['umask 0022; umask x=r; echo rc=$?; umask u=rz; echo rc=$?; umask 8; echo rc=$?; umask 1x; echo rc=$?; umask', '', "rc=1\nrc=1\nrc=1\nrc=1\n0022\n", "bash: umask: `x': invalid symbolic mode operator\nbash: umask: `z': invalid symbolic mode character\nbash: umask: 8: octal number out of range\nbash: umask: 1x: octal number out of range\n", 0],
     'umask rejects a trailing comma' => ['umask u=r,; echo rc=$?', '', "rc=1\n", "bash: umask: `\0': invalid symbolic mode operator\n", 0],
     'umask rejects bad options' => ['umask -x; echo rc=$?', '', "rc=2\n", "bash: umask: -x: invalid option\numask: usage: umask [-p] [-S] [mode]\n", 0],
-    // Unlike chmod's mode_adjust(), bash's umask copies classes and tests X against the mask it started from
+    // Unlike chmod's mode_adjust(), bash's umask copies classes and tests X against the mask it started from.
     'umask copies classes from the starting mask' => ['umask 0022; umask u=r,g=u; umask; umask 0022; umask u=r,g+u; umask; umask 0177; umask u+x,g+X; umask; umask 0022; umask u=gw; umask', '', "0302\n0302\n0077\n0022\n", '', 0],
     'commands like chmod honour the shell umask' => ['touch f; chmod 0 f; umask 077; chmod +r f; ls -l f | cut -c1-10; umask 022; chmod +w f; ls -l f | cut -c1-10; umask u=rwx,g=rx,o=; chmod +x f; ls -l f | cut -c1-10', '', "-r--------\n-rw-------\n-rwx--x---\n", '', 0],
     'kill -l translates numbers and names' => ['kill -l 9 KILL sigkill SIGKILL kill 137 0 EXIT 15 +9 " 9"; kill -L 2', '', "KILL\n9\n9\n9\n9\nKILL\nEXIT\n0\nTERM\nKILL\nKILL\nINT\n", '', 0],
@@ -117,16 +116,16 @@ test('fds, read, umask, kill and help', function (string $script, string $stdin,
     'help with no match' => ['help nosuch; echo rc=$?', '', "rc=1\n", "bash: help: no help topics match `nosuch'.  Try `help help' or `man -k nosuch' or `info nosuch'.\n", 0],
     'help with a bad option' => ['help -x; echo rc=$?', '', "rc=2\n", "bash: help: -x: invalid option\nhelp: usage: help [-dms] [pattern ...]\n", 0],
     'help -- ends the options' => ['help -- -d; echo rc=$?', '', "rc=1\n", "bash: help: no help topics match `-d'.  Try `help help' or `man -k -d' or `info -d'.\n", 0],
-    // bash's table on Linux/glibc (bash on macOS lists the 31 BSD signals): 32 and 33 are reserved, real-time signals are named from RTMIN and RTMAX
+    // bash's table on Linux/glibc (bash on macOS lists the 31 BSD signals): 32 and 33 are reserved, real-time signals are named from RTMIN and RTMAX.
     'kill -l lists the Linux signal table' => ['kill -l', '', " 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4) SIGILL\t 5) SIGTRAP\n 6) SIGABRT\t 7) SIGBUS\t 8) SIGFPE\t 9) SIGKILL\t10) SIGUSR1\n11) SIGSEGV\t12) SIGUSR2\t13) SIGPIPE\t14) SIGALRM\t15) SIGTERM\n16) SIGSTKFLT\t17) SIGCHLD\t18) SIGCONT\t19) SIGSTOP\t20) SIGTSTP\n21) SIGTTIN\t22) SIGTTOU\t23) SIGURG\t24) SIGXCPU\t25) SIGXFSZ\n26) SIGVTALRM\t27) SIGPROF\t28) SIGWINCH\t29) SIGIO\t30) SIGPWR\n31) SIGSYS\t34) SIGRTMIN\t35) SIGRTMIN+1\t36) SIGRTMIN+2\t37) SIGRTMIN+3\n38) SIGRTMIN+4\t39) SIGRTMIN+5\t40) SIGRTMIN+6\t41) SIGRTMIN+7\t42) SIGRTMIN+8\n43) SIGRTMIN+9\t44) SIGRTMIN+10\t45) SIGRTMIN+11\t46) SIGRTMIN+12\t47) SIGRTMIN+13\n48) SIGRTMIN+14\t49) SIGRTMIN+15\t50) SIGRTMAX-14\t51) SIGRTMAX-13\t52) SIGRTMAX-12\n53) SIGRTMAX-11\t54) SIGRTMAX-10\t55) SIGRTMAX-9\t56) SIGRTMAX-8\t57) SIGRTMAX-7\n58) SIGRTMAX-6\t59) SIGRTMAX-5\t60) SIGRTMAX-4\t61) SIGRTMAX-3\t62) SIGRTMAX-2\n63) SIGRTMAX-1\t64) SIGRTMAX\t\n", '', 0],
-    // bash also matches help topics for keywords and `variables`/`%`/`!`, which BashBox has no text for
+    // bash also matches help topics for keywords and `variables`/`%`/`!`, which BashBox has no text for.
     'help with a glob first names the keywords' => ['help -s "r*"; help -d "?" "*s"', '', "Shell commands matching keyword `r*'\n\nread: read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]\nreadarray: readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]\nreadonly: readonly [-aAf] [name[=value] ...] or readonly -p\nreturn: return [n]\nShell commands matching keywords `?, *s'\n\n. - Execute commands from a file in the current shell.\n: - Null command.\n[ - Evaluate conditional expression.\nalias - Define or display aliases.\ndirs - Display directory stack.\ngetopts - Parse option arguments.\njobs - Display status of jobs.\ntimes - Display process times.\nunalias - Remove each NAME from the list of defined aliases.\n", '', 0],
-    // the version line is BashBox's BASH_VERSION on Linux
+    // The version line is BashBox's BASH_VERSION on Linux.
     'help -d wins over -m and -s, -m over -s' => ['help -ds cd; help -dm cd; help -sm true', '', "cd - Change the shell working directory.\ncd - Change the shell working directory.\nNAME\n    true - Return a successful result.\n\nSYNOPSIS\n    true\n\nDESCRIPTION\n    Return a successful result.\n    \n    Exit Status:\n    Always succeeds.\n\nSEE ALSO\n    bash(1)\n\nIMPLEMENTATION\n    GNU bash, version 5.2.0(1)-release (x86_64-pc-linux-gnu)\n    Copyright (C) 2025 Free Software Foundation, Inc.\n    License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>\n\n", '', 0],
 ]);
 
 test('help without a pattern lists the synopses in two columns, starring disabled builtins', function (): void {
-    // The layout of bash's own listing, over the builtins BashBox has
+    // The layout of bash's own listing, over the builtins BashBox has.
     expect((new Bash)->exec('enable -n cd; help')->stdout)->toBe("GNU bash, version 5.2.0(1)-release (x86_64-pc-linux-gnu)\nThese shell commands are defined internally.  Type `help' to see this list.\nType `help name' to find out more about the function `name'.\nUse `info bash' to find out more about the shell in general.\nUse `man -k' or `info' to find out more about commands not in this list.\n\nA star (*) next to a name means that the command is disabled.\n\n . [-p path] filename [arguments]        kill [-s sigspec | -n signum | -sigs>\n :                                       let arg [arg ...]\n [ arg... ]                              local [option] name[=value] ...\n alias [-p] [name[=value] ... ]          logout [n]\n bg [job_spec ...]                       mapfile [-d delim] [-n count] [-O or>\n break [n]                               popd [-n] [+N | -N]\n builtin [shell-builtin [arg ...]]       printf [-v var] format [arguments]\n caller [expr]                           pushd [-n] [+N | -N | dir]\n*cd [-L|[-P [-e]]] [-@] [dir]            pwd [-LP]\n command [-pVv] command [arg ...]        read [-Eers] [-a array] [-d delim] [>\n compgen [-V varname] [-abcdefgjksuv] >  readarray [-d delim] [-n count] [-O >\n complete [-abcdefgjksuv] [-pr] [-DEI]>  readonly [-aAf] [name[=value] ...] o>\n compopt [-o|+o option] [-DEI] [name .>  return [n]\n continue [n]                            set [-abefhkmnptuvxBCEHPT] [-o optio>\n declare [-aAfFgiIlnrtux] [name[=value>  shift [n]\n dirs [-clpv] [+N] [-N]                  shopt [-pqsu] [-o] [optname ...]\n disown [-h] [-ar] [jobspec ... | pid >  source [-p path] filename [arguments>\n echo [-neE] [arg ...]                   suspend [-f]\n enable [-a] [-dnps] [-f filename] [na>  test [expr]\n eval [arg ...]                          times\n exec [-cl] [-a name] [command [argume>  trap [-Plp] [[action] signal_spec ..>\n exit [n]                                true\n export [-fn] [name[=value] ...] or ex>  type [-afptP] name [name ...]\n false                                   typeset [-aAfFgiIlnrtux] name[=value>\n fg [job_spec]                           ulimit [-SHabcdefiklmnpqrstuvxPRT] [>\n getopts optstring name [arg ...]        umask [-p] [-S] [mode]\n hash [-lr] [-p pathname] [-dt] [name >  unalias [-a] name [name ...]\n help [-dms] [pattern ...]               unset [-f] [-v] [-n] [name ...]\n jobs [-lnprs] [jobspec ...] or jobs ->  wait [-fn] [-p var] [id ...]\n");
 });
 
@@ -141,7 +140,7 @@ test('time reports real, user and system time in the requested format', function
     'time -p is POSIX, whatever TIMEFORMAT says' => ['TIMEFORMAT=x; time -p true', "/^real 0\\.\\d{2}\nuser 0\\.\\d{2}\nsys 0\\.\\d{2}\n$/"],
     'precision, long form, %% and a trailing %' => ['TIMEFORMAT="%0R|%0lR|%%|%2U %3S|a%"; time true', "/^0\\|0m0s\\|%\\|0\\.\\d{2} 0\\.\\d{3}\\|a%\n$/"],
     'up to six places, %E for real' => ['TIMEFORMAT="%6lE %9R"; time true', "/^0m0\\.\\d{6}s 0\\.\\d{6}\n$/"],
-    // bash scales %P for milliseconds but prints it as microseconds, so the fraction is always .00
+    // bash scales %P for milliseconds but prints it as microseconds, so the fraction is always .00.
     'CPU percentage' => ['TIMEFORMAT=%P; time true', "/^\\d+\\.00\n$/"],
     'an empty TIMEFORMAT prints nothing' => ['TIMEFORMAT=; time true', '/^$/'],
     'an invalid format character' => ['TIMEFORMAT="x%y"; time true', "/^bash: TIMEFORMAT: `y': invalid format character\n$/"],

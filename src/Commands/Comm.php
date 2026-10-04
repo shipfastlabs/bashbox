@@ -118,7 +118,7 @@ final class Comm extends AbstractCommand
             }
         }
 
-        // GNU closes stdin twice when both operands are `-`, and dies on the second
+        // GNU closes stdin twice when both operands are `-`, and dies on the second.
         if ($operands === ['-', '-']) {
             return $this->failure($stderr."comm: -: Bad file descriptor\n", 1, $output);
         }

@@ -16,6 +16,8 @@ test('paste', function (string $script, string $stdout, string $stderr = '', int
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'only an unopenable file is reported' => ["mkdir 'd d'; paste 'd d' 'n o'", '', "paste: 'n o': No such file or directory\n", 1],
+    'serial quotes names' => ["paste -s 'n o' ''", '', "paste: 'n o': No such file or directory\npaste: '': No such file or directory\n", 1],
     'joins lines side by side' => ['paste a b', "1\tx\n2\ty\n3\t\n"],
     'shorter files leave empty fields' => ['paste b a c', "x\t1\tp\ny\t2\tq\n\t3\tr\n\t\ts\n"],
     'delimiter list cycles' => ['paste -d ,: a b c', "1,x:p\n2,y:q\n3,:r\n,:s\n"],

@@ -28,8 +28,7 @@ final readonly class AllowList
             $this->validateUrl($url);
         }
 
-        // Obvious cases are rejected before connecting; everything else is checked
-        // against the address actually connected to (see validateConnectedIp).
+        // Obvious cases are rejected before connecting, the rest against the address connected to (see validateConnectedIp).
         $host = strtolower(trim((string) parse_url($url, PHP_URL_HOST), '[]'));
 
         if (filter_var($host, FILTER_VALIDATE_IP) !== false) {
@@ -42,10 +41,7 @@ final readonly class AllowList
         }
     }
 
-    /**
-     * Checked against the peer address of every connection, so DNS tricks
-     * (rebinding, IPv6-only names, decimal IPs) cannot reach private ranges.
-     */
+    /** Checked against the peer address of every connection, so DNS tricks (rebinding, IPv6-only names, decimal IPs) can't reach private ranges. */
     public function validateConnectedIp(string $ip, string $url): void
     {
         if ($this->networkConfig->denyPrivateRanges && $this->isPrivateIp($ip)) {
@@ -97,8 +93,7 @@ final readonly class AllowList
             return false;
         }
 
-        // An origin-only prefix ("https://api.example.com") must not match
-        // "https://api.example.com.evil.net" or "https://api.example.com@evil.net".
+        // An origin-only prefix must not match "https://api.example.com.evil.net" or "https://api.example.com@evil.net".
         $rest = substr($url, strlen($prefix));
 
         return preg_match('~^[^:/?#]+://[^/?#]*$~', $prefix) !== 1

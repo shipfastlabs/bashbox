@@ -81,7 +81,7 @@ final class Seq extends AbstractCommand
         $direction = $step <=> 0;
         $output = '';
 
-        // Rounded to the operands' precision, so float error can't drop the last value (`seq 0.1 0.1 0.3`)
+        // Rounded to the operands' precision, so float error can't drop the last value (`seq 0.1 0.1 0.3`).
         for ($i = 0; round($value = $first + $i * $step, $decimals) * $direction <= $last * $direction; $i++) {
             $number = $format($value);
             $number = str_starts_with($number, '-') ? '-'.str_pad(substr($number, 1), $width - 1, '0', STR_PAD_LEFT) : str_pad($number, $width, '0', STR_PAD_LEFT);

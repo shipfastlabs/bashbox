@@ -8,8 +8,6 @@ use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\ExecOptions;
 use BashBox\Limits;
 
-// ===== Execution Limits =====
-
 test('infinite loop is caught by iteration limit', function (): void {
     $bash = new Bash(new BashOptions(
         limits: new Limits(maxLoopIterations: 50),
@@ -82,15 +80,11 @@ test('ordinary scripts stay under the default limits', function (string $script,
     'substitutions, fds, pipelines and here-documents' => ["exec {fd}>/dev/null; echo \$fd \$(echo \$(echo hi)) | cat | cat; cat <<EOF\nend\nEOF", "10 hi\nend\n"],
 ]);
 
-// ===== Filesystem Security =====
-
 test('null byte in filename is rejected', function (): void {
     $bash = new Bash;
     expect(fn (): \BashBox\BashExecResult => $bash->exec("echo test > /tmp/evil\x00.txt"))
         ->toThrow(RuntimeException::class);
 });
-
-// ===== No Shell Execution =====
 
 test('no proc_open in codebase', function (): void {
     $srcDir = __DIR__.'/../../src';
@@ -139,8 +133,6 @@ test('no dangerous function calls in codebase', function (): void {
         }
     }
 });
-
-// ===== Isolation =====
 
 test('subshell does not leak variables', function (): void {
     $bash = new Bash;

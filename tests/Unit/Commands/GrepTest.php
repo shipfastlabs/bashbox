@@ -109,7 +109,7 @@ test('grep reports unreadable files and directories', function (): void {
         rmdir($root.'/locked');
         unlink($root.'/secret.txt');
         unlink($root.'/open.txt');
-        @rmdir($root.'/tmp'); // created by Bash on startup
+        @rmdir($root.'/tmp'); // Created by Bash on startup
         rmdir($root);
     }
 

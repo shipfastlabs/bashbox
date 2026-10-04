@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 use BashBox\Bash;
 use BashBox\BashOptions;
-use BashBox\Limits;
 use BashBox\Filesystem\InMemoryFs;
 use BashBox\Filesystem\MountableFs;
 use BashBox\Filesystem\OverlayFs;
 use BashBox\Filesystem\ReadWriteFs;
+use BashBox\Limits;
 
 beforeEach(function (): void {
     $this->tmpDirs = [];
@@ -151,8 +151,7 @@ test('a file on disk in the middle of a path is ENOTDIR through OverlayFs', func
     expect(fn (): string => new OverlayFs($root)->readFile('/file/x'))->toThrow(RuntimeException::class, "ENOTDIR: not a directory, open '/file/x'");
 });
 
-// A full disk can't be made in real bash, so these use the messages its strerror() calls produce: ENOSPC on a
-// write is `<builtin>: write error: No space left on device`, on opening a redirection `<file>: No space left on device`.
+// A full disk can't be made in real bash, so these use its ENOSPC messages: `<builtin>: write error: ...` on a write, `<file>: ...` on opening a redirection.
 test('a full filesystem fails the command the way a full disk does', function (string $script, string $stdout, string $stderr, int $exitCode = 0): void {
     $bashExecResult = new Bash(new BashOptions(limits: new Limits(maxFilesystemBytes: 60, maxFilesystemFiles: 8)))->exec($script);
 

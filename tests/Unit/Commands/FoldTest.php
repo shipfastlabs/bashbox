@@ -15,6 +15,7 @@ test('fold', function (string $script, string $stdout, string $stderr = '', int 
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'names are quoted when needed' => ["fold \"it's\"", '', "fold: \"it's\": No such file or directory\n", 1],
     'default width 80' => ["printf '%0100d\\n' 0 | fold", "00000000000000000000000000000000000000000000000000000000000000000000000000000000\n00000000000000000000\n"],
     'width' => ['fold -w 10 a', "the quick \nbrown fox \njumps over\n the lazy \ndog\nshort\n"],
     'obsolete width' => ['fold -10 a', "the quick \nbrown fox \njumps over\n the lazy \ndog\nshort\n"],

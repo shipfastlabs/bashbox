@@ -15,6 +15,7 @@ test('unexpand', function (string $script, string $stdout, string $stderr = '', 
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'names are quoted when needed' => ["unexpand 'a b'", '', "unexpand: 'a b': No such file or directory\n", 1],
     'leading blanks only' => ['unexpand s', "\ta       b\n    c   d  e\n"],
     'all blanks' => ['unexpand -a s', "\ta\tb\n    c\td  e\n"],
     'tab size implies -a' => ['unexpand -t 4 s', "\t\ta\t\tb\n\tc\td  e\n"],

@@ -37,10 +37,7 @@ final readonly class Glob
             : preg_match('/^'.$regex.'\z/'.self::flags($pattern.$subject).($nocase ? 'i' : ''), $subject) === 1;
     }
 
-    /**
-     * Regex flags for matching that text: the sandbox's locale is UTF-8, so valid UTF-8 is matched by
-     * character (`?`, `.`, `[é]`); other bytes match one by one.
-     */
+    /** Regex flags for that text: the locale is UTF-8, so valid UTF-8 matches by character (`?`, `[é]`), anything else by byte. */
     public static function flags(string $text): string
     {
         return mb_check_encoding($text, 'UTF-8') ? 'su' : 's';

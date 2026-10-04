@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use BashBox\Bash;
 
-// The ERR trap and set -e: tested commands are exempt, and functions and subshells inherit the trap only under set -E.
 // Every expected value is bash 5.3's (`bash -c`, LC_ALL=en_US.UTF-8), with "bash: line N:" shortened to "bash:".
 test('the ERR trap and errexit behave like bash', function (string $script, string $stdout, string $stderr = '', int $exitCode = 0): void {
     $bashExecResult = (new Bash)->exec($script);

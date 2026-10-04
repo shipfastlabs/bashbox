@@ -29,6 +29,7 @@ final class Fold extends AbstractCommand
                 $args[$i] = (string) preg_replace('/^-([bcs]*)(\d)/', '-$1w$2', $arg);
             }
         }
+
         $parsed = $this->getopt($args, 'bcsw:', self::LONG);
 
         if ($parsed instanceof ExecResult) {

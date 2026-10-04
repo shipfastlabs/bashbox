@@ -47,7 +47,7 @@ final class Od extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        // -w takes its argument only when attached; alone it means 32
+        // -w takes its argument only when attached; alone it means 32.
         $args = array_map(fn (string $arg): string => preg_match('/^-[aBbcDdhHiIlLoOsvxX]*w$/', $arg) === 1 ? $arg.'32' : $arg, $args);
 
         try {
@@ -65,7 +65,7 @@ final class Od extends AbstractCommand
             $error = null;
 
             if ($option === 'A') {
-                // GNU reads the first byte even of an empty argument: its terminating NUL
+                // GNU reads the first byte even of an empty argument: its terminating NUL.
                 $radix = $value[0] ?? "\0";
                 $error = str_contains('doxn', $radix) ? null : sprintf("invalid output address radix '%s'; it must be one character from [doxn]", $radix);
             } elseif ($option === 'v') {
@@ -87,13 +87,15 @@ final class Od extends AbstractCommand
         }
 
         [$contents, $stderr] = $this->readFiles($commandContext, $files, "od: %s: %s\n");
+
         if ($contents === []) {
             return $this->failure($stderr);
         }
 
         $data = implode('', $contents);
         $status = $stderr === '' ? 0 : 1;
-        ['j' => $skip, 'N' => $limit, 'w' => $width] = $sizes;
+        ['N' => $limit, 'w' => $width] = $sizes;
+        $skip = $sizes['j'] ?? 0;
 
         if ($skip > strlen($data)) {
             return $this->failure($stderr."od: cannot skip past end of combined input\n");
@@ -117,7 +119,7 @@ final class Od extends AbstractCommand
      */
     private function dump(CommandContext $commandContext, string $data, array $specs, int $bytesPerBlock, string $radix, int $start, bool $all): string
     {
-        $lineWidth = max(array_map(fn (array $spec): int => ($spec['width'] + 1) * intdiv($bytesPerBlock, $spec['size']), $specs));
+        $lineWidth = max(0, ...array_map(fn (array $spec): int => ($spec['width'] + 1) * intdiv($bytesPerBlock, $spec['size']), $specs));
         $indent = str_repeat(' ', strlen($this->address($radix, 0)));
         $output = '';
         $previous = null;
@@ -126,7 +128,7 @@ final class Od extends AbstractCommand
         for ($offset = 0, $length = strlen($data); $offset < $length; $offset += $bytesPerBlock) {
             $block = substr($data, $offset, $bytesPerBlock);
 
-            // A run of full blocks equal to the one before shows as a single `*`
+            // A run of full blocks equal to the one before shows as a single `*`.
             if (! $all && $block === $previous && strlen($block) === $bytesPerBlock) {
                 $output .= $repeated ? '' : "*\n";
                 $repeated = true;
@@ -192,8 +194,8 @@ final class Od extends AbstractCommand
         }
 
         $size = strlen($bytes);
-        // 8-byte values wrap to PHP's signed integers, which %u, %o and %x print as unsigned
-        $value = (int) unpack([1 => 'C', 2 => 'v', 4 => 'V', 8 => 'P'][$size], $bytes)[1];
+        // 8-byte values wrap to PHP's signed integers, which %u, %o and %x print as unsigned.
+        $value = array_reduce(array_reverse(str_split($bytes)), fn (int $value, string $byte): int => $value << 8 | ord($byte), 0);
 
         return match ($type) {
             'd' => (string) ($size < 8 && $value >= 1 << ($size * 8 - 1) ? $value - (1 << ($size * 8)) : $value),

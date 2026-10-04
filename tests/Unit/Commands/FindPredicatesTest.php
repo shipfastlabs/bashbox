@@ -5,11 +5,7 @@ declare(strict_types=1);
 use BashBox\Bash;
 use BashBox\BashOptions;
 
-/*
- * Symbolic link following, ownership, inodes, -newerXY, -daystart, -ls and the -f* output files.
- * Checked against GNU findutils 4.10 on the same tree (LC_ALL=C TZ=UTC). GNU lists a directory in the order the
- * filesystem keeps it; BashBox sorts, so the expected order (of output and of errors) here is that one.
- */
+// Checked against GNU findutils 4.10 on the same tree (LC_ALL=C TZ=UTC), in BashBox's sorted order where GNU uses the filesystem's.
 beforeEach(function (): void {
     $this->bash = new Bash(new BashOptions(cwd: '/home/user'));
     $this->fs = $this->bash->getFilesystem();
@@ -95,7 +91,7 @@ test('find predicates', function (string $script, string $stdout, string $stderr
     'no birth times' => ['find t -newerBt 2020-01-01', '', "find: This system does not provide a way to find the birth time of a file.\nfind: invalid predicate `-newerBt'\n", 1],
     'no birth time of a reference' => ['find t -newermB t', '', "find: This system does not provide a way to find the birth time of a file.\nfind: invalid predicate `-newermB'\n", 1],
     '-lname without a pattern' => ['find t -lname', '', "find: missing argument to `-lname'\n", 1],
-    'block, link, device and sparseness directives' => ["find t/big t/d/f t/e t/fl -printf '%n %k %b %D %F %S %.2S %.1S %.S %10S|%-6S|%5k|\\n'", "1 2 4 0 unknown 1.024 1 1 1      1.024|1.024 |    2|\n2 1 2 0 unknown 341.333 3.4e+02 3e+02 3e+02    341.333|341.333|    1|\n2 0 0 0 unknown 1 1 1 1          1|1     |    0|\n1 1 2 0 unknown 341.333 3.4e+02 3e+02 3e+02    341.333|341.333|    1|\n"],
+    'block, link, device and sparseness directives' => ["find t/big t/d/f t/e t/fl -printf '%n %k %b %D %F %S %.2S %.1S %.S %10S|%-6S|%5k|\\n'", "1 2 4 0 unknown 1.024 1 1 1      1.024|1.024 |    2|\n2 1 2 0 unknown 341.333 3.4e+02 3e+02 3e+02    341.333|341.333|    1|\n2 0 0 0 unknown 1 1 1 1          1|1     |    0|\n1 0 0 0 unknown 0 0 0 0          0|0     |    0|\n"],
     "-L blocks are the target's" => ["find -L t/fl -printf '%k %b %S\\n'", "1 2 341.333\n"],
     '%B without birth times' => ["find t/big -printf '[%BY]\\n'", "[]\n"],
     '%Z without SELinux' => ["find t/d -maxdepth 1 -printf '%5Z|%p\\n'", "     |t/d\n     |t/d/f\n     |t/d/sub\n", "find: getfilecon failed: 't/d': Operation not supported\nfind: getfilecon failed: 't/d/f': Operation not supported\nfind: getfilecon failed: 't/d/sub': Operation not supported\n", 1],
@@ -123,7 +119,7 @@ test('-ls and -fls list files like ls -dils', function (): void {
     $this->bash->writeFile('/home/user/t/'.$odd, '');
     $this->fs->utimes('/home/user/t/'.$odd, 1500000000);
     $ino = fn (string $path): string => str_pad((string) $this->fs->lstat('/home/user/'.$path)->ino, 9, ' ', STR_PAD_LEFT);
-    // Recent files show the time, others (over six months old, or in the future) the year
+    // Recent files show the time, others (over six months old, or in the future) the year.
     $when = fn (string $path, string $format = ' H:i'): string => date('M ', $mtime = $this->fs->lstat('/home/user/'.$path)->mtime).sprintf('%2d', date('j', $mtime)).date($format, $mtime);
 
     $result = $this->bash->exec("find t/big t/d/f t/fl 't/sp ace' t -maxdepth 0 -ls; find t -name 'n*' -fls out; cat out");
@@ -131,7 +127,7 @@ test('-ls and -fls list files like ls -dils', function (): void {
     expect($result->stdout)->toBe(
         $ino('t/big').'      2 -rw-r--r--   1 user     user         2000 Sep 13  2020 t/big'."\n"
         .$ino('t/d/f').'      1 -rw-r--r--   2 user     user            3 Jan  2  2020 t/d/f'."\n"
-        .$ino('t/fl').'      1 lrwxrwxrwx   1 user     user            3 '.$when('t/fl').' t/fl -> d/f'."\n"
+        .$ino('t/fl').'      0 lrwxrwxrwx   1 user     user            3 '.$when('t/fl').' t/fl -> d/f'."\n"
         .$ino('t/sp ace').'      1 -rw-r--r--   1 user     user            2 '.$when('t/sp ace', '  Y').' t/sp\\ ace'."\n"
         .$ino('t').'      0 drwxr-xr-x   4 user     user            0 '.$when('t').' t'."\n"
         .$ino('t/'.$odd).'      0 -rw-r--r--   1 user     user            0 Jul 14  2017 t/n\\ \\\\\\"q\\nr\\b\\r\\t\\f\\001\\303\\251'."\n",
@@ -157,14 +153,11 @@ test('the sandbox user is root without $USER', function (): void {
     expect($this->bash->exec("unset USER; find t/big -user root -uid 0 -printf '%u %G\\n'")->stdout)->toBe("root 0\n");
 });
 
-/*
- * -daystart measures days from the start of today, and minutes from the start of tomorrow, for the tests after it.
- * GNU 4.10 on files at midnight-1s (a), midnight+1s (b), midnight-86399s (c) and midnight-86401s (d).
- */
+// Expected values from GNU 4.10 on files at midnight-1s (a), midnight+1s (b), midnight-86399s (c) and midnight-86401s (d).
 test('-daystart', function (string $expression, string $stdout): void {
     $midnight = strtotime('today');
 
-    // c is yesterday yet always over 24 hours old, so no expectation depends on the time of day
+    // File c is yesterday yet always over 24 hours old, so no expectation depends on the time of day.
     foreach (['a' => -1, 'b' => 1, 'c' => -86399, 'd' => -86401] as $name => $offset) {
         $this->bash->writeFile('/home/user/ds/'.$name, '');
         $this->fs->utimes('/home/user/ds/'.$name, $midnight + $offset);

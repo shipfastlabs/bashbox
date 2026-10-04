@@ -311,7 +311,7 @@ test('shell variable', function (string $script, string $stdout): void {
         '[[ $$ == $BASHPID ]] && echo same; echo "[$!]" $SECONDS $BASH_VERSINFO; [[ $BASH_VERSION == 5.* ]] && echo v5; [[ -n $HOSTNAME ]] && echo host; (( RANDOM >= 0 && RANDOM <= 32767 )) && echo rand; echo "[$IFS]"',
         "same\n[] 0 5\nv5\nhost\nrand\n[ \t\n]\n",
     ],
-    // bash run with HOME=/home/user USER=user, the sandbox's defaults
+    // bash run with HOME=/home/user USER=user, the sandbox's defaults.
     'default environment' => ['echo $HOME $USER; [[ $PATH == */usr/bin* ]] && echo path', "/home/user user\npath\n"],
     'unset in its own function keeps a local hiding the global' => ['f(){ local x=1; unset x; echo "[${x-unset}]"; x=2; echo $x; }; x=g; f; echo $x', "[unset]\n2\ng\n"],
     'unset from a called function uncovers the global' => [

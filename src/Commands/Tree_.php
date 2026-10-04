@@ -7,9 +7,7 @@ namespace BashBox\Commands;
 use BashBox\ExecResult;
 use RuntimeException;
 
-/**
- * Mirrors tree 2.x with ASCII line drawing (the non-UTF-8 locale default); only -a is supported.
- */
+/** Mirrors tree 2.x with ASCII line drawing (the non-UTF-8 locale default); only -a is supported. */
 final class Tree_ extends AbstractCommand
 {
     private int $dirCount = 0;
@@ -59,7 +57,7 @@ final class Tree_ extends AbstractCommand
                 continue;
             }
 
-            // tree counts a top-level directory only when it has visible entries
+            // tree counts a top-level directory only when it has visible entries.
             $this->dirCount += $listing === '' ? 0 : 1;
             $output .= $path."\n".$listing;
         }

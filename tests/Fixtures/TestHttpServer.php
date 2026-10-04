@@ -6,9 +6,7 @@ namespace BashBox\Tests\Fixtures;
 
 use RuntimeException;
 
-/**
- * A `php -S` server on a free local port, started once per test process.
- */
+/** A `php -S` server on a free local port, started once per test process. */
 final class TestHttpServer
 {
     private static ?string $baseUrl = null;

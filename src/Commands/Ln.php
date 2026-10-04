@@ -119,7 +119,7 @@ final class Ln extends AbstractCommand
                     : sprintf("ln: failed to access '%s': No such file or directory\n", $targetDir));
             }
         } elseif (! $flags['T'] && count($operands) > 1) {
-            // The last operand is a directory to link into; with two operands it may instead be the link name
+            // The last operand is a directory to link into; with two operands it may instead be the link name.
             $last = $operands[count($operands) - 1];
             $lastPath = $this->resolvePath($commandContext, $last);
             $isDirectory = $this->isDirectory($fs, $lastPath, ! $flags['n']);
@@ -181,7 +181,7 @@ final class Ln extends AbstractCommand
         $existing = $this->lstat($fs, $linkPath);
 
         if ($flags['f'] && $existing instanceof FsStat) {
-            // The same directory entry; for -s, which stats the target, a symlink named twice is not the same file
+            // The same directory entry; for -s, which stats the target, a symlink named twice is not the same file.
             if ($this->canonicalName($fs, $targetPath) === $this->canonicalName($fs, $linkPath) && ! ($flags['s'] && $existing->isSymbolicLink)) {
                 return sprintf("'%s' and '%s' are the same file", $target, $linkName);
             }
@@ -199,7 +199,7 @@ final class Ln extends AbstractCommand
 
         $kind = $flags['s'] ? 'symbolic link' : 'hard link';
 
-        // The filesystems would create missing parents; ln does not
+        // The filesystems would create missing parents; ln does not.
         if (! $this->isDirectory($fs, $parent, true)) {
             return sprintf("failed to create %s '%s': %s", $kind, $linkName, $fs->exists($parent) ? 'Not a directory' : 'No such file or directory');
         }

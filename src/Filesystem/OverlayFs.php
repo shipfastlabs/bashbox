@@ -6,15 +6,7 @@ namespace BashBox\Filesystem;
 
 use RuntimeException;
 
-/**
- * Reads a real directory (through a contained ReadWriteFs) and keeps every change in an
- * in-memory copy-on-write layer, so the disk is never modified.
- *
- * Paths are resolved here over the merged view, one component at a time, so a symlink in either
- * layer can point at an entry in the other. Each layer then only sees symlink-free paths, and every
- * disk access still goes through the ReadWriteFs containment. Like Linux overlayfs, copying a file
- * up gives it a new inode, so hard links that exist only on disk are not shared in the overlay.
- */
+/** Reads a real directory through a contained ReadWriteFs and keeps every change in an in-memory copy-on-write layer, so the disk is never modified. */
 final class OverlayFs implements FileSystemInterface
 {
     private readonly ReadWriteFs $readWriteFs;
@@ -22,8 +14,7 @@ final class OverlayFs implements FileSystemInterface
     private readonly InMemoryFs $inMemoryFs;
 
     /**
-     * Paths removed in the overlay. Disk entries at or below them no longer show through,
-     * even after the path is recreated in the in-memory layer.
+     * Paths removed in the overlay, whose disk entries stay hidden even after the path is recreated in memory.
      *
      * @var array<string, true>
      */
@@ -53,7 +44,7 @@ final class OverlayFs implements FileSystemInterface
     public function createExclusive(string $path, bool $directory = false): void
     {
         $path = $this->resolve($path, $directory ? 'mkdir' : 'open', false);
-        // Copying up whatever is already there makes the in-memory layer report EEXIST for it
+        // Copying up whatever is already there makes the in-memory layer report EEXIST for it.
         $this->copyUp($path);
         $this->inMemoryFs->createExclusive($path, $directory);
     }
@@ -195,10 +186,7 @@ final class OverlayFs implements FileSystemInterface
         }
     }
 
-    /**
-     * rename(2) in memory: both trees are copied up whole, so the in-memory rename sees (and keeps)
-     * every entry, and the disk versions of both paths are hidden afterwards.
-     */
+    /** rename(2) in memory: both trees are copied up whole and their disk versions hidden afterwards. */
     public function mv(string $src, string $dest): void
     {
         $src = $this->resolve($src, 'rename', false);
@@ -334,10 +322,7 @@ final class OverlayFs implements FileSystemInterface
         return '/'.implode('/', $resolved);
     }
 
-    /**
-     * A disk symlink whose target leaves the root (an absolute host path, or ".." above it) is
-     * denied, as the ReadWriteFs denies it, rather than reinterpreted inside the root.
-     */
+    /** A disk symlink leaving the root (an absolute host path, or ".." above it) is denied like ReadWriteFs does, not reinterpreted inside it. */
     private function assertDiskLinkContained(string $link, string $operation, string $path): void
     {
         try {
@@ -349,9 +334,7 @@ final class OverlayFs implements FileSystemInterface
         }
     }
 
-    /**
-     * The merged lstat of a path whose ancestors are symlink-free, or null when nothing is there.
-     */
+    /** The merged lstat of a path whose ancestors are symlink-free, or null when nothing is there. */
     private function entry(string $path): ?FsStat
     {
         if ($this->inUpper($path)) {
@@ -365,7 +348,7 @@ final class OverlayFs implements FileSystemInterface
         try {
             return $this->readWriteFs->lstat($path);
         } catch (RuntimeException $runtimeException) {
-            // A denied disk symlink stays an error rather than looking absent
+            // A denied disk symlink stays an error rather than looking absent.
             if (str_starts_with($runtimeException->getMessage(), 'ENOENT')) {
                 return null;
             }
@@ -383,9 +366,7 @@ final class OverlayFs implements FileSystemInterface
         }
     }
 
-    /**
-     * The layer that owns a path: the in-memory copy when there is one, otherwise the disk.
-     */
+    /** The layer that owns a path: the in-memory copy when there is one, otherwise the disk. */
     private function layerFor(string $path, string $operation): FileSystemInterface
     {
         if ($this->inUpper($path)) {
@@ -428,11 +409,7 @@ final class OverlayFs implements FileSystemInterface
         return true;
     }
 
-    /**
-     * Copy a disk entry, and its ancestors, into the in-memory layer before it is changed, so the
-     * change sees what is on disk (an existing directory, a file in the way, the current mode).
-     * A symlink is copied as a symlink. The path must already be resolved.
-     */
+    /** Copy a resolved disk entry and its ancestors into memory before it changes, as a new inode like Linux overlayfs, so the change sees what is on disk. */
     private function copyUp(string $path): void
     {
         if ($path !== '/') {
@@ -461,9 +438,7 @@ final class OverlayFs implements FileSystemInterface
         $this->inMemoryFs->utimes($path, $stat->mtime);
     }
 
-    /**
-     * Copy up an entry and, for a directory, everything below it.
-     */
+    /** Copy up an entry and, for a directory, everything below it. */
     private function copyUpTree(string $path): void
     {
         $this->copyUp($path);

@@ -11,9 +11,7 @@ use BashBox\Filesystem\UnixFileMode;
 use InvalidArgumentException;
 use RuntimeException;
 
-/**
- * Output is what GNU ls writes when stdout is not a terminal: one name per line.
- */
+/** Output is what GNU ls writes when stdout is not a terminal: one name per line. */
 final class Ls extends AbstractCommand
 {
     private const array LONG = [
@@ -48,7 +46,7 @@ final class Ls extends AbstractCommand
         $flags = array_column($parsed, 1, 0);
         $hidden = 'none';
 
-        // of -a and -A, the last one given wins
+        // Of -a and -A, the last one given wins.
         foreach ($parsed as [$flag]) {
             $hidden = ['a' => 'all', 'A' => 'almost'][$flag] ?? $hidden;
         }
@@ -68,7 +66,7 @@ final class Ls extends AbstractCommand
         $this->commandContext = $commandContext;
         $files = [];
         $directories = [];
-        // Like GNU, a symlink operand is followed unless -l or -d shows the link itself
+        // Like GNU, a symlink operand is followed unless -l or -d shows the link itself.
         $follow = ! isset($flags['l']) && ! isset($flags['d']);
 
         foreach ($paths as $path) {
@@ -136,7 +134,7 @@ final class Ls extends AbstractCommand
             $children[$entry->name] = $base.$entry->name;
         }
 
-        // GNU names a child in messages by joining it to the directory as given, except for "."
+        // GNU names a child in messages by joining it to the directory as given, except for ".".
         $output .= $this->format($children, $options['long'], true, match (true) {
             $display === '.' => '',
             str_ends_with($display, '/') => $display,
@@ -175,7 +173,7 @@ final class Ls extends AbstractCommand
             $stat = $this->stat($path, $this->dereference);
 
             if (! $stat instanceof FsStat) {
-                // -L on a dangling symlink: GNU still lists it, with nothing known about it
+                // -L on a dangling symlink: GNU still lists it, with nothing known about it.
                 $this->stderr .= sprintf("ls: cannot access '%s%s': No such file or directory\n", $prefix, $name);
                 $this->exitCode = max($this->exitCode, 1);
                 $rows[] = ['l?????????', '?', '?', '?', '?', $name];
@@ -190,7 +188,7 @@ final class Ls extends AbstractCommand
             // Like GNU ls, show the year instead of the time for files older than six months or in the future.
             $recent = $stat->mtime <= time() && $stat->mtime > time() - 15778476;
             $date = date('M', $stat->mtime).sprintf(' %2d ', (int) date('j', $stat->mtime)).($recent ? date('H:i', $stat->mtime) : ' '.date('Y', $stat->mtime));
-            // the sandbox user (whoami, $USER) owns every file, in a group of the same name
+            // The sandbox user (whoami, $USER) owns every file, in a group of the same name.
             $owner = $this->commandContext->env['USER'] ?? 'root';
             $rows[] = [$type.UnixFileMode::symbolic($stat->mode), (string) $stat->nlink, $owner, (string) $stat->size, $date, $name.$suffix];
         }

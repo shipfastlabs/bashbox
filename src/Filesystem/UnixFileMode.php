@@ -21,16 +21,13 @@ final class UnixFileMode
         return $text;
     }
 
-    /**
-     * Applies a chmod-style MODE (octal, or symbolic like `u+x,go=r`) to $mode: gnulib's mode_compile()
-     * plus mode_adjust(). Clauses without u/g/o/a leave bits set in $umask alone. Returns null if MODE is invalid.
-     */
+    /** Applies a chmod-style MODE (octal, or symbolic like `u+x,go=r`) as gnulib's mode_compile() and mode_adjust() do; null if MODE is invalid. */
     public static function adjust(string $spec, int $mode, bool $directory = false, int $umask = 0): ?int
     {
         if (preg_match('/^[0-7]+$/', $spec) === 1) {
             $octal = (int) octdec($spec);
 
-            // like GNU chmod, a short octal mode keeps a directory's set-id bits
+            // Like GNU chmod, a short octal mode keeps a directory's set-id bits.
             return $octal > 07777 ? null : ($directory && strlen(ltrim($spec, '0')) < 4 ? $octal | ($mode & 06000) : $octal);
         }
 
@@ -54,7 +51,7 @@ final class UnixFileMode
                 $value = 0;
 
                 if (in_array($permissions, ['u', 'g', 'o'], true)) {
-                    // copy that class's current bits to every class
+                    // Copy that class's current bits to every class.
                     $value = (($new >> ['u' => 6, 'g' => 3, 'o' => 0][$permissions]) & 7) * 0111;
                 } else {
                     foreach (str_split($permissions) as $permission) {
@@ -69,7 +66,7 @@ final class UnixFileMode
                     }
                 }
 
-                // on directories, set-id bits change only when named
+                // On directories, set-id bits change only when named.
                 $omit = $directory ? 06000 & ~($affected !== 0 ? $affected & $value : $value) : 0;
                 $value &= ($affected !== 0 ? $affected : ~$umask & 07777) & ~$omit;
                 $new = match ($operator) {

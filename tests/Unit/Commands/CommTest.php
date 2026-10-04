@@ -17,6 +17,7 @@ test('comm', function (string $script, string $stdout, string $stderr = '', int 
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'names are quoted when needed' => ["comm 'n o' a", '', "comm: 'n o': No such file or directory\n", 1],
     'three columns' => ['comm a b', "apple\n\t\tbanana\n\t\tcherry\n\tdate\n"],
     'suppress columns' => ['comm -12 a b', "banana\ncherry\n"],
     'only first' => ['comm -23 a b', "apple\n"],

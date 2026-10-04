@@ -35,4 +35,5 @@ test('head and tail', function (string $script, string $stdout, string $stderr =
     ],
     'invalid line count' => ['head -n abc a.txt', '', "head: invalid number of lines: 'abc'\n", 1],
     'invalid byte count' => ['tail -c 1x a.txt', '', "tail: invalid number of bytes: '1x'\n", 1],
+    'head quotes names always' => ["head 'n o' \"it's\" x", '', "head: cannot open 'n o' for reading: No such file or directory\nhead: cannot open \"it's\" for reading: No such file or directory\nhead: cannot open 'x' for reading: No such file or directory\n", 1],
 ]);

@@ -74,10 +74,7 @@ final class Parser
 
     public function __construct(private readonly Limits $limits = new Limits) {}
 
-    /**
-     * $line numbers the first line, for source text that sits further down a script (eval, $(...)).
-     * A $substitution is the text of $(...) or <(...), parsed up to its closing `)` as bash does.
-     */
+    /** $line numbers the first line (for eval or $(...) text further down a script); a $substitution is parsed up to its closing `)` as bash does. */
     public function parse(string $input, int $line = 1, bool $substitution = false): ScriptNode
     {
         $this->input = $substitution ? $input.')' : $input;
@@ -259,14 +256,14 @@ final class Parser
             $this->advance();
         }
 
-        $last = $this->lexer->token($this->pos - 1);
+        $token = $this->lexer->token($this->pos - 1);
 
         return new StatementNode(
             pipelines: $pipelines,
             operators: $operators,
             background: $background,
             line: $line,
-            endLine: $last->line + substr_count($this->input, "\n", $last->start, $last->end - $last->start),
+            endLine: $token->line + substr_count($this->input, "\n", $token->start, $token->end - $token->start),
         );
     }
 

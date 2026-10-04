@@ -8,9 +8,7 @@ use BashBox\ExecResult;
 use InvalidArgumentException;
 use RuntimeException;
 
-/**
- * GNU sort in the C locale: bytewise collation, blanks are space, tab and newline.
- */
+/** GNU sort in the C locale: bytewise collation, blanks are space, tab and newline. */
 final class Sort_ extends AbstractCommand
 {
     /** Long options in GNU's table order, which ambiguity messages list them in. */
@@ -209,7 +207,7 @@ final class Sort_ extends AbstractCommand
             throw $invalid('stray character in field spec');
         }
 
-        // A `b` on the start position skips blanks before it, one on the end position before that one
+        // A `b` on the start position skips blanks before it, one on the end position before that one.
         return [
             'startField' => $startField - 1,
             'startChar' => $startChar - 1,
@@ -258,7 +256,7 @@ final class Sort_ extends AbstractCommand
             return $words[$value] ?? (string) reset($matches);
         }
 
-        // Synonyms are listed together
+        // Synonyms are listed together.
         $valid = [];
 
         foreach ($words as $word => $result) {
@@ -289,7 +287,7 @@ final class Sort_ extends AbstractCommand
                 + (int) (strpbrk($key['modifiers'], 'VRdi') !== false);
 
             if ($types > 1) {
-                // -d wins over -i, so only one of them is named
+                // -d wins over -i, so only one of them is named.
                 $letters = array_filter(str_split(self::MODIFIERS), fn (string $m): bool => ! in_array($m, ['b', 'r'], true) && str_contains($key['modifiers'], $m)
                     && ! ($m === 'i' && str_contains($key['modifiers'], 'd')));
 
@@ -335,7 +333,7 @@ final class Sort_ extends AbstractCommand
         }
 
         foreach ($lines as $i => $line) {
-            // With -u, equal neighbours are out of order too
+            // With -u, equal neighbours are out of order too.
             if ($i > 0 && $this->compare($lines[$i - 1], $line) >= ($this->unique ? 0 : 1)) {
                 return $this->failure($mode === 'c' ? sprintf("sort: %s:%d: disorder: %s\n", $file, $i + 1, $line) : '');
             }
@@ -350,7 +348,7 @@ final class Sort_ extends AbstractCommand
      */
     private function sorted(array $lines): array
     {
-        // usort() is stable, so lines that compare equal keep their input order
+        // usort() is stable, so lines that compare equal keep their input order.
         usort($lines, $this->compare(...));
 
         return $lines;
@@ -393,7 +391,7 @@ final class Sort_ extends AbstractCommand
             }
         }
 
-        // Equal keys fall back to the whole line, unless -s or -u ask to keep them as equal
+        // Equal keys fall back to the whole line, unless -s or -u ask to keep them as equal.
         if ($this->keys !== [] && ($this->unique || $this->stable)) {
             return 0;
         }
@@ -420,7 +418,7 @@ final class Sort_ extends AbstractCommand
         $end = strlen($line);
 
         if ($key['endField'] !== null) {
-            // A character position of zero means the end of the field
+            // A character position of zero means the end of the field.
             $end = $this->skipFields($line, $key['endField'] + ($key['endChar'] === 0 ? 1 : 0), $key['endChar'] === 0);
 
             if ($key['endChar'] !== 0) {
@@ -440,10 +438,7 @@ final class Sort_ extends AbstractCommand
         return str_contains($key['modifiers'], 'f') ? strtoupper($text) : $text;
     }
 
-    /**
-     * Offset just past $count fields: with -t past each separator (except the last one, when ending a key on a whole field);
-     * without, past each run of blanks and the non-blanks after it.
-     */
+    /** Offset just past $count fields: with -t past each separator (not the last when ending a key on a whole field), else past each blank run and the non-blanks after it. */
     private function skipFields(string $line, int $count, bool $stopAtTab): int
     {
         $pos = 0;
@@ -543,7 +538,7 @@ final class Sort_ extends AbstractCommand
     /** -V: gnulib's filevercmp(), which sets file suffixes aside on a first pass. */
     private function compareVersions(string $a, string $b): int
     {
-        // Empty names first, then ".", "..", and other hidden names
+        // Empty names first, then ".", "..", and other hidden names.
         if ($a === '' || $b === '') {
             return ($a !== '') <=> ($b !== '');
         }

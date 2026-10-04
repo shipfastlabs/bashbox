@@ -7,13 +7,9 @@ namespace BashBox\Filesystem;
 use RuntimeException;
 
 /**
- * Reads and writes a real directory. Every lookup is resolved on disk one component at a time,
- * following symlinks, and anything that would leave the root is denied.
+ * Reads and writes a real directory, resolving every lookup on disk one component at a time and denying anything that leaves the root.
  *
- * The quota counts what the sandbox adds to the disk: bytes written, less bytes it removes, and entries made.
- *
- * Limitation: resolve-then-act is not atomic; a concurrent host process swapping a directory for a
- * symlink between the two could slip past. Needs openat()/O_NOFOLLOW, which PHP does not expose.
+ * Limitation: resolve-then-act isn't atomic, so a host process swapping a directory for a symlink in between could slip past (PHP lacks openat()).
  */
 final readonly class ReadWriteFs implements FileSystemInterface
 {
@@ -21,6 +17,7 @@ final readonly class ReadWriteFs implements FileSystemInterface
 
     /**
      * @param  bool  $allowSymlinks  false hides on-disk symlinks and refuses any lookup through one
+     * @param  DiskQuota  $diskQuota  counts what the sandbox adds: bytes written less bytes removed, and entries made
      */
     public function __construct(string $rootDir, private bool $allowSymlinks = true, private DiskQuota $diskQuota = new DiskQuota)
     {
@@ -53,11 +50,7 @@ final readonly class ReadWriteFs implements FileSystemInterface
         $this->put($path, $content, 0);
     }
 
-    /**
-     * Atomic on the host, and the new name is never followed: mkdir() for a directory; for a file,
-     * mkstemp (tempnam) makes it under a random name and link() puts it in place. Not fopen('x'):
-     * PHP expands a dangling symlink in the path before open(), so O_EXCL would land on its target.
-     */
+    /** Atomic on the host and never following the new name: mkdir(), or tempnam() then link(), since fopen('x') would follow a dangling symlink. */
     public function createExclusive(string $path, bool $directory = false): void
     {
         $operation = $directory ? 'mkdir' : 'open';
@@ -183,7 +176,7 @@ final readonly class ReadWriteFs implements FileSystemInterface
         if (is_link($real) || ! is_dir($real)) {
             $stat = $this->lstat($path);
             $this->host(fn (): bool => unlink($real), 'rm', $path);
-            // Only the last name of a file frees its data
+            // Only the last name of a file frees its data.
             $this->diskQuota->charge($stat->isFile && $stat->nlink === 1 ? -$stat->size : 0, -1, $path);
 
             return;
@@ -485,17 +478,13 @@ final readonly class ReadWriteFs implements FileSystemInterface
         return $hostPath === $this->rootDir || str_starts_with($hostPath, $this->rootDir.'/');
     }
 
-    /**
-     * Absolute host paths may reach the root through an alias (macOS /var -> /private/var).
-     */
+    /** Absolute host paths may reach the root through an alias (macOS /var -> /private/var). */
     private function canonical(string $hostPath): string
     {
         return $this->isInside($hostPath) ? $hostPath : (string) realpath($hostPath);
     }
 
-    /**
-     * Turn a host path (or symlink target) inside the root into its virtual path; anything else is returned as is.
-     */
+    /** Turn a host path (or symlink target) inside the root into its virtual path; anything else is returned as is. */
     private function toVirtual(string $hostPath): string
     {
         $canonical = str_starts_with($hostPath, '/') ? $this->canonical($hostPath) : $hostPath;

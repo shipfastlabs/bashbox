@@ -28,7 +28,7 @@ final class Chmod extends AbstractCommand
                 break;
             }
 
-            // `-w`, `-x`, `-rwx` are modes, not options
+            // `-w`, `-x`, `-rwx` are modes, not options.
             if (preg_match('/^-[cfvR]+$/', $arg) === 1) {
                 foreach (str_split(substr($arg, 1)) as $letter) {
                     $options[$letter] = true;
@@ -59,7 +59,7 @@ final class Chmod extends AbstractCommand
             $this->change($commandContext, $spec, $options, $operand, $this->resolvePath($commandContext, $operand), true, $output, $stderr, $failed);
         }
 
-        // -f only silences the messages; the exit status still reports the failure
+        // -f only silences the messages; the exit status still reports the failure.
         return $failed ? $this->failure($stderr, 1, $output) : $this->success($output);
     }
 

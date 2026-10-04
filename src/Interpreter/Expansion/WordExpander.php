@@ -6,6 +6,7 @@ namespace BashBox\Interpreter\Expansion;
 
 use BashBox\Ast\Parts\LiteralPart;
 use BashBox\Ast\WordNode;
+use BashBox\Ast\WordPart;
 use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\Exceptions\ExpansionException;
 use BashBox\Exceptions\ParseException;
@@ -24,10 +25,7 @@ final class WordExpander
         private readonly Interpreter $interpreter,
     ) {}
 
-    // Field-mode markers: while expandToList() runs, quoted text is wrapped in Q_OPEN/Q_CLOSE,
-    // unquoted expansion results in X_OPEN/X_CLOSE (the only text IFS may split), and "$@"
-    // elements are separated by BREAK. splitFields() turns that into words in one pass.
-    // Text itself never holds a raw \x00-\x06 byte there: esc() writes each as \x00 plus the byte + 0x40.
+    // Field-mode markers for splitFields(): quoted text, IFS-splittable results (X_*) and "$@" breaks; esc() keeps raw \x00-\x06 out
     private const string Q_OPEN = "\x01";
 
     private const string Q_CLOSE = "\x02";
@@ -67,13 +65,10 @@ final class WordExpander
         });
     }
 
-    /**
-     * A pattern word, as in `case` and `[[ == ]]`: quoted characters come back backslash-escaped so they match literally.
-     * With $regex it is the PCRE body of `[[ =~ ]]`, its quoted characters escaped for PCRE instead.
-     */
+    /** A pattern word (`case`, `[[ == ]]`, or with $regex the PCRE body of `[[ =~ ]]`) whose quoted characters match literally. */
     public function expandPattern(WordNode $wordNode, bool $regex = false): string
     {
-        return $this->expandPatternWord(implode('', array_map(fn (\BashBox\Ast\WordPart $wordPart): string => $wordPart instanceof LiteralPart ? $wordPart->value : '', $wordNode->parts)), $regex);
+        return $this->expandPatternWord(self::literalText($wordNode), $regex);
     }
 
     /** Turns marked text into a glob pattern (or regex): quoted characters come back escaped so they match literally. */
@@ -313,8 +308,6 @@ final class WordExpander
 
     private function expandLiteralValue(string $value): string
     {
-        // Process inline variable expansions within literal text
-        // This handles $VAR, ${VAR}, ${VAR:-default}, $((expr)), $(cmd) in raw token text
         $result = '';
         $len = strlen($value);
         $i = 0;
@@ -412,14 +405,17 @@ final class WordExpander
             $this->inDoubleQuotes = true;
             $i = 0;
 
-            return $this->interpreterState->limitString($this->expandQuotedText(implode('', array_map(fn (\BashBox\Ast\WordPart $wordPart): string => $wordPart instanceof LiteralPart ? $wordPart->value : '', $wordNode->parts)), $i, ''));
+            return $this->interpreterState->limitString($this->expandQuotedText(self::literalText($wordNode), $i, ''));
         });
     }
 
-    /**
-     * Text as inside double quotes, from $i up to $stop (or the end when it's ''): expansions run, and a
-     * backslash only escapes $, `, \, a newline and $stop.
-     */
+    /** A word's literal text, unexpanded: how the parser stores heredoc bodies and what alias names and `[key]=` are read from */
+    public static function literalText(WordNode $wordNode): string
+    {
+        return implode('', array_map(fn (WordPart $wordPart): string => $wordPart instanceof LiteralPart ? $wordPart->value : '', $wordNode->parts));
+    }
+
+    /** Text as inside double quotes from $i up to $stop (or the end): a backslash only escapes $, `, \, a newline and $stop. */
     private function expandQuotedText(string $value, int &$i, string $stop): string
     {
         $result = '';
@@ -467,15 +463,14 @@ final class WordExpander
      */
     private function expandDollarInLiteral(string $value, int $i): array
     {
-        $i++; // Skip $
+        $i++;
         $ch = $value[$i];
 
-        // $(( — arithmetic expansion, $( — command substitution
         if ($ch === '(') {
             $end = $this->matchingEnd($value, $i - 1, '$(');
 
             if (($value[$i + 1] ?? '') === '(') {
-                $result = $this->interpreter->evaluateArithmeticString(substr($value, $i + 2, $end - $i - 4));
+                $result = $this->interpreter->arithmetic->evaluateString(substr($value, $i + 2, $end - $i - 4));
 
                 return ['value' => (string) $result, 'pos' => $end];
             }
@@ -582,8 +577,8 @@ final class WordExpander
         }
 
         if (preg_match('/^:([^:]*)(?::(.*))?$/s', $rest, $op) === 1) {
-            $offset = $this->interpreter->evaluateArithmeticString($op[1]);
-            $length = isset($op[2]) ? $this->interpreter->evaluateArithmeticString($op[2]) : null;
+            $offset = $this->interpreter->arithmetic->evaluateString($op[1]);
+            $length = isset($op[2]) ? $this->interpreter->arithmetic->evaluateString($op[2]) : null;
 
             if ($list === null) {
                 $value ??= $this->boundValue($name, $subscript);
@@ -718,10 +713,7 @@ final class WordExpander
         return $value ?? '';
     }
 
-    /**
-     * Associative arrays (any string key) are indexed by the expanded subscript, indexed arrays by its
-     * arithmetic value; a negative index counts back from the end.
-     */
+    /** An associative array's key is the expanded subscript, an indexed one's its arithmetic value, negative counting back from the end. */
     private function arrayKey(string $name, string $subscript): int|string
     {
         $array = $this->interpreterState->getArray($name);
@@ -731,7 +723,7 @@ final class WordExpander
             return $key;
         }
 
-        $index = $this->interpreter->fatalArithmetic($key);
+        $index = $this->interpreter->arithmetic->evaluateOrExit($key);
 
         return $index < 0 && $array !== [] ? $index + (int) max(array_keys($array)) + 1 : $index;
     }
@@ -862,8 +854,7 @@ final class WordExpander
     }
 
     /**
-     * Pathname expansion, after the shopt glob options: dotglob, nocaseglob, globstar (`**`), extglob,
-     * and nullglob or failglob for a pattern that matches nothing.
+     * Pathname expansion, honouring dotglob, nocaseglob, globstar, extglob, nullglob and failglob.
      *
      * @return list<string>
      */
@@ -947,8 +938,7 @@ final class WordExpander
     }
 
     /**
-     * Entries of $real matching $component as [display, real, is a directory]; $recursive walks into
-     * subdirectories (but not symlinks to them), for `**`.
+     * Entries of $real matching $component as [display, real, is a directory]; $recursive walks into real subdirectories, for `**`.
      *
      * @return list<array{string, string, bool}>
      */

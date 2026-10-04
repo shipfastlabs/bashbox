@@ -788,7 +788,7 @@ test('sed reports bad options with the usage text', function (string $script, st
         ->and($result->stderr)->toBe($message.SED_USAGE)
         ->and($result->exitCode)->toBe(1);
 })->with([
-    // glibc's getopt wording
+    // glibc's getopt wording.
     ['sed --s p b.txt', "sed: option '--s' is ambiguous; possibilities: '--silent' '--sandbox' '--separate'\n"],
     ['sed --quiet=x p b.txt', "sed: option '--quiet' doesn't allow an argument\n"],
     ['sed --expression', "sed: option '--expression' requires an argument\n"],
@@ -805,7 +805,7 @@ test('sed --help prints the usage text', function (): void {
 });
 
 test('e runs its command in the sandboxed shell', function (): void {
-    // GNU sed runs /bin/sh, which words the error its own way
+    // GNU sed runs /bin/sh, which words the error its own way.
     $result = $this->bash->exec("echo 'x' | sed 'e'");
 
     expect($result->stdout)->toBe("\n")

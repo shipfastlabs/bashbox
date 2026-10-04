@@ -15,6 +15,7 @@ test('nl', function (string $script, string $stdout, string $stderr = '', int $e
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'names are quoted when needed' => ["mkdir 'd d'; nl 'd d' ''", '', "nl: 'd d': Is a directory\nnl: '': No such file or directory\n", 1],
     'numbers non-empty lines' => ['nl a.txt', "     1\tone\n       \n     2\ttwo\n       \n       \n       \n     3\tthree\n"],
     'all lines' => ['nl -ba a.txt', "     1\tone\n     2\t\n     3\ttwo\n     4\t\n     5\t\n     6\t\n     7\tthree\n"],
     'no lines' => ['nl -bn a.txt', "       one\n       \n       two\n       \n       \n       \n       three\n"],

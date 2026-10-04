@@ -174,7 +174,9 @@ class Expand extends AbstractCommand
             return [$column + $this->size - $column % $this->size, false];
         }
 
-        for (; $index < count($this->stops); $index++) {
+        $counter = count($this->stops);
+
+        for (; $index < $counter; $index++) {
             if ($column < $this->stops[$index]) {
                 return [$this->stops[$index], false];
             }

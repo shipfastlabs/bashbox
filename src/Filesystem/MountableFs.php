@@ -8,9 +8,7 @@ use RuntimeException;
 
 final class MountableFs implements FileSystemInterface
 {
-    /**
-     * @var array<string, FileSystemInterface>
-     */
+    /** @var array<string, FileSystemInterface> */
     private array $mounts = [];
 
     public function __construct(
@@ -98,7 +96,7 @@ final class MountableFs implements FileSystemInterface
 
         $entriesMap = array_column($fs->readdirWithFileTypes($innerPath), null, 'name');
 
-        // Mount points below this directory show up as directories in it
+        // Mount points below this directory show up as directories in it.
         $prefix = $normalized === '/' ? '/' : $normalized.'/';
 
         foreach (array_keys($this->mounts) as $mp) {
@@ -131,7 +129,6 @@ final class MountableFs implements FileSystemInterface
             return;
         }
 
-        // Cross-filesystem copy
         $recursive = $options['recursive'] ?? false;
         $fsStat = $srcFs->stat($srcInner);
 

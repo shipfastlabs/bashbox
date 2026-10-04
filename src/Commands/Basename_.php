@@ -34,7 +34,7 @@ final class Basename_ extends AbstractCommand
             return $this->usageError('missing operand');
         }
 
-        // Without -a or -s, a second operand is the suffix
+        // Without -a or -s, a second operand is the suffix.
         if (! isset($flags['a']) && ! isset($flags['s'])) {
             if (isset($names[2])) {
                 return $this->usageError(sprintf("extra operand '%s'", $names[2]));
@@ -58,7 +58,7 @@ final class Basename_ extends AbstractCommand
 
         $base = substr($trimmed, (int) strrpos('/'.$trimmed, '/'));
 
-        // The suffix is not removed when it is the whole name
+        // The suffix is not removed when it is the whole name.
         return $suffix !== '' && $base !== $suffix && str_ends_with($base, $suffix) ? substr($base, 0, -strlen($suffix)) : $base;
     }
 }

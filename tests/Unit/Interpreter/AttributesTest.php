@@ -5,8 +5,7 @@ declare(strict_types=1);
 use BashBox\Bash;
 use BashBox\BashOptions;
 
-// Expected values come from GNU bash 5.3 (`bash -c`, HOME/USER/PATH as BashBox's defaults), with its
-// "bash: line 1:" stderr prefix shortened to "bash:".
+// Expected values come from GNU bash 5.3 (`bash -c`, HOME/USER/PATH as BashBox's defaults), with "bash: line 1:" shortened to "bash:".
 
 function runAttributes(string $script): array
 {

@@ -19,7 +19,7 @@ final class Echo_ extends AbstractCommand
         $interpretEscapes = false;
         $i = 0;
 
-        // Options end at the first word that isn't made up only of n, e and E (so "--" or "-x" are printed)
+        // Options end at the first word that isn't made up only of n, e and E (so "--" or "-x" are printed).
         for (; $i < count($args) && preg_match('/^-[neE]+$/', $args[$i]) === 1; $i++) {
             foreach (str_split(substr($args[$i], 1)) as $flag) {
                 if ($flag === 'n') {

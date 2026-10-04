@@ -52,7 +52,7 @@ final class Mktemp extends AbstractCommand
             }
         }
 
-        // -q silences creation failures only; template errors are always reported, as in GNU
+        // -q silences creation failures only; template errors are always reported, as in GNU.
         $fail = fn (string $message): ExecResult => $this->failure($quiet ? '' : sprintf("mktemp: %s\n", $message));
 
         if ($useTmpdir && $template !== null && str_contains($template, '/')) {
@@ -61,7 +61,7 @@ final class Mktemp extends AbstractCommand
 
         $tmpBase = ($commandContext->env['TMPDIR'] ?? '') !== '' ? $commandContext->env['TMPDIR'] : '/tmp';
 
-        // No template or -p/-t: the name goes in a temp dir; an explicit template is relative to the cwd
+        // No template or -p/-t: the name goes in a temp dir; an explicit template is relative to the cwd.
         $base = match (true) {
             $template === null, $tmpdir !== null => ($tmpdir ?? '') !== '' ? $tmpdir : $tmpBase,
             $useTmpdir => $tmpBase,
@@ -78,7 +78,7 @@ final class Mktemp extends AbstractCommand
 
         $failure = sprintf("failed to create %s via template '%s%s%s': %%s", $directory ? 'directory' : 'file', $base !== null ? rtrim($base, '/').'/' : '', $template, $suffix);
 
-        // createExclusive never replaces an entry, so losing a race for a name just means another try
+        // createExclusive never replaces an entry, so losing a race for a name just means another try.
         for ($attempt = 0; $attempt < 100; $attempt++) {
             $random = '';
 

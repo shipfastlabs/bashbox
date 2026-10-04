@@ -48,7 +48,7 @@ final class Wc extends AbstractCommand
             $rows[] = [$totals, ' total'];
         }
 
-        // GNU sizes columns to fit the total byte count; stdin's size is unknown, so it reserves 7
+        // GNU sizes columns to fit the total byte count; stdin's size is unknown, so it reserves 7.
         $width = count($columns) === 1 && count($operands) <= 1
             ? 1
             : max(in_array('-', $operands ?: ['-'], true) ? 7 : 1, strlen((string) $totals['c']));

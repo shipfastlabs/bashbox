@@ -131,7 +131,7 @@ test('sort options', function (string $script, string $stdout, string $stderr = 
     'a directory operand' => ['mkdir d; sort d', '', "sort: read failed: d: Is a directory\n", 2],
 ]);
 
-// GNU coreutils sort messages
+// GNU coreutils sort messages.
 test('sort -o reports an output file it cannot open', function (string $output, string $stderr): void {
     $result = $this->bash->exec(sprintf("printf 'b\\na\\n' > in; touch file; mkdir dir; sort -o %s in; echo \"rc=\$?\"", $output));
 

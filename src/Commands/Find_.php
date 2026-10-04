@@ -16,16 +16,7 @@ use DateTimeZone;
 use Exception;
 use RuntimeException;
 
-/**
- * GNU find (findutils 4.10). Directory entries are visited in sorted order, where GNU takes whatever order the directory has.
- * The virtual filesystem keeps one timestamp, so access and change times are the modification time, and like Linux it
- * has no birth time, so -newerXY with B is rejected the way GNU on Linux rejects it.
- *
- * The sandbox user (whoami, $USER) owns every file, with uid and gid 1000 (0 for root), and a group of the same name.
- * Block counts (-ls, %k, %b, %S) assume 1K allocation blocks, like ls -l's total. With no devices, mount table or SELinux,
- * %D is 0, %F is "unknown" (what GNU prints for a filesystem missing from the mount table), and %Z fails like a GNU
- * build without SELinux support. Output files (-fprint and friends) are truncated when parsed and written at the end.
- */
+/** GNU find (findutils 4.10), visiting directory entries in sorted order where GNU takes the directory's own order. */
 final class Find_ extends AbstractCommand
 {
     /** -regextype names in the order GNU lists them, and the syntax each one uses here. */
@@ -144,7 +135,7 @@ final class Find_ extends AbstractCommand
 
         $first = 0;
 
-        // -H, -L and -P come before the start points, the last one winning; -- ends them
+        // -H, -L and -P come before the start points, the last one winning; -- ends them.
         while (in_array($option = $args[$first] ?? '', ['-H', '-L', '-P', '--'], true)) {
             $first++;
 
@@ -210,7 +201,7 @@ final class Find_ extends AbstractCommand
             $this->flush($id);
         }
 
-        // Like a buffered stream, the output lands at the end, unless the file has been removed meanwhile
+        // Like a buffered stream, the output lands at the end, unless the file has been removed meanwhile.
         foreach ($this->files as $path => $content) {
             if ($content !== '' && $commandContext->fs->exists($path)) {
                 $commandContext->fs->writeFile($path, $content);
@@ -220,10 +211,6 @@ final class Find_ extends AbstractCommand
         return new ExecResult(stdout: $this->stdout, stderr: $this->stderr, exitCode: $this->failed ? 1 : 0);
     }
 
-    // =========================================================================
-    // WALKING
-    // =========================================================================
-
     /**
      * @param  Closure(FindEntry): bool  $expression
      */
@@ -232,7 +219,7 @@ final class Find_ extends AbstractCommand
         $this->pruned = false;
         $real = $this->follow === 'L' && $findEntry->type === 'd' ? $this->commandContext->fs->realpath($findEntry->path) : null;
 
-        // Following links can lead back to a directory being walked
+        // Following links can lead back to a directory being walked.
         if ($real !== null && isset($this->ancestors[$real])) {
             $this->error(sprintf("File system loop detected; '%s' is part of the same file system loop as '%s'.", $findEntry->display, $this->ancestors[$real]));
 
@@ -260,7 +247,7 @@ final class Find_ extends AbstractCommand
                     break;
                 }
 
-                // GNU keeps the start point as given, so "dir/" gives "dir/x" and "dir//" gives "dir//x"
+                // GNU keeps the start point as given, so "dir/" gives "dir/x" and "dir//" gives "dir//x".
                 $path = rtrim($findEntry->path, '/').'/'.$name;
                 $display = $findEntry->display.(str_ends_with($findEntry->display, '/') ? '' : '/').$name;
 
@@ -337,10 +324,6 @@ final class Find_ extends AbstractCommand
         $this->failed = true;
     }
 
-    // =========================================================================
-    // PARSING: expression := or (',' or)*, or := and ('-o' and)*, and := unary ('-a'? unary)*
-    // =========================================================================
-
     /** Start points run until the first argument that looks like part of an expression. */
     private function looksLikeExpression(string $arg): bool
     {
@@ -362,6 +345,8 @@ final class Find_ extends AbstractCommand
     }
 
     /**
+     * Expression grammar: expression := or (',' or)*, or := and ('-o' and)*, and := unary ('-a'? unary)*.
+     *
      * @return Closure(FindEntry): bool
      *
      * @phpstan-impure
@@ -466,7 +451,7 @@ final class Find_ extends AbstractCommand
         $token = $this->tokens[$this->at++];
 
         if (! str_starts_with($token, '-')) {
-            // GNU guesses at an unquoted glob that the shell expanded into existing names
+            // GNU guesses at an unquoted glob that the shell expanded into existing names.
             $hint = $this->lastPredicate !== '' && $this->commandContext->fs->exists($this->resolvePath($this->commandContext, $token))
                 ? "\nfind: possible unquoted pattern after predicate `{$this->lastPredicate}'?"
                 : '';
@@ -522,10 +507,6 @@ final class Find_ extends AbstractCommand
         };
     }
 
-    // =========================================================================
-    // TESTS
-    // =========================================================================
-
     /** The base name -name matches: trailing slashes do not count, but "/" stays "/". */
     private function nameOf(string $display): string
     {
@@ -545,7 +526,7 @@ final class Find_ extends AbstractCommand
     {
         $flags = str_starts_with($predicate, '-i') ? FNM_CASEFOLD : 0;
 
-        // A path pattern ending in "/" can only match a start point given that way
+        // A path pattern ending in "/" can only match a start point given that way.
         if (str_ends_with($pattern, '/') && ! array_any($this->startPoints, fn (string $start): bool => fnmatch($pattern, $start, $flags))) {
             $this->stderr .= "find: warning: {$predicate} {$pattern} will not match anything because it ends with /.\n";
         }
@@ -579,12 +560,10 @@ final class Find_ extends AbstractCommand
         return fn (FindEntry $findEntry): bool => SafePcreRegex::match($regex, $findEntry->display);
     }
 
-    /**
-     * Emacs syntax, find's default, is a BRE where `+` and `?` are operators and `\{` is not an interval.
-     */
+    /** Emacs syntax, find's default, is a BRE where `+` and `?` are operators and `\{` is not an interval. */
     private function emacsToBasic(string $pattern): string
     {
-        // Bracket expressions are the same in both
+        // Bracket expressions are the same in both.
         return (string) preg_replace_callback(
             '/\[\^?\]?(?:\[:[a-z]+:\]|[^]])*\]|\\\\([\s\S])|[+?]/',
             fn (array $m): string => match (true) {
@@ -630,15 +609,13 @@ final class Find_ extends AbstractCommand
             return fn (FindEntry $findEntry): bool => isset($wanted[$findEntry->type]);
         }
 
-        // -xtype looks at the link itself when links are followed, and at its target (a broken one stays a link) when not
+        // -xtype looks at the link itself when links are followed, and at its target (a broken one stays a link) when not.
         return fn (FindEntry $findEntry): bool => isset($wanted[$this->following($findEntry->depth)
             ? $this->typeOf($this->commandContext->fs->lstat($findEntry->path))
             : strtr($this->targetType($findEntry), 'NL', 'll')]);
     }
 
-    /**
-     * The type of what a symbolic link points to: N when it is broken, L when it is part of a loop.
-     */
+    /** The type of what a symbolic link points to: N when it is broken, L when it is part of a loop. */
     private function targetType(FindEntry $findEntry): string
     {
         if ($findEntry->type !== 'l') {
@@ -667,7 +644,7 @@ final class Find_ extends AbstractCommand
             throw new RuntimeException(sprintf("Invalid argument `%s' to -size", $spec));
         }
 
-        // Sizes are rounded up to whole units
+        // Sizes are rounded up to whole units.
         return fn (FindEntry $findEntry): bool => $this->compare((int) ceil($findEntry->stat->size / $unit), $m[1], (int) $m[2]);
     }
 
@@ -786,8 +763,7 @@ final class Find_ extends AbstractCommand
     }
 
     /**
-     * -mtime N matches ages from N up to N+1 days, +N beyond N+1 days, and -N up to N days;
-     * -mmin N matches ages from N-1 up to N minutes, +N beyond N and -N below N.
+     * -mtime N matches ages from N up to N+1 days (+N beyond, -N below); -mmin N from N-1 up to N minutes (+N beyond N, -N below N).
      *
      * @return Closure(FindEntry): bool
      */
@@ -797,7 +773,7 @@ final class Find_ extends AbstractCommand
             throw new RuntimeException(sprintf("invalid argument `%s' to `%s'", $spec, $predicate));
         }
 
-        // GNU's origin: a day ago (or the start of today with -daystart) for days, less a second for -N; a day after that for minutes
+        // GNU's origin: a day ago (or the start of today with -daystart) for days, less a second for -N; a day after that for minutes.
         $dayStart = $this->midnight ?? $this->now - 86400;
         $origin = $unit === 60 ? $dayStart + 86400 : $dayStart + ($m[1] === '-' ? 86399 : 0);
         $reference = $origin - (float) $m[2] * $unit;
@@ -814,7 +790,7 @@ final class Find_ extends AbstractCommand
     {
         $kind = in_array($spec[0] ?? '', ['-', '/'], true) ? $spec[0] : '';
         $mode = substr($spec, strlen($kind));
-        // +NNN was an old GNU extension, now rejected
+        // +NNN was an old GNU extension, now rejected.
         $file = UnixFileMode::adjust($mode, 0);
         $directory = UnixFileMode::adjust($mode, 0, true);
 
@@ -844,7 +820,7 @@ final class Find_ extends AbstractCommand
     /** @return Closure(FindEntry): bool */
     private function accessTest(int $bit): Closure
     {
-        // Permission checks follow symbolic links, and use the owner's bits since the sandbox user owns everything
+        // Permission checks follow symbolic links, and use the owner's bits since the sandbox user owns everything.
         return function (FindEntry $findEntry) use ($bit): bool {
             try {
                 return ($this->commandContext->fs->stat($findEntry->path)->mode & $bit) !== 0;
@@ -853,10 +829,6 @@ final class Find_ extends AbstractCommand
             }
         };
     }
-
-    // =========================================================================
-    // OPTIONS
-    // =========================================================================
 
     /** @return Closure(FindEntry): bool */
     private function setDepth(string $option, string $value): Closure
@@ -877,7 +849,7 @@ final class Find_ extends AbstractCommand
     /** @return Closure(FindEntry): bool */
     private function dayStart(): Closure
     {
-        // GNU takes the time of day off now, so a repeated -daystart changes nothing
+        // GNU takes the time of day off now, so a repeated -daystart changes nothing.
         [$hours, $minutes, $seconds] = array_map(intval(...), explode(':', $this->time($this->now, 'G:i:s')));
         $this->midnight ??= $this->now - $hours * 3600 - $minutes * 60 - $seconds;
 
@@ -900,10 +872,6 @@ final class Find_ extends AbstractCommand
 
         return fn (): bool => true;
     }
-
-    // =========================================================================
-    // ACTIONS
-    // =========================================================================
 
     /**
      * Where an action writes: stdout, or a file opened (and truncated) now, which actions naming the same file share.
@@ -972,7 +940,7 @@ final class Find_ extends AbstractCommand
 
                 return str_pad((string) $value, $this->lsWidths[$i], ' ', $pad);
             };
-            // The year replaces the time for files over six months old or in the future
+            // The year replaces the time for files over six months old or in the future.
             $recent = $stat->mtime >= $this->now - 15552000 && $stat->mtime <= $this->now + 3600;
 
             $write(implode(' ', [
@@ -1005,10 +973,10 @@ final class Find_ extends AbstractCommand
         }, $name);
     }
 
-    /** Allocated 1K blocks, like ls -l's total. */
+    /** Allocated 1K blocks, like ls -l's total and du: a symlink's target is stored in its inode. */
     private function blocks(FsStat $fsStat): int
     {
-        return (int) ceil($fsStat->size / 1024);
+        return $fsStat->isSymbolicLink ? 0 : (int) ceil($fsStat->size / 1024);
     }
 
     /** @return Closure(FindEntry): bool */
@@ -1043,7 +1011,7 @@ final class Find_ extends AbstractCommand
         $this->depthFirst = true;
 
         return function (FindEntry $findEntry): bool {
-            // GNU never removes the "." it was started from
+            // GNU never removes the "." it was started from.
             if ($this->nameOf($findEntry->display) === '.') {
                 return true;
             }
@@ -1126,7 +1094,7 @@ final class Find_ extends AbstractCommand
         return function (FindEntry $findEntry) use ($id, $inDirectory): bool {
             [$dir, $name] = $this->execTarget($findEntry, $inDirectory);
 
-            // -execdir runs separately for each directory
+            // -execdir runs separately for each directory.
             if ($this->batches[$id]['paths'] !== [] && $this->batches[$id]['dir'] !== $dir) {
                 $this->flush($id);
             }
@@ -1163,7 +1131,7 @@ final class Find_ extends AbstractCommand
     private function flush(int $id): void
     {
         if ($this->batches[$id]['paths'] !== []) {
-            // Any failing run makes find fail, though the action itself is always true
+            // Any failing run makes find fail, though the action itself is always true.
             if ($this->run([...$this->batches[$id]['command'], ...$this->batches[$id]['paths']], $this->batches[$id]['dir']) !== 0) {
                 $this->failed = true;
             }
@@ -1191,15 +1159,11 @@ final class Find_ extends AbstractCommand
         $execResult = ($this->commandContext->exec)(($dir === null ? '' : "cd '".str_replace("'", "'\\''", $dir)."' && ").$script);
         $this->stdout .= $execResult->stdout;
         $this->checkOutputSize($this->commandContext, strlen($this->stdout));
-        // find reports a command it cannot run itself
+        // find reports a command it cannot run itself.
         $this->stderr .= $execResult->exitCode === 127 ? "find: '{$command[0]}': No such file or directory\n" : $execResult->stderr;
 
         return $execResult->exitCode;
     }
-
-    // =========================================================================
-    // -printf
-    // =========================================================================
 
     /**
      * Parsed up front, like GNU, so format warnings come before any output.
@@ -1220,7 +1184,7 @@ final class Find_ extends AbstractCommand
                 $next = $format[$i + 1] ?? null;
 
                 if ($next === 'c') {
-                    // \c ends the output for this file
+                    // \c ends the output for this file.
                     $length = $i;
 
                     break;
@@ -1312,7 +1276,7 @@ final class Find_ extends AbstractCommand
         preg_match('/^([-+ #]*)(\d*)(?:\.(\d*))?$/', $flags, $f, PREG_UNMATCHED_AS_NULL);
         $mode = $findEntry->stat->mode & 07777;
 
-        // %d and %m are numbers that honour the + and # flags; everything else is a string
+        // %d and %m are numbers that honour the + and # flags; everything else is a string.
         $value = match ($directive[0]) {
             'd' => (str_contains((string) $f[1], '+') ? '+' : '').$findEntry->depth,
             'm' => (str_contains((string) $f[1], '#') && $mode !== 0 ? '0' : '').decoct($mode),
@@ -1331,6 +1295,7 @@ final class Find_ extends AbstractCommand
             'b' => (string) ($this->blocks($findEntry->stat) * 2),
             'u', 'g' => $this->user,
             'U', 'G' => (string) $this->uid(),
+            // No devices or mount table: GNU prints "unknown" for a filesystem missing from the mount table.
             'D' => '0',
             'F' => 'unknown',
             'S' => $this->sparseness($findEntry->stat, $f[3]),
@@ -1353,15 +1318,13 @@ final class Find_ extends AbstractCommand
         };
     }
 
-    /**
-     * Allocated bytes over the size, as C's %g (to an optional precision); an empty file counts as 1.
-     */
+    /** Allocated bytes over the size, as C's %g (to an optional precision); an empty file counts as 1. */
     private function sparseness(FsStat $fsStat, ?string $precision): string
     {
         $ratio = $fsStat->size === 0 ? 1 : $this->blocks($fsStat) * 1024 / $fsStat->size;
         $value = sprintf('%.'.max(1, (int) ($precision ?? 6)).'g', $ratio);
 
-        // C drops trailing zeros and writes at least two exponent digits
+        // C drops trailing zeros and writes at least two exponent digits.
         return (string) preg_replace(['/\.?0+e/', '/e([+-])(\d)$/'], ['e', 'e${1}0$2'], $value);
     }
 

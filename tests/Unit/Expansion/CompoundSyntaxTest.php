@@ -26,7 +26,7 @@ test('compound commands and arithmetic match bash', function (string $script, st
     ],
 ]);
 
-// Checked against GNU bash 5.3
+// Checked against GNU bash 5.3.
 test('substitutions end where the lexer ends them', function (string $script, string $expected): void {
     $result = $this->bash->exec($script);
 

@@ -31,10 +31,10 @@ final class Xargs extends AbstractCommand
         'max-procs' => ['P', true],
     ];
 
-    // What a bare -e, -i or -l means
+    // What a bare -e, -i or -l means.
     private const array DEFAULTS = ['e' => '--eof=', 'i' => '--replace={}', 'l' => '--max-lines=1'];
 
-    // The command buffer GNU uses on Linux
+    // The command buffer GNU uses on Linux.
     private const int ARG_MAX = 131072;
 
     private const array ESCAPES = ['a' => "\x07", 'b' => "\x08", 'f' => "\f", 'n' => "\n", 'r' => "\r", 't' => "\t", 'v' => "\v", '\\' => '\\'];
@@ -94,34 +94,44 @@ final class Xargs extends AbstractCommand
                 switch ($option) {
                     case '0':
                         $delimiter = "\0";
+
                         break;
+
                     case 'd':
                         $delimiter = $this->delimiter($value);
+
                         break;
+
                     case 'E':
                     case 'e':
                         $eof = $value === '' ? null : $value;
+
                         break;
+
                     case 'I':
                     case 'i':
                         $replace = $value;
                         $this->warnExclusive($maxArgs > 0, '--replace/-I/-i', '--max-args');
                         $this->warnExclusive($maxLines > 0, '--replace/-I/-i', '--max-lines');
                         [$maxArgs, $maxLines] = [0, 0];
+
                         break;
+
                     case 'L':
                     case 'l':
                         $maxLines = $this->number($value, $option, 1);
                         $this->warnExclusive($maxArgs > 0, $option === 'L' ? '-L' : '--max-lines/-l', '--max-args');
                         $this->warnExclusive($replace !== null, $option === 'L' ? '-L' : '--max-lines/-l', '--replace');
                         [$maxArgs, $replace] = [0, null];
+
                         break;
+
                     case 'n':
                         $maxArgs = $this->number($value, 'n', 1);
                         $this->warnExclusive($maxLines > 0, '--max-args/-n', '--max-lines');
                         $maxLines = 0;
 
-                        // GNU ignores -n1 after -I (sv.gnu.org/patch/?1500)
+                        // GNU ignores -n1 after -I (sv.gnu.org/patch/?1500).
                         if ($replace !== null && $maxArgs === 1) {
                             $maxArgs = 0;
                         } else {
@@ -130,15 +140,22 @@ final class Xargs extends AbstractCommand
                         }
 
                         break;
+
                     case 's':
                         $size = $this->number($value, 's', 1, false);
+
                         break;
+
                     case 'P':
                         $this->number($value, 'P', 0, max: 2147483647);
+
                         break;
+
                     case 'a':
                         $file = $value;
+
                         break;
+
                     default:
                         $this->flags[$option] = true;
                 }
@@ -160,7 +177,7 @@ final class Xargs extends AbstractCommand
             } catch (RuntimeException $runtimeException) {
                 $error = $this->describeError($runtimeException);
 
-                // GNU never checks for read errors, so a directory reads as empty
+                // GNU never checks for read errors, so a directory reads as empty.
                 if ($error !== 'Is a directory') {
                     return $this->failure($this->stderr.sprintf("xargs: Cannot open input file '%s': %s\n", $file, $error));
                 }
@@ -168,12 +185,12 @@ final class Xargs extends AbstractCommand
                 $input = '';
             }
 
-            // With -a the commands get xargs's own stdin, otherwise /dev/null
+            // With -a the commands get xargs's own stdin, otherwise /dev/null.
             $this->childStdin = new StdinStream($commandContext->stdin);
         }
 
         $this->command = $command ?: ['echo'];
-        // -I builds each command afresh, so no initial arguments take up room
+        // -I builds each command afresh, so no initial arguments take up room.
         $initialChars = $replace === null ? array_sum(array_map(fn (string $arg): int => strlen($arg) + 1, $this->command)) : 0;
         $exitIfExceeded = isset($this->flags['x']) || $maxLines > 0 || $replace !== null;
         $tokens = $delimiter === null
@@ -192,12 +209,12 @@ final class Xargs extends AbstractCommand
                     $this->replaceEach($tokens, $replace, $size);
                 }
             } catch (UnexpectedValueException $unexpectedValueException) {
-                // A read error first runs what was collected, unless -I, -L or -x promised whole lines
+                // A read error first runs what was collected, unless -I, -L or -x promised whole lines.
                 if ($this->pending !== [] && ! $exitIfExceeded) {
                     $this->flush();
                 }
 
-                throw new RuntimeException($unexpectedValueException->getMessage(), 1);
+                throw new RuntimeException($unexpectedValueException->getMessage(), 1, $unexpectedValueException);
             }
 
             if ($replace === null && ($this->pending !== [] || (! isset($this->flags['r']) && $this->runs === 0))) {
@@ -278,7 +295,7 @@ final class Xargs extends AbstractCommand
             foreach (array_slice($this->command, 1) as $arg) {
                 $inserted = $replace === '' ? $line : str_replace($replace, $line, $arg);
 
-                // GNU finds an empty pattern over and over, so any text around it overflows
+                // GNU finds an empty pattern over and over, so any text around it overflows.
                 if (strlen($inserted) > $size - 2 || ($replace === '' && $arg !== '')) {
                     throw new RuntimeException('command too long', 1);
                 }
@@ -303,8 +320,7 @@ final class Xargs extends AbstractCommand
     }
 
     /**
-     * Splits input like GNU's read_line: blank-separated words with quotes and backslashes, newline-ended lines.
-     * Yields each word, then true at a line end that counts for -L (false when it doesn't).
+     * Splits input like GNU's read_line into blank-separated words with quotes and backslashes, then true at a line end that counts for -L (false otherwise).
      *
      * @return Generator<int, string|bool>
      *
@@ -333,7 +349,7 @@ final class Xargs extends AbstractCommand
 
             if ($state === 'normal') {
                 if ($char === "\n") {
-                    // A blank before the newline continues the line for -L
+                    // A blank before the newline continues the line for -L.
                     $counted = $before !== ' ' && $before !== "\t";
 
                     if ($eof !== null && $this->cString($word) === $eof) {
@@ -345,6 +361,7 @@ final class Xargs extends AbstractCommand
                     }
 
                     yield $this->cString($word);
+
                     yield $counted;
                     [$state, $word, $first] = ['space', '', true];
 
@@ -399,7 +416,7 @@ final class Xargs extends AbstractCommand
             $word .= $char;
         }
 
-        // GNU drops an empty last word, even an unterminated '' or '
+        // GNU drops an empty last word, even an unterminated '' or '.
         if ($word === '') {
             return;
         }
@@ -410,6 +427,7 @@ final class Xargs extends AbstractCommand
 
         if (! $first || $eof === null || $this->cString($word) !== $eof) {
             yield $this->cString($word);
+
             yield false;
         }
     }
@@ -433,6 +451,7 @@ final class Xargs extends AbstractCommand
             }
 
             yield $this->cString($item);
+
             yield $i < count($items);
         }
     }
@@ -444,7 +463,7 @@ final class Xargs extends AbstractCommand
         $trace = implode(' ', array_map($this->shellEscape(...), $argv));
 
         if (isset($this->flags['p'])) {
-            // -p asks on /dev/tty, which the sandbox doesn't have
+            // -p asks on /dev/tty, which the sandbox doesn't have.
             $this->stderr .= $trace;
 
             throw new RuntimeException('failed to open /dev/tty for reading: No such device or address', 1);
@@ -503,7 +522,7 @@ final class Xargs extends AbstractCommand
 
         $this->stderr .= $message;
 
-        return $min;
+        return max($min, min($max, (int) $value));
     }
 
     /**
@@ -521,7 +540,7 @@ final class Xargs extends AbstractCommand
                 return [...$attached, $arg, ...$args];
             }
 
-            // The option at the end of $arg that has no value attached, and what comes before it
+            // The option at the end of $arg that has no value attached, and what comes before it.
             [$head, $bare] = ['', ''];
 
             if (str_starts_with($arg, '--')) {
@@ -570,7 +589,7 @@ final class Xargs extends AbstractCommand
             throw new InvalidArgumentException(sprintf("xargs: Invalid escape sequence %s in input delimiter specification.\n", $spec));
         }
 
-        // Parsed with strtoul, which allows leading blanks, a sign and a 0x prefix
+        // Parsed with strtoul, which allows leading blanks, a sign and a 0x prefix.
         $digits = substr($spec, $hex ? 2 : 1);
         $value = 0;
         $rest = $digits;
@@ -597,7 +616,7 @@ final class Xargs extends AbstractCommand
         return sprintf('unmatched %s quote; by default quotes are special to xargs unless you use the -0 option', $quote === '"' ? 'double' : 'single');
     }
 
-    // An argument goes to exec() as a C string, so a NUL ends it
+    // An argument goes to exec() as a C string, so a NUL ends it.
     private function cString(string $arg): string
     {
         return explode("\0", $arg, 2)[0];

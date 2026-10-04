@@ -112,7 +112,7 @@ final readonly class SecureHttpClient
             },
             CURLOPT_HEADERFUNCTION => function (CurlHandle $curlHandle, string $line) use (&$responseHeaders): int {
                 if (str_starts_with($line, 'HTTP/')) {
-                    $responseHeaders = []; // a new response, e.g. after "100 Continue"
+                    $responseHeaders = []; // A new response, e.g. after "100 Continue"
                 } elseif (str_contains($line, ':')) {
                     [$name, $value] = explode(':', $line, 2);
                     $responseHeaders[strtolower(trim($name))] = trim($value);

@@ -13,11 +13,7 @@ use RuntimeException;
 use UnexpectedValueException;
 
 /**
- * GNU sed 4.9 in the C locale, ported from its compile.c and execute.c: every command, address form and escape,
- * and the options -n -e -f -E/-r -s -i[SUFFIX] -l N -u -z -b with their long forms, --sandbox, --follow-symlinks,
- * --posix (POSIXLY_BASIC: the GNU extensions rejected or taken literally) and --debug (the program and a trace on stdout).
- * Files named by r R w W go through the virtual filesystem (/dev/stdin, /dev/stdout and /dev/stderr are the streams),
- * and e runs its command in the sandboxed shell.
+ * GNU sed 4.9 in the C locale, ported from compile.c and execute.c; r R w W use the virtual filesystem and e the sandboxed shell.
  *
  * @phpstan-type Regex array{pcre: string, nsub: int, noSub: bool, re: string, flags: string}
  * @phpstan-type Address array{type: string, n: int, step?: int, re?: Regex|null}
@@ -124,7 +120,6 @@ final class Sed_ extends AbstractCommand
 
     private CommandContext $commandContext;
 
-    // Options
     private bool $quiet = false;
 
     private bool $extended = false;
@@ -148,7 +143,6 @@ final class Sed_ extends AbstractCommand
 
     private int $lineLength = 70;
 
-    // Compilation: the script being read, and where errors are reported
     private string $prog = '';
 
     private int $pos = 0;
@@ -177,7 +171,6 @@ final class Sed_ extends AbstractCommand
 
     private int $pendingCommand = 0;
 
-    // Execution
     private string $space = '';
 
     private bool $chomped = true;
@@ -205,7 +198,6 @@ final class Sed_ extends AbstractCommand
 
     private int $jumps = 0;
 
-    // Input
     /** @var list<string> */
     private array $files = [];
 
@@ -228,11 +220,10 @@ final class Sed_ extends AbstractCommand
     /** @var array<string, array{string, int}> files read by R: contents and position */
     private array $rFiles = [];
 
-    // Output: buffers, and the streams writing to them, each remembering a missing final newline
     /** @var array<string, string> */
     private array $sinks = ['stdout' => '', 'stderr' => ''];
 
-    /** @var array<string, array{string, bool}> */
+    /** @var array<string, array{string, bool}> output name => [sink, whether its last line lacks a newline] */
     private array $outputs = ['' => ['stdout', false]];
 
     public function getName(): string
@@ -242,7 +233,7 @@ final class Sed_ extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        // A fresh instance per run: `e` may run sed again
+        // A fresh instance per run: `e` may run sed again.
         return (new self)->run($args, $commandContext);
     }
 
@@ -283,8 +274,7 @@ final class Sed_ extends AbstractCommand
             $this->commandContext->fs->writeFile($path, $content);
         }
 
-        // --posix opens w /dev/stdout and /dev/stderr as files of their own, flushed when closed: before stdout's buffer,
-        // after stderr (unless they outgrow stdio's buffer, whose size depends on the platform)
+        // --posix's w /dev/stdout and /dev/stderr are files of their own, flushed on close: before stdout's buffer, after stderr's.
         return new ExecResult(
             stdout: ($this->sinks["\1"] ?? '').$this->sinks['stdout'],
             stderr: $this->sinks['stderr'].($this->sinks["\2"] ?? ''),
@@ -384,7 +374,7 @@ final class Sed_ extends AbstractCommand
             'e' => $this->compile((string) $value),
             'f' => $this->compile($this->readScriptFile((string) $value), (string) $value),
             'i' => [$this->separate, $this->inPlace] = [true, $value === null ? '*' : (str_contains($value, '*') ? $value : '*'.$value)],
-            // Exit code 0 sends the text to stdout
+            // Exit code 0 sends the text to stdout.
             'v' => throw new UnexpectedValueException(self::VERSION, 0),
             'h' => throw new UnexpectedValueException(self::USAGE."E-mail bug reports to: <bug-sed@gnu.org>.\n", 0),
             default => null, // -b and --follow-symlinks change nothing here
@@ -405,7 +395,7 @@ final class Sed_ extends AbstractCommand
         try {
             return $this->commandContext->fs->readFile($this->resolvePath($this->commandContext, $name));
         } catch (RuntimeException $runtimeException) {
-            // fopen() opens a directory, which then reads as empty
+            // fopen() opens a directory, which then reads as empty.
             return str_starts_with($runtimeException->getMessage(), 'EISDIR') ? ''
                 : throw $this->panic(sprintf("couldn't open file %s: %s", $name, $this->describeError($runtimeException)));
         }
@@ -418,10 +408,6 @@ final class Sed_ extends AbstractCommand
 
         return $data;
     }
-
-    // =========================================================================
-    // COMPILATION (compile.c)
-    // =========================================================================
 
     private function compile(string $script, ?string $file = null): void
     {
@@ -481,7 +467,7 @@ final class Sed_ extends AbstractCommand
                 }
             }
 
-            // --posix rejects the GNU commands, and a second address where POSIX allows one
+            // --posix rejects the GNU commands, and a second address where POSIX allows one.
             if ($this->posix && $ch !== null && str_contains('eFvzLQTRW', $ch)) {
                 throw $this->badProg(sprintf("unknown command: `%s'", $ch));
             }
@@ -499,7 +485,7 @@ final class Sed_ extends AbstractCommand
                         throw $this->badProg("comments don't accept any addresses");
                     }
 
-                    // #n on the first line of the first script acts like -n
+                    // #n on the first line of the first script acts like -n.
                     $ch = $this->inchar();
                     $this->quiet = $this->quiet || ($ch === 'n' && $first && $this->line < 2 && $this->pos === 2);
 
@@ -616,7 +602,7 @@ final class Sed_ extends AbstractCommand
 
                 case 'r':
                     $command['file'] = $this->readFilename();
-                    // 0r inserts the file before the first line
+                    // 0r inserts the file before the first line.
                     $command['append'] = $command['a1'] !== ['type' => 'num', 'n' => 0] || $command['a2'] !== null;
                     $command['a1'] = $command['append'] ? $command['a1'] : ['type' => 'num', 'n' => 1];
 
@@ -660,7 +646,7 @@ final class Sed_ extends AbstractCommand
     {
         $ch = $this->inNonblank();
 
-        // --posix has no one-liner form
+        // --posix has no one-liner form.
         if ($ch === null || ($this->posix && $ch !== '\\')) {
             throw $this->badProg("expected \\ after `a', `c' or `i'");
         }
@@ -668,7 +654,7 @@ final class Sed_ extends AbstractCommand
         if ($ch === '\\') {
             $ch = $this->inchar();
         } else {
-            // GNU's one-liner form: `a text`
+            // GNU's one-liner form: `a text`.
             $this->savchar($ch);
             $ch = "\n";
         }
@@ -679,10 +665,7 @@ final class Sed_ extends AbstractCommand
         return $this->readText($ch);
     }
 
-    /**
-     * Reads the text of a, i, c or e up to an unescaped newline. Text cut short by the end of a script stays
-     * pending: the next -e continues it.
-     */
+    /** Reads the text of a, i, c or e up to an unescaped newline; text cut short by the end of a script stays pending for the next -e. */
     private function readText(?string $leadin): ?string
     {
         if ($leadin === null) {
@@ -750,7 +733,7 @@ final class Sed_ extends AbstractCommand
         if (($ch === '+' || $ch === '~') && ! $this->posix) {
             $step = $this->inInteger($this->inNonblank());
 
-            // +0 and ~0 end the range on the line that starts it
+            // +0 and ~0 end the range on the line that starts it.
             return ['type' => $step === 0 ? 'null' : ($ch === '+' ? 'step' : 'stepmod'), 'n' => $step];
         }
 
@@ -802,7 +785,7 @@ final class Sed_ extends AbstractCommand
                         throw $this->badProg("multiple `p' options to `s' command");
                     }
 
-                    // 1 prints before the e flag runs, 2 after
+                    // 1 prints before the e flag runs, 2 after.
                     $sub['print'] = $sub['eval'] ? 2 : 1;
 
                     break;
@@ -878,8 +861,7 @@ final class Sed_ extends AbstractCommand
     }
 
     /**
-     * Splits the replacement into [literal prefix, group number or -1, case conversion] parts, like GNU's
-     * setup_replacement(), returning them and the highest group referenced.
+     * Splits the replacement into [literal prefix, group number or -1, case conversion] parts like GNU's setup_replacement(), with the highest group referenced.
      *
      * @return array{list<Part>, int}
      */
@@ -928,10 +910,7 @@ final class Sed_ extends AbstractCommand
         return [$parts, $maxId];
     }
 
-    /**
-     * Reads up to the unescaped delimiter, or returns null at a bare newline or the end. `\delim` becomes the
-     * delimiter (`\&` stays escaped in a replacement), backslash-newline a newline; other escapes are kept.
-     */
+    /** Reads up to the unescaped delimiter, null at a bare newline or the end; `\delim` becomes the delimiter (`\&` stays escaped in a replacement). */
     /** @phpstan-impure */
     private function matchSlash(?string $slash, bool $regex): ?string
     {
@@ -953,7 +932,7 @@ final class Sed_ extends AbstractCommand
                     $buffer .= '\\';
                 }
             } elseif ($ch === '[' && $regex) {
-                // The delimiter does not end a bracket expression
+                // The delimiter does not end a bracket expression.
                 $buffer .= $ch;
                 $ch = $this->snarfCharClass($buffer);
 
@@ -973,7 +952,7 @@ final class Sed_ extends AbstractCommand
     /** Copies a bracket expression up to (not including) its closing `]`, which it returns; null or "\n" if there is none. */
     private function snarfCharClass(string &$buffer): ?string
     {
-        // 0 outside [: [. [=, 1 after its '[', 2 inside it, 3 after its closing ':', '.' or '='
+        // 0 outside [: [. [=, 1 after its '[', 2 inside it, 3 after its closing ':', '.' or '='.
         $state = 0;
         $delim = '';
         $ch = $this->inchar();
@@ -1028,7 +1007,7 @@ final class Sed_ extends AbstractCommand
         $newline = str_contains($flags, 'M');
         $re = $this->normalize($pattern, self::TEXT_REGEX);
         $body = PosixRegex::toPcre($this->posix ? $this->posixRegex($re) : $re, $this->extended, ignoreLeadingOps: false, multiline: $newline ? $this->delim : null);
-        // Without M, `.` matches a newline and `$` is only the end of the pattern space
+        // Without M, `.` matches a newline and `$` is only the end of the pattern space.
         $pcre = '/'.$body.'/'.($newline ? '' : 'sD').(str_contains($flags, 'I') ? 'i' : '');
         $error = PosixRegex::error($pcre);
 
@@ -1036,11 +1015,11 @@ final class Sed_ extends AbstractCommand
             throw $this->badProg($error);
         }
 
-        // Count the groups by matching the empty string with the pattern made optional
+        // Count the groups by matching the empty string with the pattern made optional.
         preg_match('/(?:'.$body.')?/', '', $groups, PREG_UNMATCHED_AS_NULL);
         $nsub = count($groups) - 1;
 
-        // --posix leaves a missing group empty
+        // --posix leaves a missing group empty.
         if ($neededSub > 0 && $nsub < $neededSub - 1 && ! $this->posix) {
             throw $this->badProg(sprintf("invalid reference \\%d on `s' command's RHS", $neededSub - 1));
         }
@@ -1050,10 +1029,7 @@ final class Sed_ extends AbstractCommand
         return ['pcre' => $pcre, 'nsub' => $nsub, 'noSub' => $neededSub === 0, 're' => $re, 'flags' => $flags];
     }
 
-    /**
-     * glibc's syntax bits for POSIXLY_BASIC: RE_NO_GNU_OPS makes \w \W \s \S \b \B \< \> \` \' literal, RE_LIMITED_OPS
-     * a BRE's \+ \? \|, and RE_UNMATCHED_RIGHT_PAREN_ORD an unmatched ) or \) ordinary.
-     */
+    /** glibc's POSIXLY_BASIC: \w \W \s \S \b \B \< \> \` \' and a BRE's \+ \? \| are literal, and so is an unmatched ) or \). */
     private function posixRegex(string $re): string
     {
         $out = '';
@@ -1067,7 +1043,7 @@ final class Sed_ extends AbstractCommand
             $group = $escaped !== $this->extended;
 
             if (! $escaped && $ch === '[') {
-                // A bracket expression is copied as it is
+                // A bracket expression is copied as it is.
                 preg_match('/\[\^?\]?(?:\[([:.=]).*?\1\]|[^]])*]?/As', $re, $m, 0, $i);
                 $out .= $m[0];
                 $i += strlen($m[0]) - 1;
@@ -1084,10 +1060,7 @@ final class Sed_ extends AbstractCommand
         return $out;
     }
 
-    /**
-     * Resolves GNU sed's escapes: \a \f \n \r \t \v, \dNNN \oNNN \xHH and \cX. With --posix, not in a regex's bracket
-     * expressions: $bracket is 0 outside one, -1 inside, or the `.` `:` or `=` of a [.x.] [:x:] or [=x=] in it.
-     */
+    /** Resolves GNU sed's escapes \a \f \n \r \t \v \dNNN \oNNN \xHH \cX, which --posix leaves alone inside a regex's bracket expressions. */
     private function normalize(string $buffer, int $type): string
     {
         $out = '';
@@ -1123,7 +1096,7 @@ final class Sed_ extends AbstractCommand
                     $ch = chr((int) ($ch === 'd' ? $m[0] : ($ch === 'o' ? octdec($m[0]) : hexdec($m[0]))) & 0xFF);
                 }
 
-                // A produced & or backslash stays literal in a replacement
+                // A produced & or backslash stays literal in a replacement.
                 $out .= ($type === self::TEXT_REPLACEMENT && ($ch === '&' || $ch === '\\') ? '\\' : '').$ch;
             } elseif ($ch === 'c') {
                 if (++$p >= $len) {
@@ -1195,7 +1168,7 @@ final class Sed_ extends AbstractCommand
         }
 
         if ($name === '/dev/stdout' || $name === '/dev/stderr') {
-            // --posix has no special files: the device is a stream of its own
+            // --posix has no special files: the device is a stream of its own.
             $sink = $this->posix ? ($name === '/dev/stdout' ? "\1" : "\2") : substr($name, 5);
             $this->sinks[$sink] ??= '';
             $this->outputs[$name] = [$sink, false];
@@ -1206,7 +1179,7 @@ final class Sed_ extends AbstractCommand
         $path = $this->resolvePath($this->commandContext, $name);
 
         try {
-            // The filesystem would create missing parent directories; fopen() does not
+            // The filesystem would create missing parent directories; fopen() does not.
             if (! $this->commandContext->fs->exists(dirname($path))) {
                 throw new RuntimeException('ENOENT: no such file or directory');
             }
@@ -1283,7 +1256,7 @@ final class Sed_ extends AbstractCommand
     /** check_final_program(): unclosed blocks, an unfinished a/i/c text, and branch targets. */
     private function finishProgram(): void
     {
-        // Errors found from here on report no character position
+        // Errors found from here on report no character position.
         $this->prog = '';
         $this->pos = 0;
 
@@ -1302,10 +1275,6 @@ final class Sed_ extends AbstractCommand
                 : $this->labels[$label] ?? throw $this->panic(sprintf("can't find label for jump to `%s'", $label));
         }
     }
-
-    // =========================================================================
-    // EXECUTION (execute.c)
-    // =========================================================================
 
     /** @param list<string> $operands */
     private function processFiles(array $operands): int
@@ -1380,7 +1349,7 @@ final class Sed_ extends AbstractCommand
                     break;
 
                 case 'c':
-                    // A range is replaced once, at its end
+                    // A range is replaced once, at its end.
                     if (($this->range[$pc] ?? self::INACTIVE) !== self::ACTIVE) {
                         $this->output($this->textLine($command), true);
                     }
@@ -1401,7 +1370,7 @@ final class Sed_ extends AbstractCommand
                         return -1;
                     }
 
-                    // Restart the cycle on the rest, without reading a line
+                    // Restart the cycle on the rest, without reading a line.
                     $this->space = substr($this->space, $newline + 1);
                     $pc = $this->jump($command, true);
                     $this->traceSpaces();
@@ -1473,7 +1442,7 @@ final class Sed_ extends AbstractCommand
 
                     if ($this->testEof() || ! $this->readPatternSpace(true)) {
                         $this->trace("END-OF-CYCLE:\n");
-                        // GNU prints the pattern space when there is no next line; POSIX does not
+                        // GNU prints the pattern space when there is no next line; POSIX does not.
                         $this->space = substr($this->space, 0, -1);
 
                         if (! $this->quiet && ! $this->posix) {
@@ -1508,7 +1477,7 @@ final class Sed_ extends AbstractCommand
                         $this->output($this->space, $this->chomped);
                     }
 
-                    // Ends a line left without its newline even when nothing is queued
+                    // Ends a line left without its newline even when nothing is queued.
                     $this->write('');
                     $this->dumpAppendQueue();
 
@@ -1583,8 +1552,7 @@ final class Sed_ extends AbstractCommand
     }
 
     /**
-     * Returns the command index before the jump target (the start for D). Jumps that can go backwards are counted:
-     * a script looping without reading input stops at the sed iteration limit.
+     * Returns the command index before the jump target (the start for D), counting backward jumps against the sed iteration limit.
      *
      * @param  Command  $command
      */
@@ -1622,7 +1590,7 @@ final class Sed_ extends AbstractCommand
         $state = $this->range[$pc] ?? self::INACTIVE;
 
         if ($state !== self::ACTIVE) {
-            // A line number starts the range at or after that line, once
+            // A line number starts the range at or after that line, once.
             if ($a1['type'] === 'num' ? $state === self::CLOSED || $this->lineNumber < $a1['n'] : ! $this->matchOne($a1, $pc)) {
                 return false;
             }
@@ -1631,11 +1599,11 @@ final class Sed_ extends AbstractCommand
 
             switch ($a2['type']) {
                 case 'regex':
-                    // The end regex is tried from the next line on
+                    // The end regex is tried from the next line on.
                     return true;
 
                 case 'num':
-                    // An end line at or before the start makes a one-line range
+                    // An end line at or before the start makes a one-line range.
                     if ($this->lineNumber >= $a2['n']) {
                         $this->range[$pc] = self::CLOSED;
                     }
@@ -1655,7 +1623,7 @@ final class Sed_ extends AbstractCommand
         }
 
         if ($a2['type'] === 'num') {
-            // Lines skipped by n or N can jump past the end
+            // Lines skipped by n or N can jump past the end.
             if ($this->lineNumber >= $a2['n']) {
                 $this->range[$pc] = self::CLOSED;
             }
@@ -1694,7 +1662,7 @@ final class Sed_ extends AbstractCommand
         if ($regex === null) {
             $regex = $this->lastRegex ?? throw $this->badProg('no previous regular expression');
 
-            // An address regex is compiled without groups; GNU checks the references when s reuses it
+            // An address regex is compiled without groups; GNU checks the references when s reuses it.
             if ($regex['noSub'] && $regex['nsub'] < $maxId && ! $this->posix) {
                 throw $this->badProg(sprintf("invalid reference \\%d on `s' command's RHS", $maxId));
             }
@@ -1726,7 +1694,7 @@ final class Sed_ extends AbstractCommand
         if ($this->debug) {
             $this->sinks['stdout'] .= "MATCHED REGEX REGISTERS\n";
 
-            // Up to the first group that did not take part
+            // Up to the first group that did not take part.
             for ($i = 0; ($m[$i][0] ?? null) !== null; $i++) {
                 $this->sinks['stdout'] .= sprintf("  regex[%d] = %d-%d '%s'\n", $i, $m[$i][1], $m[$i][1] + strlen((string) $m[$i][0]), $m[$i][0]);
             }
@@ -1737,7 +1705,7 @@ final class Sed_ extends AbstractCommand
         $count = 0;
         $out = '';
         $numb = max(1, $sub['numb']);
-        // GNU edits in place, without its scratch buffer, when deleting a match at either end
+        // GNU edits in place, without its scratch buffer, when deleting a match at either end.
         $inPlace = $sub['parts'] === [] && $numb === 1 && (($m[0][1] === 0 && ! $sub['global']) || $m[0][1] + strlen((string) $m[0][0]) === $len);
 
         do {
@@ -1746,7 +1714,7 @@ final class Sed_ extends AbstractCommand
             $out .= substr($space, $start, $offset - $start);
             $start = $offset;
 
-            // An empty match right after a match is skipped, so s/a*/x/g on baaac gives xbxcx
+            // An empty match right after a match is skipped, so s/a*/x/g on baaac gives xbxcx.
             if (($matched > 0 || $count === 0 || $offset > $lastEnd) && ++$count >= $numb) {
                 $this->replaced = true;
                 $out .= $this->expand($sub['parts'], $m);
@@ -1793,8 +1761,7 @@ final class Sed_ extends AbstractCommand
     }
 
     /**
-     * Builds the replacement, applying \U \L \E and the one-character \u \l (carried over an empty group, as in
-     * s/\(\)\([a-z]\)/\u\1\2/).
+     * Builds the replacement, applying \U \L \E and the one-character \u \l (carried over an empty group, as in s/\(\)\([a-z]\)/\u\1\2/).
      *
      * @param  list<Part>  $parts
      * @param  array<array{?string, int}>  $m
@@ -1882,10 +1849,6 @@ final class Sed_ extends AbstractCommand
         $this->write($out.'$'.$this->delim);
     }
 
-    // =========================================================================
-    // INPUT AND OUTPUT
-    // =========================================================================
-
     private function readPatternSpace(bool $append): bool
     {
         $this->dumpAppendQueue();
@@ -1901,7 +1864,7 @@ final class Sed_ extends AbstractCommand
             }
 
             if ($this->resetAtNextFile) {
-                // With -s and -i each file starts afresh
+                // With -s and -i each file starts afresh.
                 $this->lineNumber = 0;
                 $this->hold = '';
                 $this->range = array_map(fn (array $command): int => $command['a1'] === ['type' => 'num', 'n' => 0] ? self::ACTIVE : self::INACTIVE, $this->program);
@@ -2074,16 +2037,13 @@ final class Sed_ extends AbstractCommand
 
         $this->sinks[$sink] .= $text;
 
-        // print_file() for 0r leaves its output in stdio's buffer
+        // print_file() for 0r leaves its output in stdio's buffer.
         if ($endLine) {
             $this->flush($sink);
         }
     }
 
-    /**
-     * With -u, output reaches the stream at once; it matters only for the streams of --posix's w /dev/stdout and
-     * /dev/stderr, which come first on stdout and last on stderr unless flushed in between.
-     */
+    /** With -u output reaches the stream at once, which only matters for the streams of --posix's w /dev/stdout and /dev/stderr. */
     private function flush(string $sink): void
     {
         if (! $this->unbuffered) {
@@ -2096,10 +2056,6 @@ final class Sed_ extends AbstractCommand
             [$this->sinks['stderr'], $this->sinks["\2"]] = [$this->sinks['stderr'].$this->sinks["\2"], ''];
         }
     }
-
-    // =========================================================================
-    // --debug (debug.c)
-    // =========================================================================
 
     private function trace(string $text): void
     {
@@ -2116,9 +2072,7 @@ final class Sed_ extends AbstractCommand
         }
     }
 
-    /**
-     * debug_print_char(): C escapes, other unprintable bytes as \oNNN of the (signed) char's value.
-     */
+    /** debug_print_char(): C escapes, other unprintable bytes as \oNNN of the (signed) char's value. */
     private function debugText(string $text, bool $slash = false): string
     {
         return (string) preg_replace_callback($slash ? '/[^\x20-\x2e\x30-\x5b\x5d-\x7e]/' : '/[^\x20-\x5b\x5d-\x7e]/', fn (array $m): string => '\\'.([
@@ -2138,7 +2092,7 @@ final class Sed_ extends AbstractCommand
         $int = $command['int'] ?? -1;
         $this->sinks['stdout'] .= str_repeat('  ', $this->blockLevel)
             .$this->debugAddress($command['a1']).($command['a2'] !== null ? ',' : '').$this->debugAddress($command['a2'])
-            // A block is compiled with the address negated
+            // A block is compiled with the address negated.
             .($command['bang'] !== ($command['cmd'] === '{') ? '!' : '').($command['a1'] !== null ? ' ' : '').$command['cmd']
             .match ($command['cmd']) {
                 ':' => $command['label'] ?? '',

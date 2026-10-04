@@ -8,9 +8,7 @@ use BashBox\Network\Exceptions\NetworkAccessDeniedException;
 use Error;
 use RuntimeException;
 
-/**
- * Validates each redirect hop before it is requested.
- */
+/** Validates each redirect hop before it is requested. */
 final class ValidatedRedirects
 {
     private int $count = 0;

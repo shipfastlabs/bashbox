@@ -60,7 +60,7 @@ class Cp extends AbstractCommand
                 $fs->stat($srcPath)->isDirectory && str_starts_with($targetPath, $srcPath.'/') => $move
                     ? sprintf("cannot move '%s' to a subdirectory of itself, '%s'", $source, $target)
                     : sprintf("cannot copy a directory, '%s', into itself, '%s'", $source, $target),
-                // the filesystem API creates missing parents, so cp/mv check them here like the kernel would
+                // The filesystem API creates missing parents, so cp/mv check them here like the kernel would.
                 ! $fs->exists(dirname($targetPath)) => $move
                     ? sprintf("cannot move '%s' to '%s': No such file or directory", $source, $target)
                     : sprintf("cannot create %s '%s': No such file or directory", $fs->stat($srcPath)->isDirectory ? 'directory' : 'regular file', $target),
@@ -86,7 +86,7 @@ class Cp extends AbstractCommand
                             : sprintf("cannot overwrite directory '%s' with non-directory '%s'", $target, $source),
                         default => match (true) {
                             ! $move => sprintf("cannot create regular file '%s': %s", $target, $this->describeError($e)),
-                            // /dev is a filesystem of its own on Linux, so these moves are copies an unprivileged user can't make
+                            // /dev is a filesystem of its own on Linux, so these moves are copies an unprivileged user can't make.
                             $srcPath === '/dev/null' && dirname($targetPath) !== '/dev' => sprintf("cannot create special file '%s': Operation not permitted", $target),
                             $targetPath === '/dev/null' && dirname($srcPath) !== '/dev' => sprintf("inter-device move failed: '%s' to '%s'; unable to remove target: Permission denied", $source, $target),
                             default => sprintf("cannot move '%s' to '%s': %s", $source, $target, $this->describeError($e)),

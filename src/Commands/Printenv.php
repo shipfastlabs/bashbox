@@ -24,7 +24,6 @@ final class Printenv extends AbstractCommand
         $found = array_values(array_filter($args, fn (string $name): bool => array_key_exists($name, $env)));
         $output = implode('', array_map(fn (string $name): string => $env[$name]."\n", $found));
 
-        // Exit status is 1 if any requested variable is unset
         return count($found) === count($args) ? $this->success($output) : $this->failure('', 1, $output);
     }
 }

@@ -32,6 +32,7 @@ final class Paste extends AbstractCommand
         }
 
         preg_match_all('/\\\\(.)|./s', $list, $m, PREG_SET_ORDER);
+
         /** @var non-empty-list<string> $delimiters */
         $delimiters = array_map(fn (array $d): string => isset($d[1]) ? self::ESCAPES[$d[1]] ?? $d[1] : $d[0], $m);
         $eol = isset($flags['z']) ? "\0" : "\n";
@@ -40,7 +41,7 @@ final class Paste extends AbstractCommand
         $streams = [];
 
         foreach ($files as $i => $file) {
-            // `-` operands share stdin; any other operand is opened anew, even a repeated name
+            // `-` operands share stdin; any other operand is opened anew, even a repeated name.
             $key = $file === '-' ? '-' : $i;
 
             try {
@@ -49,14 +50,14 @@ final class Paste extends AbstractCommand
                 $error = $this->describeError($runtimeException);
                 $message = sprintf("paste: %s: %s\n", $this->shellEscape($file), $error);
 
-                // GNU opens every file before reading any, so a file that can't be opened is the only error then
+                // GNU opens every file before reading any, so a file that can't be opened is the only error then.
                 if ($error !== 'Is a directory' && ! isset($flags['s'])) {
                     return $this->failure($message);
                 }
 
                 $stderr .= $message;
 
-                // A directory opens fine and only fails to read, like an empty file
+                // A directory opens fine and only fails to read, like an empty file.
                 if ($error === 'Is a directory') {
                     $streams[$key] = '';
                 }

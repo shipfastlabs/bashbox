@@ -64,7 +64,7 @@ final class InMemoryFs implements FileSystemInterface
             $this->fail('EISDIR: illegal operation on a directory', 'open', $path);
         }
 
-        // Write into the inode, so every hard link sees the new content
+        // Write into the inode, so every hard link sees the new content.
         $this->diskQuota->charge(strlen($content) - $this->size($node), 0, $resolved);
         $this->inodes[$this->entries[$resolved]] = ['content' => $content, 'mtime' => time()] + $node;
     }
@@ -221,7 +221,7 @@ final class InMemoryFs implements FileSystemInterface
         }
 
         if ($destNode !== null && $srcNode['type'] === 'file') {
-            // An existing file is rewritten in place, as cp does, so its hard links see the copy
+            // An existing file is rewritten in place, as cp does, so its hard links see the copy.
             $this->diskQuota->charge($this->size($srcNode) - $this->size($destNode), 0, $destResolved);
             $this->inodes[$this->entries[$destResolved]] = [
                 'content' => $srcNode['content'] ?? '',
@@ -240,16 +240,14 @@ final class InMemoryFs implements FileSystemInterface
         $this->addEntry($destResolved, $preserve ? $srcNode : ['mtime' => time()] + $srcNode);
     }
 
-    /**
-     * rename(2): the entry, and everything below it, keeps its inode under the new name.
-     */
+    /** rename(2): the entry, and everything below it, keeps its inode under the new name. */
     public function mv(string $src, string $dest): void
     {
         $srcResolved = $this->resolve($src, 'rename', false);
         $destResolved = $this->resolve($dest, 'rename', false);
         $inode = $this->entries[$srcResolved] ?? $this->fail('ENOENT: no such file or directory', 'rename', $src);
 
-        // Two names for the same inode (including the same name twice): rename does nothing
+        // Two names for the same inode (including the same name twice): rename does nothing.
         if ($inode === ($this->entries[$destResolved] ?? null)) {
             return;
         }
@@ -375,7 +373,7 @@ final class InMemoryFs implements FileSystemInterface
             size: $this->size($node),
             mtime: $node['mtime'],
             ino: $inode,
-            // A directory is linked from its parent, its own "." and each subdirectory's ".."
+            // A directory is linked from its parent, its own "." and each subdirectory's "..".
             nlink: $isDirectory ? 2 + count(array_filter(
                 $this->children($resolved),
                 fn (string $child): bool => $this->inodes[$this->entries[$child]]['type'] === 'directory',

@@ -61,7 +61,9 @@ final class Nl extends AbstractCommand
                     }
 
                     $styles[$option] = $value;
+
                     break;
+
                 case 'v':
                 case 'i':
                 case 'l':
@@ -83,20 +85,28 @@ final class Nl extends AbstractCommand
                     }
 
                     $numbers[$option] = $number;
+
                     break;
+
                 case 'n':
                     if (! isset(self::FORMATS[$value])) {
                         $errors .= sprintf("nl: invalid line numbering format: '%s'\n", $value);
                     }
 
                     $format = $value;
+
                     break;
+
                 case 'p':
                     $renumber = false;
+
                     break;
+
                 case 's':
                     $separator = $value;
+
                     break;
+
                 default:
                     // POSIX: a one-character delimiter keeps the default second character.
                     $delimiter = strlen($value) === 1 ? $value.':' : $value;

@@ -5,8 +5,6 @@ declare(strict_types=1);
 use BashBox\Bash;
 
 // Every row was produced by running "readonly r=1" plus the script through bash 5.3 (-c).
-// A readonly assignment fails a builtin with status 1, abandons the rest of the line otherwise,
-// and is contained by subshells and command substitutions.
 test('assigning to a readonly variable behaves like bash', function (string $script, string $stdout, string $stderr, int $exitCode): void {
     $bashExecResult = (new Bash)->exec("readonly r=1\n".$script);
 

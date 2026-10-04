@@ -47,7 +47,7 @@ final class Date_ extends AbstractCommand
             return $this->failure("date: invalid date '{$when}'\n");
         }
 
-        // "@epoch" dates carry a UTC offset, every other one is in PHP's default zone unless -u is given
+        // "@epoch" dates carry a UTC offset, every other one is in PHP's default zone unless -u is given.
         $date = $date->setTimezone(new DateTimeZone(isset($flags['u']) ? 'UTC' : date_default_timezone_get()));
 
         $output = preg_replace_callback('/%(.)/', fn (array $m): string => match ($m[1]) {

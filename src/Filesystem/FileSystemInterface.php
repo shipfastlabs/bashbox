@@ -10,11 +10,7 @@ interface FileSystemInterface
 
     public function writeFile(string $path, string $content): void;
 
-    /**
-     * Create an empty private file (0600) or directory (0700), failing with EEXIST if anything,
-     * even a dangling symlink, is already there. Never replaces or follows an existing entry,
-     * so concurrent callers racing for the same name cannot clobber each other (mkstemp/mkdtemp).
-     */
+    /** Create an empty private file (0600) or directory (0700), failing with EEXIST on any entry, even a dangling symlink, so racing callers can't clobber each other. */
     public function createExclusive(string $path, bool $directory = false): void;
 
     public function appendFile(string $path, string $content): void;

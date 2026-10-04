@@ -15,6 +15,7 @@ test('tac', function (string $script, string $stdout, string $stderr = '', int $
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'names are quoted when needed' => ["mkdir 'd d'; tac 'n o' 'd d'", '', "tac: failed to open 'n o' for reading: No such file or directory\ntac: 'd d': read error: Is a directory\n", 1],
     'reverses lines' => ['tac a.txt', "three\ntwo\none\n"],
     'a last line without newline is joined to the one before' => ['tac b.txt', "yx\n"],
     'reads stdin' => ["printf '1\\n2\\n' | tac", "2\n1\n"],

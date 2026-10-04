@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use BashBox\Bash;
 
-// The sandbox locale is UTF-8: lengths, substrings and patterns work on characters; invalid bytes count one each.
 // Every expected value is bash 5.3's (`bash -c`, LC_ALL=en_US.UTF-8), with "bash: line N:" shortened to "bash:".
 test('strings are measured and matched by UTF-8 character', function (string $script, string $stdout, string $stderr = '', int $exitCode = 0): void {
     $bashExecResult = (new Bash)->exec($script);

@@ -47,7 +47,7 @@ final class Stat_ extends AbstractCommand
         $newline = '';
         $flags = array_column($options, 1, 0);
 
-        // -c and --printf replace each other, and either beats -t
+        // -c and --printf replace each other, and either beats -t.
         foreach ($options as [$option, $value]) {
             if ($option === 'c' || $option === 'printf') {
                 [$format, $escapes, $newline] = [$value, $option === 'printf', $option === 'c' ? "\n" : ''];
@@ -64,7 +64,7 @@ final class Stat_ extends AbstractCommand
             $path = $this->resolvePath($commandContext, $file);
 
             try {
-                // An empty name resolves to the working directory here, but names no file for the kernel
+                // An empty name resolves to the working directory here, but names no file for the kernel.
                 $stat = match (true) {
                     $file === '' => throw new RuntimeException('ENOENT: no such file or directory'),
                     isset($flags['L']) => $commandContext->fs->stat($path),
@@ -77,10 +77,10 @@ final class Stat_ extends AbstractCommand
             }
 
             $target = $stat->isSymbolicLink ? $commandContext->fs->readlink($path) : null;
-            // the default format names the file unquoted, -c's %N quotes it
+            // The default format names the file unquoted, -c's %N quotes it.
             $name = $format === null ? $file.($target === null ? '' : ' -> '.$target) : $this->shellEscape($file, true).($target === null ? '' : ' -> '.$this->shellEscape($target, true));
-            // -c's newline is added after the format, so a trailing % stays literal
-            $output .= (string) preg_replace_callback(
+            // -c's newline is added after the format, so a trailing % stays literal.
+            $output .= preg_replace_callback(
                 '/%([-#+ \'0]*)(\d*)(\.\d*)?(.?)|[^%]+/s',
                 fn (array $m): string => isset($m[4]) ? $this->directive($m, $stat, $file, $name, $user) : ($escapes ? $this->expandEscapes($m[0], '[0-7]{1,3}', false)[0] : $m[0]),
                 $format ?? self::DEFAULT,
@@ -133,7 +133,7 @@ final class Stat_ extends AbstractCommand
         $digits = (int) substr($precision, 1);
         $numeric = str_contains('abBdDfghiostTu', $conversion);
 
-        // Like printf, a precision is the minimum digits of a number and the maximum length of a string; a time in seconds takes it as decimals
+        // As in printf, a precision is a number's minimum digits and a string's maximum length; seconds take it as decimals.
         $value = match (true) {
             $precision === '' => $value,
             str_contains('XYZW', $conversion) => $value.rtrim('.'.str_repeat('0', $precision === '.' ? 9 : $digits), '.'),

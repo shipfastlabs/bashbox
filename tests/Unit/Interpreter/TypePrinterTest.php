@@ -5,7 +5,6 @@ declare(strict_types=1);
 use BashBox\Bash;
 
 // Every expected output below was checked against GNU bash 5.3 (`bash -c '<script>'`).
-// A function's definition prints as bash lays it out (print_cmd.c).
 
 test('type and declare -f print a function like bash', function (string $script, string $stdout, string $stderr = '', int $exitCode = 0): void {
     $bashExecResult = (new Bash)->exec($script);

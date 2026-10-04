@@ -89,7 +89,6 @@ final class Tr extends AbstractCommand
         $len = strlen($spec);
 
         for ($i = 0; $i < $len; $i++) {
-            // Handle escape sequences
             if ($spec[$i] === '\\' && $i + 1 < $len) {
                 if (preg_match('/[0-7]{1,3}/A', $spec, $octal, 0, $i + 1) === 1) {
                     $result .= chr(octdec($octal[0]) & 0xFF);
@@ -115,7 +114,6 @@ final class Tr extends AbstractCommand
                 continue;
             }
 
-            // Handle character ranges: a-z
             if ($i + 2 < $len && $spec[$i + 1] === '-') {
                 $start = ord($spec[$i]);
                 $end = ord($spec[$i + 2]);
@@ -131,7 +129,6 @@ final class Tr extends AbstractCommand
                 continue;
             }
 
-            // Handle character classes
             if ($spec[$i] === '[' && $i + 2 < $len && $spec[$i + 1] === ':') {
                 $end = strpos($spec, ':]', $i + 2);
 
@@ -168,7 +165,7 @@ final class Tr extends AbstractCommand
             default => throw new RuntimeException(sprintf("invalid character class '%s'", $class)),
         };
 
-        // Members in byte order, as in the C locale
+        // Members in byte order, as in the C locale.
         return implode('', array_filter(array_map(chr(...), range(0, 255)), $test));
     }
 
@@ -208,13 +205,12 @@ final class Tr extends AbstractCommand
 
     private function translateChars(string $input, string $set1, string $set2): string
     {
-        // Build translation map
         $map = [];
         $len1 = strlen($set1);
         $len2 = strlen($set2);
 
         for ($i = 0; $i < $len1; $i++) {
-            // If set2 is shorter, use its last character for remaining set1 chars
+            // If set2 is shorter, use its last character for remaining set1 chars.
             $replaceIdx = min($i, $len2 - 1);
             $map[$set1[$i]] = $set2[$replaceIdx];
         }

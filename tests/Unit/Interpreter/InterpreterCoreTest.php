@@ -6,8 +6,7 @@ use BashBox\Bash;
 use BashBox\BashOptions;
 use BashBox\ExecOptions;
 
-// Expected values were checked against GNU bash 5.3 (`bash -c`), whose stderr prefix
-// "bash: line 1:" BashBox shortens to "bash:".
+// Expected values were checked against GNU bash 5.3 (`bash -c`), with "bash: line 1:" shortened to "bash:".
 
 function runCore(string $script, ?string $stdin = null): array
 {
@@ -20,19 +19,16 @@ function runCore(string $script, ?string $stdin = null): array
 test('scripts run with bash semantics', function (string $script, string $stdout, string $stderr = '', int $exitCode = 0): void {
     expect(runCore($script))->toBe([$stdout, $stderr, $exitCode]);
 })->with([
-    // Nested scripts keep their own output and exit status
     'command substitution captures only its own output' => ['echo a; x=$(echo b); echo "[$x]"', "a\n[b]\n"],
     'exit inside command substitution ends only the subshell' => ['x=$(echo in; exit 3); echo "$? [$x]"', "3 [in]\n"],
     'assignment-only command reports the substitution status' => ['x=$(false); echo $?', "1\n"],
     'set -e aborts on a failed substitution assignment' => ['echo a; set -e; x=$(exit 3); echo no', "a\n", '', 3],
 
-    // EXIT trap runs once, at the very end
     'EXIT trap waits for the whole script' => ['trap "echo bye" EXIT; eval "echo hi"; x=$(echo in); echo "after $x"', "hi\nafter in\nbye\n"],
     'EXIT trap sees the exit status' => ['trap "echo \$?" EXIT; exit 3', "3\n", '', 3],
     'exit inside the EXIT trap replaces the status' => ['trap "exit 7" EXIT; exit 3', '', '', 7],
     'empty EXIT trap is ignored' => ['trap "" EXIT; echo x', "x\n"],
 
-    // And-or lists
     'skipped && still reaches ||' => ['false && echo a || echo b', "b\n"],
     '|| skips on success' => ['true || echo no; echo $?', "0\n"],
     'ERR trap fires for a failing command' => ['trap "echo caught \$?" ERR; false; echo next $?', "caught 1\nnext 1\n"],
@@ -43,14 +39,12 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'set -e ignores a negated pipeline' => ['set -e; ! true; echo yes', "yes\n"],
     'set -o errexit then set +e' => ['set -o errexit; set +e; false; echo yes', "yes\n"],
 
-    // Pipelines
     'pipeline status is the last command' => ['false | true; echo $?', "0\n"],
     'negated pipeline' => ['! false; echo $?; ! true; echo $?', "0\n1\n"],
     'pipefail reports the rightmost failure' => ['set -o pipefail; false | true; echo $?; set +o pipefail; false | true; echo $?', "1\n0\n"],
     '|& pipes stderr too' => ['{ echo out; echo err >&2; } |& cat', "out\nerr\n"],
     'stderr of a piped command is not piped' => ['{ echo out; echo err >&2; } | cat', "out\n", "err\n"],
 
-    // Compound commands, redirections and dispatch
     'compound command output is redirected' => ['{ echo a; echo b >&2; } > out 2>&1; cat out', "a\nb\n"],
     'loop reads from a redirected file' => ['printf "1\n2\n" > in; while read l; do echo $l; done < in', "1\n2\n"],
     'failed compound redirection skips the command' => ['while read l; do echo "<$l>"; done < nofile; echo $?', "1\n", "bash: nofile: No such file or directory\n"],
@@ -59,7 +53,6 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'break and continue outside a loop' => ['break; continue 2; echo $?', "0\n", "bash: break: only meaningful in a `for', `while', or `until' loop\nbash: continue: only meaningful in a `for', `while', or `until' loop\n"],
     'break inside a function cannot leave the caller loop' => ['f() { break; }; for i in 1; do f; echo no; done', "no\n", "bash: break: only meaningful in a `for', `while', or `until' loop\n"],
 
-    // Simple commands
     'command not found' => ['nope; echo $?', "127\n", "bash: nope: command not found\n"],
     'command name is field split' => ['CMD="echo a b"; $CMD c', "a b c\n"],
     'empty expansion leaves only the assignment' => ['e=; x=1 $e; echo $x', "1\n"],
@@ -75,7 +68,6 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'expansion error abandons the rest of its line' => ["f() { echo \${x!}; echo in; }\nf; echo same\necho next", "next\n", "bash: \${x!}: bad substitution\n"],
     'cannot assign fails only its command' => ["echo \${1:=x}\necho after \$?", "after 1\n", "bash: \$1: cannot assign in this way\n"],
 
-    // exit / return
     'exit with a non-numeric argument' => ['exit abc', '', "bash: exit: abc: numeric argument required\n", 2],
     'exit with too many arguments' => ['exit 1 2; echo no', '', "bash: exit: too many arguments\n", 1],
     'exit status wraps at 256' => ['exit 257', '', '', 1],
@@ -83,7 +75,6 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'return -1 wraps to 255' => ['f() { return -1; }; f; echo $?', "255\n"],
     'return outside a function' => ['return; echo $?', "2\n", "bash: return: can only `return' from a function or sourced script\n"],
 
-    // export / unset / local
     'export tracks later assignments' => ['export X=1; X=2; printenv X; export Y; Y=3; printenv Y; export -n Z=4; echo $Z', "2\n3\n4\n"],
     'export of a readonly variable' => ['readonly R=1; export R=2; echo $?', "1\n", "bash: R: readonly variable\n"],
     'export lists variables' => ['export B=2 A=1; export | grep "[AB]="', "declare -x A=\"1\"\ndeclare -x B=\"2\"\n"],
@@ -95,7 +86,6 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'local variables vanish after the function' => ['f() { local a=1 b; b=2; echo $a$b; }; f; echo "[$a$b]"', "12\n[]\n"],
     'local of a readonly variable' => ['readonly r=1; f() { local r=2; }; f; echo $?', "1\n", "bash: local: r: readonly variable\n"],
 
-    // set / shopt / cd
     'set lists variables, quoting when needed' => ['a=1; b="x y"; c=""; d="it\'s"; set | grep "^[abcd]="', "a=1\nb='x y'\nc=\nd='it'\\''s'\n"],
     'set positional parameters' => ['set -- x y; echo $# $1; set a b; echo $2', "2 x\nb\n"],
     'set -C and +C' => ['set -C; echo a > f; echo b > f; echo $?; set +C; echo c > f; cat f', "1\nc\n", "bash: f: cannot overwrite existing file\n"],
@@ -111,7 +101,6 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'cd without HOME' => ['unset HOME; cd', '', "bash: cd: HOME not set\n", 1],
     'cd - without OLDPWD' => ['cd -', '', "bash: cd: OLDPWD not set\n", 1],
 
-    // source / eval
     'source without a file' => ['source; echo $?', "2\n", "bash: source: filename argument required\nsource: usage: source [-p path] filename [arguments]\n"],
     'source a missing file' => ['source nope.sh; echo $?', "1\n", "bash: nope.sh: No such file or directory\n"],
     'source arguments become positional parameters' => ['echo "echo sourced \$1 \$#" > s.sh; set -- p q; source s.sh arg; . ./s.sh; echo $1', "sourced arg 1\nsourced p 2\np\n"],
@@ -123,7 +112,6 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'eval output follows its redirection' => ['echo a; eval "echo b" > f; cat f', "a\nb\n"],
     'exit inside eval ends the script' => ['eval "exit 3"; echo no', '', '', 3],
 
-    // declare
     'declare without a value keeps the variable' => ['x=1; declare x; echo $x; declare -p x nope; echo $?', "1\ndeclare -- x=\"1\"\n1\n", "bash: declare: nope: not found\n"],
     'declare -p readonly and arrays' => ['declare -r y=2; declare -p y; a=(1 "b c"); declare -p a', "declare -r y=\"2\"\ndeclare -a a=([0]=\"1\" [1]=\"b c\")\n"],
     'declare in a function is local unless -g' => ['f() { declare x=1; declare -g g=2; }; f; echo "[$x][$g]"', "[][2]\n"],
@@ -132,7 +120,6 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'declare -x' => ['declare -x E=1; printenv E', "1\n"],
     'declare alone lists variables' => ['q=1; declare | grep "^q="', "q=1\n"],
 
-    // let / shift / getopts
     'let without arguments' => ['let; echo $?', "1\n", "bash: let: expression expected\n"],
     'let status follows the last value' => ['let x=0; echo $?; let y=2 z=3; echo $y$z $?', "1\n23 0\n"],
     'shift' => ['set -- a b c; shift; echo $*; shift 2; echo $# $?; shift; echo $?', "b c\n0 0\n1\n"],
@@ -145,7 +132,6 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'getopts option argument in the next word' => ['getopts "a:" o -a val; echo "$o $OPTARG $OPTIND"', "a val 3\n"],
     'getopts usage' => ['getopts; echo $?', "2\n", "getopts: usage: getopts optstring name [arg ...]\n"],
 
-    // type / command / builtin / exec
     'type -t' => ['f(){ :; }; type -t f cd ls echo nope; echo $?', "function\nbuiltin\nfile\nbuiltin\n1\n"],
     'type describes each name' => ['type nope cd ls; echo $?', "cd is a shell builtin\nls is /usr/bin/ls\n1\n", "bash: type: nope: not found\n"],
     'command -v' => ['f(){ :; }; command -v cd ls f nope; echo $?; command -v nope; echo $?', "cd\n/usr/bin/ls\nf\n0\n1\n"],
@@ -158,7 +144,6 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'exec never runs functions' => ['f(){ echo fn; }; exec f', '', "bash: exec: f: not found\n", 127],
     'exec without a command' => ['exec; echo still', "still\n"],
 
-    // alias / unalias / readonly / trap
     'alias define, list and query' => ['alias a=b c="it\'s"; alias; alias a; alias zz; echo $?', "alias a='b'\nalias c='it'\\''s'\nalias a='b'\n1\n", "bash: alias: zz: not found\n"],
     'unalias' => ['alias a=b; unalias a zz; echo $?; alias x=y; unalias -a; alias', "1\n", "bash: unalias: zz: not found\n"],
     'readonly listing and reassignment' => ['readonly a=1 b; readonly -p; readonly a=2; echo $?', "declare -r a=\"1\"\ndeclare -r b\n1\n", "bash: a: readonly variable\n"],
@@ -166,13 +151,11 @@ test('scripts run with bash semantics', function (string $script, string $stdout
     'trap with a lone signal resets it' => ['trap "echo x" 0; trap; trap EXIT; trap; echo done', "trap -- 'echo x' EXIT\ndone\n"],
     'ERR trap keeps $?' => ['trap "true" ERR; false; echo $?', "1\n"],
 
-    // pushd / popd
     'pushd and popd' => ['cd /tmp; mkdir -p /tmp/a /tmp/b; pushd /tmp/a; pushd /tmp/b; pushd; popd; popd; popd; echo $?', "/tmp/a /tmp\n/tmp/b /tmp/a /tmp\n/tmp/a /tmp/b /tmp\n/tmp/b /tmp\n/tmp\n1\n", "bash: popd: directory stack empty\n"],
     'pushd without a stack' => ['pushd; echo $?', "1\n", "bash: pushd: no other directory\n"],
     'pushd to a missing directory' => ['pushd /nope; echo $?', "1\n", "bash: pushd: /nope: No such file or directory\n"],
     'pushd abbreviates HOME' => ['cd /tmp; pushd ~', "~ /tmp\n"],
 
-    // job control and completion stubs
     'job control builtins' => ['wait; jobs; complete; echo $?; disown; fg; bg; suspend; compopt; logout', "0\n", "bash: disown: current: no such job\nbash: fg: no job control\nbash: bg: no job control\nbash: suspend: cannot suspend: no job control\nbash: compopt: not currently executing completion function\nbash: logout: not login shell: use `exit'\n", 1],
     'hash' => ['hash; hash -r; : a b; echo $?', "hash: hash table empty\n0\n"],
 ]);
@@ -218,7 +201,6 @@ test('times prints shell and child CPU times', function (): void {
 });
 
 test('type names a function', function (): void {
-    // bash then prints the function body, which BashBox can't reproduce without an AST printer
     [$stdout, $stderr, $exitCode] = runCore('f() { :; }; type f');
 
     expect($stdout)->toStartWith("f is a function\n")
@@ -240,4 +222,33 @@ test('time reports to stderr in the default and POSIX formats', function (string
 })->with([
     'default' => ['time echo hi', "hi\n", "/^\nreal\t0m\\d\\.\\d{3}s\nuser\t0m\\d\\.\\d{3}s\nsys\t0m\\d\\.\\d{3}s\n$/"],
     'posix' => ['time -p true', '', "/^real \\d+\\.\\d{2}\nuser \\d+\\.\\d{2}\nsys \\d+\\.\\d{2}\n$/"],
+]);
+
+test('regexes, subscripts, unset and set -n/-k', function (string $script, string $stdout, string $stderr = '', int $exitCode = 0): void {
+    expect(runCore($script))->toBe([$stdout, $stderr, $exitCode]);
+})->with([
+    // The reason is glibc's regerror() text, as bash prints it on Linux; macOS bash words it its own way.
+    'an invalid regex fails [[ with status 2' => ["re='('; [[ a =~ \$re ]]; echo \$?; re='[[:foo:]]'; [[ a =~ \$re ]]; echo \$?; [[ abc =~ b(c) ]]; echo \$? \${BASH_REMATCH[@]}", "2\n2\n0 bc c\n", "bash: [[: invalid regular expression `(': Unmatched ( or \\(\nbash: [[: invalid regular expression `[[:foo:]]': Invalid character class name\n"],
+    // bash's POSIX matcher finishes this; PCRE gives up at its backtracking limit, which is reported as an error.
+    'a regex that runs out of backtracking fails with status 2' => ["s=\$(printf 'a%.0s' {1..40})b; [[ \$s =~ ^(a+)+\$ ]]; echo \$?", "2\n", "bash: [[: regex match failed: Backtrack limit exhausted\n"],
+    '[[ ]] evaluates integer operands without expanding them again' => ["x='\$(echo hi >&2; echo 1)'; [[ \$x -eq 1 ]]; echo \$?; x='1+1'; [[ \$x -eq 2 ]]; echo \$?; [[ 08 -eq 1 ]]; echo \$?", "1\n0\n1\n", "bash: [[: \$(echo hi >&2; echo 1): arithmetic syntax error: operand expected (error token is \"\$(echo hi >&2; echo 1)\")\nbash: [[: 08: value too great for base (error token is \"08\")\n"],
+    "an arithmetic variable's value is not expanded again" => ["x='\$(echo hi >&2; echo 1)'; echo \$((x))\necho next; y=3; x='\$y'; echo \$((x))", "next\n", "bash: \$(echo hi >&2; echo 1): arithmetic syntax error: operand expected (error token is \"\$(echo hi >&2; echo 1)\")\nbash: \$y: arithmetic syntax error: operand expected (error token is \"\$y\")\n", 1],
+    'nor is an array subscript, whose error ends the shell' => ["i='\$(echo hi >&2; echo 1)'; a=(5 6); echo \${a[\$i]}\necho next", '', "bash: \$(echo hi >&2; echo 1): arithmetic syntax error: operand expected (error token is \"\$(echo hi >&2; echo 1)\")\n", 1],
+    'assignment subscripts are expanded, and arithmetic for indexed arrays' => ["i=3; a[\$i]=x; a[i+1]=y; a[-1]=z; b=([i+1]=p [6]=q); read 'c[1+1]' <<< r; declare -p a b c", "declare -a a=([3]=\"x\" [4]=\"z\")\ndeclare -a b=([4]=\"p\" [6]=\"q\")\ndeclare -a c=([2]=\"r\")\n"],
+    "an associative array's subscript is its key" => ["declare -A m; k='a b'; m[\$k]=1; m[1+1]=2; echo \"\${m[a b]} \${m[1+1]}\"", "1 2\n"],
+    'a negative subscript counts back from the end' => ["a=(1 2 3); a[-1]+=x; declare -p a; a[-5]=q; echo same\necho next \$?", "declare -a a=([0]=\"1\" [1]=\"2\" [2]=\"3x\")\nnext 1\n", "bash: a[-5]: bad array subscript\n"],
+    "an indexed subscript that isn't arithmetic ends the shell" => ["m[b c]=2\necho next \$?", '', "bash: b c: arithmetic syntax error in expression (error token is \"c\")\n", 1],
+    'unset takes options first' => ["unset -v x -n y; echo \$?; unset -z; echo \$?; unset -fn; echo \$?; unset -n; echo \$?; unset 'a b'; echo \$?", "1\n2\n0\n0\n0\n", "bash: unset: `-n': not a valid identifier\nbash: unset: -z: invalid option\nunset: usage: unset [-f] [-v] [-n] [name ...]\n"],
+    'unset of an element and of a readonly variable' => ["a=(1 2 3); unset 'a[1]'; declare -p a; readonly r; unset -n r; echo \$?; readonly -a ra=(1); unset 'ra[0]'; echo \$?", "declare -a a=([0]=\"1\" [2]=\"3\")\n1\n1\n", "bash: unset: r: cannot unset: readonly variable\nbash: unset: ra: cannot unset: readonly variable\n"],
+    'set -n reads the rest without running it' => ['echo a; set -n; echo b', "a\n"],
+    'set -o noexec too' => ['set -o noexec; echo hi', ''],
+    'set -k takes assignments from anywhere in a command' => ['f() { echo "$x"; }; set -k; echo a=b c; f x=5; echo $-; set +k; echo a=b', "c\n5\nhkBc\na=b\n"],
+    'a subscript may quote or escape a ]' => ["declare -A a b c; a[\"x]\"]=1; b[\\]]=2; c['y z']=3; declare -p a b c", "declare -A a=([\"x]\"]=\"1\" )\ndeclare -A b=([\"]\"]=\"2\" )\ndeclare -A c=([\"y z\"]=\"3\" )\n"],
+    'an unclosed subscript is a syntax error' => ['a[x=1; echo $?', '', "bash: unexpected EOF while looking for matching `]'\n", 2],
+    'unset stops taking options at --' => ['x=1; unset -- x; echo $? ${x-unset}', "0 unset\n"],
+    "redirections report why a file can't be opened" => ['true <> /tmp; echo $?; touch f; echo hi > f/x; echo $?; cat < f/x; echo $?; ln -s loop loop; echo hi > loop; echo $?', "1\n1\n1\n1\n", "bash: /tmp: Is a directory\nbash: f/x: Not a directory\nbash: f/x: Not a directory\nbash: loop: Too many levels of symbolic links\n"],
+    // bash opens a directory for reading and fails the first read (`cat: stdin: Is a directory`); here the open fails.
+    'reading a directory fails' => ['cat < /tmp; echo $?', "1\n", "bash: /tmp: Is a directory\n"],
+    "source names a directory it can't read" => ['source /tmp; echo $?', "1\n", "bash: source: /tmp: is a directory\n"],
+    'set -o keyword shows as k' => ["set -o keyword; echo \$-; set -o | grep -E '^(keyword|noexec) '", "hkBc\nkeyword        \ton\nnoexec         \toff\n"],
 ]);

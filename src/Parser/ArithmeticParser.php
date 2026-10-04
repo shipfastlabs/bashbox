@@ -36,7 +36,7 @@ final class ArithmeticParser
 
     public function __construct(string $input, private readonly Limits $limits = new Limits)
     {
-        // bash quotes the expression in errors without its leading blanks, but with its trailing ones
+        // bash quotes the expression in errors without its leading blanks, but with its trailing ones.
         $this->input = ltrim($input);
         $this->len = strlen($this->input);
     }
@@ -121,8 +121,7 @@ final class ArithmeticParser
     }
 
     /**
-     * Binary operators from lowest to highest precedence. Each operator is
-     * listed with the longer operators it must not be mistaken for.
+     * Binary operators from lowest to highest precedence, each with the longer operators it must not be mistaken for.
      *
      * @var list<array<string, list<string>>>
      */
@@ -246,9 +245,7 @@ final class ArithmeticParser
         return new ArithArrayElementNode($name, $subscript);
     }
 
-    /**
-     * Integer constants: decimal, 0-prefixed octal, 0x hex and base#digits (base 2-64).
-     */
+    /** Integer constants: decimal, 0-prefixed octal, 0x hex and base#digits (base 2-64). */
     private function parseNumber(): ArithNumberNode
     {
         $start = $this->pos;
@@ -310,9 +307,7 @@ final class ArithmeticParser
         $this->pos += strspn($this->input, " \t\n", $this->pos);
     }
 
-    /**
-     * Consume $op unless the input actually holds one of the longer operators in $longer.
-     */
+    /** Consume $op unless the input actually holds one of the longer operators in $longer. */
     private function matchOp(string $op, string ...$longer): bool
     {
         $this->skipWhitespace();
@@ -359,10 +354,7 @@ final class ArithmeticParser
         return $this->pos;
     }
 
-    /**
-     * The error token, as bash reports it: from the token it has just looked ahead to, or at the end of the
-     * input from the last token read, to the end.
-     */
+    /** The error token as bash reports it: from the lookahead token, or at the end of the input from the last token read. */
     private function token(): string
     {
         $this->skipWhitespace();

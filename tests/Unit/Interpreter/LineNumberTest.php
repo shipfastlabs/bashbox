@@ -4,8 +4,7 @@ declare(strict_types=1);
 
 use BashBox\Bash;
 
-// Every expected output below was checked against GNU bash 5.3 (`bash -c '<script>'`).
-// bash's own $0 shows here as bashbox.
+// Every expected output below was checked against GNU bash 5.3 (`bash -c '<script>'`), whose $0 shows here as bashbox.
 
 test('line numbers, caller and the call stack', function (string $script, string $stdout, string $stderr = '', int $exitCode = 0): void {
     $bashExecResult = (new Bash)->exec($script);

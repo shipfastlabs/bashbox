@@ -46,7 +46,7 @@ final class Printf_ extends AbstractCommand
         $this->commandContext = $commandContext;
         $output = '';
 
-        // The format is reused until every argument has been consumed
+        // The format is reused until every argument has been consumed.
         do {
             $remaining = count($args);
             $output .= $this->formatOnce($format, $args);
@@ -100,21 +100,21 @@ final class Printf_ extends AbstractCommand
             return $this->fail(sprintf("`%s': missing format character", $spec));
         }
 
-        // `*` takes the width or precision from the arguments; a negative width left-justifies
+        // `*` takes the width or precision from the arguments; a negative width left-justifies.
         $width = $width === '*' ? $this->integer(array_shift($args)) : (int) $width;
         $flags .= $width < 0 ? '-' : '';
         $width = abs($width);
         $precision = $precision === '*' ? $this->integer(array_shift($args)) : ($dot === '' ? -1 : (int) $precision);
         $this->checkOutputSize($this->commandContext, max($width, $precision));
 
-        // A missing argument counts as empty (or zero), but an explicitly empty one is not a valid number
+        // A missing argument counts as empty (or zero), but an explicitly empty one is not a valid number.
         $arg = array_shift($args);
         $text = $arg ?? '';
 
         return match ($conversion) {
             's' => $this->pad('', $precision < 0 ? $text : substr($text, 0, $precision), $flags, $width, true),
             'c' => $this->pad('', $text[0] ?? "\0", $flags, $width, true),
-            // These are padded by bash itself, which never pads with zeros
+            // These are padded by bash itself, which never pads with zeros.
             'b' => $this->pad('', $this->truncate($this->expandBackslashes($text), $precision), $flags, $width, false),
             'q' => $this->pad('', $this->truncate($this->quote($text), $precision), $flags, $width, false),
             'Q' => $this->pad('', $this->quote($this->truncate($text, $precision)), $flags, $width, false),
@@ -162,7 +162,7 @@ final class Printf_ extends AbstractCommand
     private function formatInteger(int $value, string $conversion, string $flags, int $width, int $precision): string
     {
         $signed = in_array($conversion, ['d', 'i'], true);
-        // o, u, x and X reinterpret negative numbers as unsigned 64-bit values, which sprintf() already does
+        // o, u, x and X reinterpret negative numbers as unsigned 64-bit values, which sprintf() already does.
         $digits = ltrim(sprintf('%'.($signed ? 'd' : strtr($conversion, 'X', 'x')), $value), '-');
         $digits = $conversion === 'X' ? strtoupper($digits) : $digits;
 
@@ -223,7 +223,7 @@ final class Printf_ extends AbstractCommand
 
     private function exponential(float $value, int $precision, bool $alternate): string
     {
-        // PHP writes the exponent without C's minimum of two digits
+        // PHP writes the exponent without C's minimum of two digits.
         [$mantissa, $exponent] = explode('e', sprintf(sprintf('%%.%de', $precision), $value));
 
         return $mantissa.($alternate && $precision === 0 ? '.' : '').'e'.$exponent[0].str_pad(substr($exponent, 1), 2, '0', STR_PAD_LEFT);
@@ -251,7 +251,7 @@ final class Printf_ extends AbstractCommand
             $mantissa = $bits & 0xFFFFFFFFFFFFF;
 
             if ($exponent === -1023) {
-                // Subnormal: shift the mantissa up until the leading 1 is in place
+                // Subnormal: shift the mantissa up until the leading 1 is in place.
                 $exponent = -1022;
 
                 while (($mantissa & (1 << 52)) === 0) {
@@ -296,7 +296,7 @@ final class Printf_ extends AbstractCommand
         $quoted = '';
 
         foreach (str_split($text) as $i => $char) {
-            // `#` starts a comment only at the start of a word, `~` expands there and after `:` or `=`
+            // `#` starts a comment only at the start of a word, `~` expands there and after `:` or `=`.
             $special = str_contains(self::SHELL_SPECIAL, $char)
                 || ($char === '#' && $i === 0)
                 || ($char === '~' && ($i === 0 || in_array($text[$i - 1], [':', '='], true)));
@@ -332,7 +332,7 @@ final class Printf_ extends AbstractCommand
             return $m[1] === '-' ? PHP_INT_MIN : PHP_INT_MAX;
         }
 
-        // bash names the base it expected from how the argument starts
+        // bash names the base it expected from how the argument starts.
         $kind = match (true) {
             preg_match('/^0x/i', $text) === 1 => 'hex ',
             str_starts_with($text, '0') => 'octal ',
@@ -352,7 +352,7 @@ final class Printf_ extends AbstractCommand
 
         [$value, $prefix] = self::strtold($text);
 
-        // Overflow, or underflow of a number that is not zero
+        // Overflow, or underflow of a number that is not zero.
         preg_match('/^\s*[-+]?(?:0x([\da-f.]*)|([\d.]*))/i', $prefix, $digits);
 
         if (strpbrk($digits[1].($digits[2] ?? ''), '123456789abcdefABCDEF') !== false && (is_infinite($value) || abs($value) < PHP_FLOAT_MIN)) {

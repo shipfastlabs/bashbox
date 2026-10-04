@@ -15,6 +15,7 @@ test('od', function (string $script, string $stdout, string $stderr = '', int $e
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'nothing is dumped when no file can be read' => ["od 'n o'", '', "od: 'n o': No such file or directory\n", 1],
     'octal words' => ['od o.bin', "0000000 062550 066154 020157 067567 066162 005144 077400 177600\n0000020\n"],
     'characters' => ['od -c o.bin', "0000000   h   e   l   l   o       w   o   r   l   d  \\n  \\0 177 200 377\n0000020\n"],
     'hex words' => ['od -x o.bin', "0000000 6568 6c6c 206f 6f77 6c72 0a64 7f00 ff80\n0000020\n"],

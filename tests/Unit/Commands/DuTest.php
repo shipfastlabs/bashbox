@@ -17,6 +17,7 @@ test('du', function (string $script, string $stdout, string $stderr = '', int $e
 
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
+    'names are quoted, an empty one is invalid' => ["du 'n o' \"it's\" ''", '', "du: cannot access 'n o': No such file or directory\ndu: cannot access \"it's\": No such file or directory\ndu: invalid zero-length file name\n", 1],
     'directories, deepest first' => ['du d', "0\td/s/t\n0\td/s/u\n12\td/s\n16\td\n"],
     'current directory by default' => ['cd d && du', "0\t./s/t\n0\t./s/u\n12\t./s\n16\t.\n"],
     'trailing slash' => ['du d/', "0\td/s/t\n0\td/s/u\n12\td/s\n16\td/\n"],

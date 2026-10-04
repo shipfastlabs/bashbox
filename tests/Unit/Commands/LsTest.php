@@ -57,7 +57,7 @@ test('ls -l shows mode, size, date and symlink targets', function (): void {
 
     $result = $this->bash->exec('ls -l a.txt f');
 
-    // total counts 1K blocks: 2 for the 1500-byte file, none for the link (GNU on Linux keeps short targets in the inode)
+    // The total counts 1K blocks: 2 for the 1500-byte file, none for the link (GNU on Linux keeps short targets in the inode).
     expect($result->stdout)->toBe(
         "-rw-r--r-- 1 user user 3 Jan  2  2020 a.txt\n\n"
         ."f:\ntotal 2\n"
@@ -72,8 +72,7 @@ test('ls -ld describes the directory itself', function (): void {
     expect($this->bash->exec('ls -ld e')->stdout)->toBe("drwxr-xr-x 2 user user 0 Jan  2  2020 e\n");
 });
 
-// As GNU ls on Linux: link counts (2 + subdirectories for a directory), set-id and sticky bits, symlinks as lrwxrwxrwx,
-// and the sandbox user ($USER, as whoami reports it) owning everything
+// As GNU ls on Linux: link counts (2 + subdirectories for a directory), set-id and sticky bits, symlinks as lrwxrwxrwx, and the sandbox user owning everything.
 test('ls -l shows link counts, special bits and the owner', function (): void {
     $bash = new Bash(new BashOptions(cwd: '/w', env: ['USER' => 'alice']));
     $bash->exec('echo x > f; ln f h; ln -s f l; mkdir -p d/a d/b e; chmod 4755 f; chmod 1777 e; chmod 2750 d');
@@ -95,7 +94,7 @@ test('ls -l shows link counts, special bits and the owner', function (): void {
         total 0
 
         OUT)
-        // utimes follows the link, so the symlink keeps its creation time
+        // The utimes() call follows the link, so the symlink keeps its creation time.
         ->and($bash->exec('ls -ld d e l')->stdout)->toMatch(
             '/^drwxr-s--- 4 alice alice 0 Jan  2  2020 d\ndrwxrwxrwt 2 alice alice 0 Jan  2  2020 e\nlrwxrwxrwx 1 alice alice 1 \w{3} [ \d]\d \d\d:\d\d l -> f\n$/',
         );
@@ -106,9 +105,9 @@ test('ls -l of an empty directory prints total 0', function (): void {
 });
 
 test('ls -lL still lists a dangling symlink in a directory', function (): void {
-    $result = (new Bash)->exec('mkdir e; ln -s nope e/x; ls -lL e');
+    $bashExecResult = (new Bash)->exec('mkdir e; ln -s nope e/x; ls -lL e');
 
-    expect([$result->stdout, $result->stderr, $result->exitCode])
+    expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])
         ->toBe(["total 0\nl????????? ? ? ? ?            ? x\n", "ls: cannot access 'e/x': No such file or directory\n", 1]);
 });
 
@@ -122,7 +121,7 @@ test('ls reports unreadable directories', function (string $script, string $expe
     } finally {
         chmod($root.'/locked', 0755);
         rmdir($root.'/locked');
-        @rmdir($root.'/tmp'); // created by Bash on startup
+        @rmdir($root.'/tmp'); // Created by Bash on startup
         rmdir($root);
     }
 

@@ -17,7 +17,7 @@ final class Realpath extends AbstractCommand
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
         $mustExist = in_array('-e', $args, true);
-        // -m: resolve without requiring any component to exist
+        // -m: resolve without requiring any component to exist.
         $missingOk = in_array('-m', $args, true);
         $quiet = in_array('-q', $args, true);
         $paths = array_values(array_filter($args, fn (string $arg): bool => ! in_array($arg, ['-e', '-m', '-s', '-q', '--'], true)));
@@ -36,7 +36,7 @@ final class Realpath extends AbstractCommand
             try {
                 $output .= $commandContext->fs->realpath($resolved)."\n";
             } catch (RuntimeException) {
-                // GNU's default only requires the parent to exist
+                // GNU's default only requires the parent to exist.
                 if ($missingOk || (! $mustExist && $commandContext->fs->exists(dirname($resolved)))) {
                     $output .= $resolved."\n";
                 } else {

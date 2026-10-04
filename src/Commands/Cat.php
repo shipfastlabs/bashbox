@@ -79,7 +79,7 @@ final class Cat extends AbstractCommand
                 $body = str_replace("\t", '^I', $body);
             }
 
-            // GNU shows the carriage return of a CRLF ending even without -v
+            // GNU shows the carriage return of a CRLF ending even without -v.
             if ($newline && str_contains($on, 'E')) {
                 $body = (str_ends_with($body, "\r") ? substr($body, 0, -1).'^M' : $body).'$';
             }

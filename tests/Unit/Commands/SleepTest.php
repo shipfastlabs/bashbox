@@ -13,7 +13,6 @@ test('sleep', function (string $script, string $stdout, string $stderr = '', int
     expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, $stderr, $exitCode]);
 })->with([
     'zero' => ['sleep 0', ''],
-    'valid intervals return at once instead of sleeping' => ['sleep 1.5 2m inf; echo done', "done\n"],
     'fraction' => ['sleep 0.001', ''],
     'units' => ['sleep 0s 0m 0h 0d', ''],
     'leading dot' => ['sleep .0', ''],
@@ -37,4 +36,5 @@ test('sleep', function (string $script, string $stdout, string $stderr = '', int
     'hex fraction' => ['sleep 0x.0p1', ''],
     'nan' => ['sleep nan', '', "sleep: invalid time interval 'nan'\nTry 'sleep --help' for more information.\n", 1],
     'infinity spelled out' => ['sleep -infinity', '', "sleep: invalid option -- 'i'\nTry 'sleep --help' for more information.\n", 1],
+    'valid intervals return at once instead of sleeping' => ['sleep 1.5 2m inf; echo done', "done\n"],
 ]);

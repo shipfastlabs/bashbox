@@ -12,8 +12,6 @@ beforeEach(function (): void {
     $this->mountableFs = new MountableFs($this->defaultFs);
 });
 
-// ─── Mounting and Unmounting ────────────────────────────────────────────
-
 test('operations go to default filesystem when no mounts', function (): void {
     expect($this->mountableFs->readFile('/home/user/file.txt'))->toBe('default content');
 });
@@ -49,8 +47,6 @@ test('mount strips prefix and forwards inner path', function (): void {
     expect($this->mountableFs->readFile('/mnt/subdir/file.txt'))->toBe('nested content');
 });
 
-// ─── Longest-Prefix Routing ────────────────────────────────────────────
-
 test('longest-prefix mount wins over shorter prefix', function (): void {
     $shortFs = new InMemoryFs([
         '/data/file.txt' => 'from short mount',
@@ -79,8 +75,6 @@ test('shorter prefix still works for paths not under longer mount', function ():
 
     expect($this->mountableFs->readFile('/mnt/other.txt'))->toBe('short mount file');
 });
-
-// ─── Directory Listing with Mount Points ────────────────────────────────
 
 test('readdir includes mount point directory names', function (): void {
     $this->defaultFs->mkdir('/mnt', ['recursive' => true]);
@@ -152,8 +146,6 @@ test('readdir at root shows mount point top-level directories', function (): voi
     expect($entries)->toContain('home');
     expect($entries)->toContain('proc');
 });
-
-// ─── Operations Go to Correct Filesystem Backend ────────────────────────
 
 test('writeFile to mounted filesystem stores data there', function (): void {
     $mountedFs = new InMemoryFs;
@@ -269,8 +261,6 @@ test('resolvePath resolves relative paths against base', function (): void {
 test('resolvePath normalizes dot-dot segments', function (): void {
     expect($this->mountableFs->resolvePath('/home/user', '../other/file.txt'))->toBe('/home/other/file.txt');
 });
-
-// ─── Cross-Filesystem Copies ────────────────────────────────────────────
 
 test('cp across mount boundaries copies file content', function (): void {
     $mountedFs = new InMemoryFs([

@@ -17,8 +17,7 @@ final class Yes extends AbstractCommand
     {
         $line = ($args === [] ? 'y' : implode(' ', $args))."\n";
 
-        // Limitation: pipeline stages run to completion, not streamed, so the "infinite" stream stops
-        // at the loop-iteration limit or the output-size limit, whichever comes first.
+        // Limitation: pipeline stages run to completion rather than stream, so output stops at the loop-iteration or output-size limit.
         $count = min($commandContext->limits->maxLoopIterations, intdiv($commandContext->limits->maxOutputSize, strlen($line)));
 
         return $this->success(str_repeat($line, $count));

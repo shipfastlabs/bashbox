@@ -42,4 +42,5 @@ test('cat', function (string $script, string $stdout, string $stderr = '', int $
         "cat: nope: No such file or directory\ncat: d: Is a directory\n",
         1,
     ],
+    'names are quoted when needed; an empty name is no file' => ["cat 'n o' \"it's\" ''", '', "cat: 'n o': No such file or directory\ncat: \"it's\": No such file or directory\ncat: '': No such file or directory\n", 1],
 ]);

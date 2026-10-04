@@ -77,7 +77,7 @@ test('find reports unreadable directories and keeps going', function (): void {
         chmod($root.'/locked', 0755);
         rmdir($root.'/locked');
         unlink($root.'/z.txt');
-        @rmdir($root.'/tmp'); // created by Bash on startup
+        @rmdir($root.'/tmp'); // Created by Bash on startup
         rmdir($root);
     }
 
@@ -86,10 +86,7 @@ test('find reports unreadable directories and keeps going', function (): void {
         ->and($result->exitCode)->toBe(1);
 })->skip(fn (): bool => function_exists('posix_geteuid') && posix_geteuid() === 0, 'root can read any directory');
 
-/*
- * Checked against GNU findutils 4.10 on the same tree. GNU lists a directory in the order the filesystem keeps it;
- * BashBox sorts, so the expected order here is that one.
- */
+// Checked against GNU findutils 4.10 on the same tree, in BashBox's sorted order where GNU uses the filesystem's.
 test('find expressions', function (string $script, string $stdout, string $stderr = '', int $exitCode = 0): void {
     $now = time();
     $fs = $this->bash->getFilesystem();

@@ -385,13 +385,13 @@ $sandbox->readFile('/home/user/app.sh'); // 'echo "running"'
 
 ### Available Commands
 
-BashBox includes 51 built-in commands:
+BashBox includes 58 built-in commands:
 
 | Category | Commands |
 |---|---|
 | **Output** | `echo`, `printf`, `cat`, `head`, `tail`, `tee`, `yes` |
 | **Files** | `ls`, `pwd`, `mkdir`, `rmdir`, `rm`, `cp`, `mv`, `touch`, `ln`, `chmod`, `stat`, `du`, `find`, `tree`, `mktemp`, `realpath`, `basename`, `dirname` |
-| **Text** | `grep`, `sed`, `sort`, `uniq`, `wc`, `cut`, `tr`, `rev` |
+| **Text** | `grep`, `sed`, `sort`, `uniq`, `wc`, `cut`, `tr`, `rev`, `tac`, `nl`, `paste`, `comm`, `fold`, `expand`, `unexpand` |
 | **Utils** | `xargs`, `env`, `printenv`, `seq`, `sleep`, `test`, `[`, `true`, `false` |
 | **Info** | `date`, `which`, `whoami`, `hostname` |
 | **Encoding** | `base64`, `od`, `md5sum`, `sha1sum`, `sha256sum` |

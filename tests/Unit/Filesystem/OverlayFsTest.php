@@ -27,10 +27,6 @@ afterEach(function (): void {
     $remove($this->outside);
 });
 
-// ---------------------------------------------------------------
-//  Basic COW read/write
-// ---------------------------------------------------------------
-
 test('reads file from real filesystem when not in COW layer', function (): void {
     file_put_contents($this->tmpDir.'/hello.txt', 'from disk');
 
@@ -55,7 +51,6 @@ test('writeFile overrides real filesystem content (COW)', function (): void {
 
     expect($fs->readFile('/data.txt'))->toBe('modified');
 
-    // Real file on disk is unchanged
     expect(file_get_contents($this->tmpDir.'/data.txt'))->toBe('original');
 });
 
@@ -67,7 +62,6 @@ test('appendFile pulls real content then appends in COW', function (): void {
 
     expect($fs->readFile('/log.txt'))->toBe("line1\nline2");
 
-    // Disk unchanged
     expect(file_get_contents($this->tmpDir.'/log.txt'))->toBe('line1');
 });
 
@@ -77,10 +71,6 @@ test('appendFile creates new file if it does not exist', function (): void {
 
     expect($fs->readFile('/brand_new.txt'))->toBe('hello');
 });
-
-// ---------------------------------------------------------------
-//  Deleted files must not show through
-// ---------------------------------------------------------------
 
 test('deleted file does not show through from real filesystem', function (): void {
     file_put_contents($this->tmpDir.'/secret.txt', 'hidden');
@@ -93,7 +83,6 @@ test('deleted file does not show through from real filesystem', function (): voi
 
     expect($fs->exists('/secret.txt'))->toBeFalse();
 
-    // Real file still on disk
     expect(file_exists($this->tmpDir.'/secret.txt'))->toBeTrue();
 });
 
@@ -132,10 +121,6 @@ test('writing to a previously deleted path makes it visible again', function ():
     expect($fs->readFile('/revive.txt'))->toBe('new');
 });
 
-// ---------------------------------------------------------------
-//  Path traversal rejection
-// ---------------------------------------------------------------
-
 test('null byte in path is rejected', function (): void {
     $fs = new OverlayFs($this->tmpDir);
 
@@ -154,21 +139,16 @@ test('path with .. is normalized and stays contained', function (): void {
 
     $fs = new OverlayFs($this->tmpDir);
 
-    // /subdir/../top.txt normalizes to /top.txt which is fine
+    // /subdir/../top.txt normalizes to /top.txt which is fine.
     expect($fs->readFile('/subdir/../top.txt'))->toBe('at top');
 });
 
 test('path with excessive .. normalizes to root and does not escape', function (): void {
     $fs = new OverlayFs($this->tmpDir);
 
-    // /../../etc/passwd normalizes to /etc/passwd which is within the virtual FS
-    // but /etc/passwd does not exist in the overlay root directory
+    // /../../etc/passwd normalizes to /etc/passwd inside the virtual root, which has no such file.
     expect($fs->exists('/../../etc/passwd'))->toBeFalse();
 });
-
-// ---------------------------------------------------------------
-//  Directory listing merges COW + real files
-// ---------------------------------------------------------------
 
 test('readdir merges real and COW entries', function (): void {
     file_put_contents($this->tmpDir.'/real.txt', 'on disk');
@@ -221,17 +201,11 @@ test('COW entry overrides real entry in readdir', function (): void {
 
     $entries = $fs->readdir('/');
 
-    // Should appear only once
     $count = array_count_values($entries);
     expect($count['clash.txt'])->toBe(1);
 
-    // And COW content wins
     expect($fs->readFile('/clash.txt'))->toBe('cow');
 });
-
-// ---------------------------------------------------------------
-//  exists / stat
-// ---------------------------------------------------------------
 
 test('exists returns true for real file', function (): void {
     file_put_contents($this->tmpDir.'/real.txt', 'yes');
@@ -275,10 +249,6 @@ test('stat returns info for real file', function (): void {
     expect($stat->size)->toBe(7);
 });
 
-// ---------------------------------------------------------------
-//  mkdir / rm / cp / mv
-// ---------------------------------------------------------------
-
 test('mkdir creates directory in COW layer', function (): void {
     $fs = new OverlayFs($this->tmpDir);
     $fs->mkdir('/newdir');
@@ -287,7 +257,6 @@ test('mkdir creates directory in COW layer', function (): void {
     $stat = $fs->stat('/newdir');
     expect($stat->isDirectory)->toBeTrue();
 
-    // Not on real disk
     expect(is_dir($this->tmpDir.'/newdir'))->toBeFalse();
 });
 
@@ -325,10 +294,6 @@ test('mv moves file in COW layer', function (): void {
     expect($fs->readFile('/new.txt'))->toBe('moving');
 });
 
-// ---------------------------------------------------------------
-//  Symlink denial
-// ---------------------------------------------------------------
-
 test('symlinks denied by default', function (): void {
     $fs = new OverlayFs($this->tmpDir);
 
@@ -346,10 +311,6 @@ test('real symlinks are hidden when denySymlinks is true', function (): void {
     $entries = $fs->readdir('/');
     expect($entries)->not->toContain('link.txt');
 });
-
-// ---------------------------------------------------------------
-//  resolvePath
-// ---------------------------------------------------------------
 
 test('resolvePath with absolute path returns normalized', function (): void {
     $fs = new OverlayFs($this->tmpDir);
@@ -369,10 +330,6 @@ test('resolvePath resolves .. correctly', function (): void {
     expect($fs->resolvePath('/a/b/c', '../d'))->toBe('/a/b/d');
 });
 
-// ---------------------------------------------------------------
-//  getAllPaths
-// ---------------------------------------------------------------
-
 test('getAllPaths includes both real and COW paths', function (): void {
     file_put_contents($this->tmpDir.'/disk.txt', 'real');
 
@@ -386,17 +343,9 @@ test('getAllPaths includes both real and COW paths', function (): void {
     expect($paths)->toContain('/mem.txt');
 });
 
-// ---------------------------------------------------------------
-//  Constructor validation
-// ---------------------------------------------------------------
-
 test('constructor rejects non-existent root directory', function (): void {
     new OverlayFs('/definitely/does/not/exist');
 })->throws(RuntimeException::class, 'does not exist');
-
-// ---------------------------------------------------------------
-//  Sandbox containment
-// ---------------------------------------------------------------
 
 test('disk symlinks never expose files outside the root', function (bool $denySymlinks, string $method, array $args): void {
     symlink($this->outside, $this->tmpDir.'/escape');
@@ -460,10 +409,6 @@ test('symlinks created in the overlay live in memory only', function (): void {
     expect($fs->readlink('/link'))->toBe('/real.txt');
     expect(is_link($this->tmpDir.'/link'))->toBeFalse();
 });
-
-// ---------------------------------------------------------------
-//  Copy-up keeps disk semantics
-// ---------------------------------------------------------------
 
 test('changes to disk entries keep their mode and leave the disk untouched', function (): void {
     file_put_contents($this->tmpDir.'/run.sh', 'echo');
@@ -607,10 +552,6 @@ test('removing an overridden disk file does not resurface the disk version', fun
     expect($fs->exists('/data.txt'))->toBeFalse();
     expect(file_get_contents($this->tmpDir.'/data.txt'))->toBe('disk');
 });
-
-// ---------------------------------------------------------------
-//  Symlinks resolve across both layers
-// ---------------------------------------------------------------
 
 test('an overlay symlink to a disk-only file reads, writes and stats through the merged view', function (): void {
     mkdir($this->tmpDir.'/data');
@@ -764,10 +705,6 @@ test('mkdir -p through a symlink to a disk directory', function (): void {
         ->and($fs->lstat('/link')->isSymbolicLink)->toBeTrue()
         ->and(fn () => $fs->mkdir('/link'))->toThrow(RuntimeException::class, 'EEXIST');
 });
-
-// ---------------------------------------------------------------
-//  Hard links, rename and exclusive create in the overlay
-// ---------------------------------------------------------------
 
 test('hard links in the overlay share one inode, also for copied-up disk files', function (): void {
     file_put_contents($this->tmpDir.'/disk.txt', 'disk');

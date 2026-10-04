@@ -12,8 +12,6 @@ beforeEach(function (): void {
     ));
 });
 
-// ===== Variable Expansion =====
-
 test('simple variable expansion', function (): void {
     $result = $this->bash->exec('x=hello; echo $x');
     expect($result->stdout)->toBe("hello\n");
@@ -33,8 +31,6 @@ test('braced variable expansion', function (): void {
     $result = $this->bash->exec('x=hello; echo ${x}world');
     expect($result->stdout)->toBe("helloworld\n");
 });
-
-// ===== Parameter Expansion =====
 
 test('default value with unset', function (): void {
     $result = $this->bash->exec('echo ${unset:-default}');
@@ -136,8 +132,6 @@ test('case modification lowercase all', function (): void {
     expect($result->stdout)->toBe("hello\n");
 });
 
-// ===== Command Substitution =====
-
 test('command substitution with dollar-paren', function (): void {
     $result = $this->bash->exec('echo $(echo hello)');
     expect($result->stdout)->toBe("hello\n");
@@ -152,8 +146,6 @@ test('backtick command substitution', function (): void {
     $result = $this->bash->exec('echo `echo hello`');
     expect($result->stdout)->toBe("hello\n");
 });
-
-// ===== Arithmetic Expansion =====
 
 test('arithmetic expansion basic', function (): void {
     $result = $this->bash->exec('echo $((2 + 3))');
@@ -175,8 +167,6 @@ test('arithmetic expansion operators', function (): void {
     $result = $this->bash->exec('echo $((10 % 3))');
     expect($result->stdout)->toBe("1\n");
 });
-
-// ===== Special Variables =====
 
 test('dollar question mark last exit code', function (): void {
     $result = $this->bash->exec('true; echo $?');
@@ -201,21 +191,15 @@ test('dollar at and dollar star', function (): void {
     expect($result->stdout)->toBe("a b c\n");
 });
 
-// ===== Tilde Expansion =====
-
 test('tilde expands to HOME', function (): void {
     $result = $this->bash->exec('echo ~');
     expect($result->stdout)->toBe("/home/user\n");
 });
 
-// ===== Escape Handling =====
-
 test('backslash escape in unquoted', function (): void {
     $result = $this->bash->exec('echo hello\\ world');
     expect($result->stdout)->toBe("hello world\n");
 });
-
-// ===== Arrays =====
 
 test('indexed array assignment and access', function (): void {
     $result = $this->bash->exec('arr[0]=x; echo ${arr[0]}');
@@ -251,8 +235,6 @@ test('unset array element keeps remaining elements', function (): void {
     $result = $this->bash->exec('arr=(a b); unset arr[0]; echo "<${arr[0]}>" "<${arr[1]}>"');
     expect($result->stdout)->toBe("<> <b>\n");
 });
-
-// ===== Brace Expansion =====
 
 test('brace expansion alternatives', function (): void {
     $result = $this->bash->exec('echo {a,b,c}');
