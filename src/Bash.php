@@ -13,6 +13,7 @@ use BashBox\Filesystem\FileSystemInterface;
 use BashBox\Filesystem\InMemoryFs;
 use BashBox\Interpreter\Interpreter;
 use BashBox\Interpreter\InterpreterState;
+use BashBox\Network\NetworkConfig;
 use BashBox\Network\SecureHttpClient;
 
 final readonly class Bash
@@ -31,7 +32,7 @@ final readonly class Bash
         $this->commandRegistry = new CommandRegistry;
         $this->commandRegistry->registerDefaults();
 
-        if ($this->bashOptions->network instanceof \BashBox\Network\NetworkConfig) {
+        if ($this->bashOptions->network instanceof NetworkConfig) {
             $this->secureHttpClient = new SecureHttpClient($this->bashOptions->network);
             $this->commandRegistry->register(new Curl_);
         } else {

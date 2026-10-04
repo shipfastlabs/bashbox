@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
+use BashBox\Filesystem\FsStat;
 use RuntimeException;
 
 /** POSIX test: the argument count decides the parse up to four arguments, longer expressions use test.c's -o -a ! ( ) grammar. */
@@ -214,7 +215,7 @@ final class Test_ extends AbstractCommand
         };
     }
 
-    private function stat(string $file): ?\BashBox\Filesystem\FsStat
+    private function stat(string $file): ?FsStat
     {
         try {
             return $this->commandContext->fs->stat($this->resolvePath($this->commandContext, $file));

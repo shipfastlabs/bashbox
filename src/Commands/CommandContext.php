@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Commands;
 
+use BashBox\ExecResult;
 use BashBox\Filesystem\FileSystemInterface;
 use BashBox\Interpreter\StdinStream;
 use BashBox\Limits;
@@ -23,7 +24,7 @@ final class CommandContext
 
     /**
      * @param  array<string, string>  $env
-     * @param  Closure(string, array<string, string>|null=, string|StdinStream|null=): \BashBox\ExecResult  $exec
+     * @param  Closure(string, array<string, string>|null=, string|StdinStream|null=): ExecResult  $exec
      */
     public function __construct(
         public readonly FileSystemInterface $fs,

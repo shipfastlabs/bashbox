@@ -288,7 +288,7 @@ final class Parser
         }
 
         // Bash runs a lone `time` or `!` on an empty command.
-        $commands = [($timed || $negated) && ! $this->isCommandStart() && ! $this->compoundStart() instanceof \BashBox\Parser\TokenType ? new SimpleCommandNode : $this->parseCommand()];
+        $commands = [($timed || $negated) && ! $this->isCommandStart() && ! $this->compoundStart() instanceof TokenType ? new SimpleCommandNode : $this->parseCommand()];
         $pipeStderr = [];
 
         while ($this->check(TokenType::PIPE, TokenType::PIPE_AMP)) {

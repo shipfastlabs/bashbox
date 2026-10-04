@@ -12,6 +12,7 @@ use BashBox\Ast\Conditional\CondNotNode;
 use BashBox\Ast\Conditional\CondOrNode;
 use BashBox\Ast\Conditional\CondUnaryNode;
 use BashBox\Ast\Conditional\CondWordNode;
+use BashBox\Parser\Lexer;
 use Closure;
 
 /** Prints a function the way `type` and `declare -f` do, as a port of bash's print_cmd.c so the layout matches. */
@@ -474,7 +475,7 @@ final class FunctionPrinter
         return (string) preg_replace_callback(
             '/\$\'((?:\\\\.|[^\'\\\\])*)\'|\$("(?:\\\\.|[^"\\\\])*")|"(?:\\\\.|[^"\\\\])*"|\'[^\']*\'|\\\\./s',
             fn (array $m): string => match (true) {
-                $m[1] !== null => "'".str_replace("'", "'\\''", \BashBox\Parser\Lexer::ansiC($m[1]))."'",
+                $m[1] !== null => "'".str_replace("'", "'\\''", Lexer::ansiC($m[1]))."'",
                 $m[2] !== null => $m[2],
                 default => $m[0],
             },

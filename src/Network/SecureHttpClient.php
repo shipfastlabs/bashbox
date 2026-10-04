@@ -134,7 +134,7 @@ final readonly class SecureHttpClient
 
         $succeeded = curl_exec($ch);
 
-        if ($denied instanceof \BashBox\Network\Exceptions\NetworkAccessDeniedException) {
+        if ($denied instanceof NetworkAccessDeniedException) {
             throw $denied;
         }
 

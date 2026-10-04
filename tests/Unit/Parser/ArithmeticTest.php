@@ -2,9 +2,11 @@
 
 declare(strict_types=1);
 
+use BashBox\Ast\Arithmetic\ArithExpr;
 use BashBox\Bash;
 use BashBox\BashOptions;
 use BashBox\Exceptions\ArithmeticException;
+use BashBox\Limits;
 use BashBox\Parser\ArithmeticParser;
 
 beforeEach(function (): void {
@@ -87,7 +89,7 @@ test('special parameters can be used inside arithmetic', function (): void {
 });
 
 test('arithmetic syntax errors are rejected', function (string $expr, string $message): void {
-    expect(fn (): \BashBox\Ast\Arithmetic\ArithExpr => new ArithmeticParser($expr)->parse())
+    expect(fn (): ArithExpr => new ArithmeticParser($expr)->parse())
         ->toThrow(ArithmeticException::class, $message);
 })->with([
     'missing operand' => ['1 +', 'operand expected'],
@@ -107,7 +109,7 @@ test('arithmetic syntax errors are rejected', function (string $expr, string $me
 ]);
 
 test('nesting deeper than the limit is an arithmetic error', function (string $expr): void {
-    expect(fn (): \BashBox\Ast\Arithmetic\ArithExpr => new ArithmeticParser($expr, new \BashBox\Limits(maxAstDepth: 5))->parse())
+    expect(fn (): ArithExpr => new ArithmeticParser($expr, new Limits(maxAstDepth: 5))->parse())
         ->toThrow(ArithmeticException::class, 'expression recursion level exceeded');
 })->with([
     'parentheses' => [str_repeat('(', 6).'1'.str_repeat(')', 6)],

@@ -10,6 +10,7 @@ use BashBox\Exceptions\ParseException;
 use BashBox\Limits;
 use BashBox\Parser\Lexer;
 use BashBox\Parser\Parser;
+use BashBox\Parser\Token;
 use BashBox\Parser\TokenType;
 
 beforeEach(function (): void {
@@ -88,7 +89,7 @@ test('unterminated quotes and substitutions are syntax errors', function (string
 test('command substitution keeps quoted parens in a single word', function (): void {
     $tokens = new Lexer('echo $(echo ")" "(" \'(\') z')->tokenize();
 
-    expect(array_map(fn (\BashBox\Parser\Token $token): string => $token->value, $tokens))->toBe(['echo', '$(echo ")" "(" \'(\')', 'z', "\n", '']);
+    expect(array_map(fn (Token $token): string => $token->value, $tokens))->toBe(['echo', '$(echo ")" "(" \'(\')', 'z', "\n", '']);
 });
 
 test('arithmetic expansion ends at the matching closing parens', function (): void {

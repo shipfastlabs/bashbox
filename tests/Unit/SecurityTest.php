@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use BashBox\Bash;
+use BashBox\BashExecResult;
 use BashBox\BashOptions;
 use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\ExecOptions;
@@ -13,7 +14,7 @@ test('infinite loop is caught by iteration limit', function (): void {
         limits: new Limits(maxLoopIterations: 50),
     ));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec('while true; do echo x; done'))
+    expect(fn (): BashExecResult => $bash->exec('while true; do echo x; done'))
         ->toThrow(ExecutionLimitException::class);
 });
 
@@ -22,7 +23,7 @@ test('infinite recursion is caught by call depth limit', function (): void {
         limits: new Limits(maxCallDepth: 10),
     ));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec('f() { f; }; f'))
+    expect(fn (): BashExecResult => $bash->exec('f() { f; }; f'))
         ->toThrow(ExecutionLimitException::class);
 });
 
@@ -31,7 +32,7 @@ test('command count limit prevents command bombs', function (): void {
         limits: new Limits(maxCommandCount: 10),
     ));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec('for i in $(seq 1 20); do echo $i; done'))
+    expect(fn (): BashExecResult => $bash->exec('for i in $(seq 1 20); do echo $i; done'))
         ->toThrow(ExecutionLimitException::class);
 });
 
@@ -40,14 +41,14 @@ test('output size limit prevents output bombs', function (): void {
         limits: new Limits(maxOutputSize: 100),
     ));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec('for i in $(seq 1 100); do echo "aaaaaaaaaaaaaaaaaaaaaaaaa"; done'))
+    expect(fn (): BashExecResult => $bash->exec('for i in $(seq 1 100); do echo "aaaaaaaaaaaaaaaaaaaaaaaaa"; done'))
         ->toThrow(ExecutionLimitException::class);
 });
 
 test('each limit stops a script that goes over it', function (array $limits, string $script, string $message, ?string $stdin = null): void {
     $bash = new Bash(new BashOptions(limits: new Limits(...$limits)));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec($script, $stdin === null ? null : new ExecOptions(stdin: $stdin)))
+    expect(fn (): BashExecResult => $bash->exec($script, $stdin === null ? null : new ExecOptions(stdin: $stdin)))
         ->toThrow(ExecutionLimitException::class, $message);
 })->with([
     'a value built by expansion' => [['maxStringLength' => 100], 'x=0123456789; x=$x$x$x$x$x$x$x$x$x$x$x', 'String length limit exceeded (100 bytes)'],
@@ -82,7 +83,7 @@ test('ordinary scripts stay under the default limits', function (string $script,
 
 test('null byte in filename is rejected', function (): void {
     $bash = new Bash;
-    expect(fn (): \BashBox\BashExecResult => $bash->exec("echo test > /tmp/evil\x00.txt"))
+    expect(fn (): BashExecResult => $bash->exec("echo test > /tmp/evil\x00.txt"))
         ->toThrow(RuntimeException::class);
 });
 

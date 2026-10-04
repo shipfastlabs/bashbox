@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 use BashBox\Bash;
+use BashBox\BashExecResult;
 use BashBox\BashOptions;
+use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\ExecOptions;
 use BashBox\Limits;
 
@@ -209,8 +211,8 @@ test('execution limit prevents infinite loops', function (): void {
         limits: new Limits(maxLoopIterations: 10),
     ));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec('while true; do echo x; done'))
-        ->toThrow(\BashBox\Exceptions\ExecutionLimitException::class);
+    expect(fn (): BashExecResult => $bash->exec('while true; do echo x; done'))
+        ->toThrow(ExecutionLimitException::class);
 });
 
 test('command count limit', function (): void {
@@ -218,8 +220,8 @@ test('command count limit', function (): void {
         limits: new Limits(maxCommandCount: 5),
     ));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec('echo 1; echo 2; echo 3; echo 4; echo 5; echo 6'))
-        ->toThrow(\BashBox\Exceptions\ExecutionLimitException::class);
+    expect(fn (): BashExecResult => $bash->exec('echo 1; echo 2; echo 3; echo 4; echo 5; echo 6'))
+        ->toThrow(ExecutionLimitException::class);
 });
 
 test('negated pipeline', function (): void {

@@ -3,6 +3,8 @@
 declare(strict_types=1);
 
 use BashBox\Bash;
+use BashBox\BashExecResult;
+use BashBox\Exceptions\ExecutionLimitException;
 
 // Expected values come from GNU bash 5.3 (`bash -c`), with "line N:" and the quoted source line left out of syntax errors.
 
@@ -25,6 +27,6 @@ test('a command named by path runs the file as a script', function (string $scri
 ]);
 
 test('a script running itself stops at the nesting limit', function (): void {
-    expect(fn (): \BashBox\BashExecResult => (new Bash)->exec("printf './s' > s; chmod +x s; ./s"))
-        ->toThrow(\BashBox\Exceptions\ExecutionLimitException::class, 'Substitution depth limit exceeded (50)');
+    expect(fn (): BashExecResult => (new Bash)->exec("printf './s' > s; chmod +x s; ./s"))
+        ->toThrow(ExecutionLimitException::class, 'Substitution depth limit exceeded (50)');
 });
