@@ -276,7 +276,7 @@ test('seq with invalid format flag fails cleanly', function (): void {
     $result = $this->bash->exec('seq -f "%q" 3');
 
     expect($result->exitCode)->toBe(1);
-    expect($result->stderr)->toContain('invalid format string');
+    expect($result->stderr)->toBe("seq: format '%q' has unknown %q directive\n");
 });
 
 // ===== ls extended =====
@@ -284,7 +284,7 @@ test('ls with -d directory flag', function (): void {
     $this->bash->exec('mkdir -p /tmp/lsdtest');
     $result = $this->bash->exec('ls -d /tmp/lsdtest');
     expect($result->exitCode)->toBe(0);
-    expect(trim((string) $result->stdout))->toBe('lsdtest');
+    expect($result->stdout)->toBe("/tmp/lsdtest\n");
 });
 
 // ===== cp/mv extended =====

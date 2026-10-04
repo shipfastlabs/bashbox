@@ -19,6 +19,7 @@
     },
     "require-dev": {
         "laravel/pint": "^1.24.0",
+        "peckphp/peck": "^0.3.0",
         "pestphp/pest": "^4.1.0",
         "pestphp/pest-plugin-type-coverage": "^4.0.2",
         "phpstan/phpstan": "^2.1.26",
@@ -53,7 +54,7 @@
         "test:type-coverage": "pest --type-coverage --min=100",
         "test:typos": "peck",
         "test:lint": "pint --test",
-        "test:unit": "pest --coverage",
+        "test:unit": "pest --coverage --min=100",
         "test:types": "phpstan",
         "test:refactor": "rector --dry-run",
         "format": [

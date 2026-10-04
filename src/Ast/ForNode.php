@@ -16,11 +16,6 @@ final readonly class ForNode implements CompoundCommandNode
         public ?array $words,
         public array $body,
         public array $redirections = [],
-        public ?int $line = null,
+        public int $line = 0,
     ) {}
-
-    public function getType(): string
-    {
-        return 'For';
-    }
 }

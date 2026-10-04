@@ -19,13 +19,18 @@ final class MountableFs implements FileSystemInterface
 
     public function mount(string $mountPoint, FileSystemInterface $fileSystem): void
     {
-        $mountPoint = $this->normalizePath($mountPoint);
+        $mountPoint = VirtualPath::normalize($mountPoint);
+
+        if ($mountPoint === '/') {
+            throw new RuntimeException("EINVAL: cannot mount over the root filesystem, mount '/'");
+        }
+
         $this->mounts[$mountPoint] = $fileSystem;
     }
 
     public function unmount(string $mountPoint): void
     {
-        $mountPoint = $this->normalizePath($mountPoint);
+        $mountPoint = VirtualPath::normalize($mountPoint);
         unset($this->mounts[$mountPoint]);
     }
 
@@ -42,6 +47,12 @@ final class MountableFs implements FileSystemInterface
         $fs->writeFile($innerPath, $content);
     }
 
+    public function createExclusive(string $path, bool $directory = false): void
+    {
+        [$fs, $innerPath] = $this->resolve($path);
+        $fs->createExclusive($innerPath, $directory);
+    }
+
     public function appendFile(string $path, string $content): void
     {
         [$fs, $innerPath] = $this->resolve($path);
@@ -50,12 +61,6 @@ final class MountableFs implements FileSystemInterface
 
     public function exists(string $path): bool
     {
-        $normalized = $this->normalizePath($path);
-
-        if (isset($this->mounts[$normalized])) {
-            return true;
-        }
-
         [$fs, $innerPath] = $this->resolve($path);
 
         return $fs->exists($innerPath);
@@ -63,13 +68,6 @@ final class MountableFs implements FileSystemInterface
 
     public function stat(string $path): FsStat
     {
-        $normalized = $this->normalizePath($path);
-
-        // If the path exactly matches a mount point, stat via the mounted fs root
-        if (isset($this->mounts[$normalized])) {
-            return $this->mounts[$normalized]->stat('/');
-        }
-
         [$fs, $innerPath] = $this->resolve($path);
 
         return $fs->stat($innerPath);
@@ -77,12 +75,6 @@ final class MountableFs implements FileSystemInterface
 
     public function lstat(string $path): FsStat
     {
-        $normalized = $this->normalizePath($path);
-
-        if (isset($this->mounts[$normalized])) {
-            return $this->mounts[$normalized]->lstat('/');
-        }
-
         [$fs, $innerPath] = $this->resolve($path);
 
         return $fs->lstat($innerPath);
@@ -96,44 +88,23 @@ final class MountableFs implements FileSystemInterface
 
     public function readdir(string $path): array
     {
-        $entries = $this->readdirWithFileTypes($path);
-
-        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $entries);
+        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $this->readdirWithFileTypes($path));
     }
 
     public function readdirWithFileTypes(string $path): array
     {
-        $normalized = $this->normalizePath($path);
+        $normalized = VirtualPath::normalize($path);
         [$fs, $innerPath] = $this->resolve($path);
 
-        $entries = $fs->readdirWithFileTypes($innerPath);
+        $entriesMap = array_column($fs->readdirWithFileTypes($innerPath), null, 'name');
 
-        // Build a map keyed by name for deduplication
-        $entriesMap = [];
-
-        foreach ($entries as $entry) {
-            $entriesMap[$entry->name] = $entry;
-        }
-
-        // Check if any mount points are direct children of this path
+        // Mount points below this directory show up as directories in it
         $prefix = $normalized === '/' ? '/' : $normalized.'/';
 
         foreach (array_keys($this->mounts) as $mp) {
-            if (! str_starts_with($mp, $prefix)) {
-                continue;
-            }
-
-            $rest = substr($mp, strlen($prefix));
-            $slashPos = strpos($rest, '/');
-            $name = $slashPos !== false ? substr($rest, 0, $slashPos) : $rest;
-
-            if ($name !== '' && ! isset($entriesMap[$name])) {
-                $entriesMap[$name] = new DirentEntry(
-                    name: $name,
-                    isFile: false,
-                    isDirectory: true,
-                    isSymbolicLink: false,
-                );
+            if (str_starts_with($mp, $prefix)) {
+                $name = explode('/', substr($mp, strlen($prefix)))[0];
+                $entriesMap[$name] ??= new DirentEntry(name: $name, isFile: false, isDirectory: true, isSymbolicLink: false);
             }
         }
 
@@ -165,41 +136,45 @@ final class MountableFs implements FileSystemInterface
         $fsStat = $srcFs->stat($srcInner);
 
         if ($fsStat->isFile) {
-            $content = $srcFs->readFile($srcInner);
-            $destFs->writeFile($destInner, $content);
-        } elseif ($fsStat->isDirectory) {
-            if (! $recursive) {
-                throw new RuntimeException(sprintf("EISDIR: is a directory, cp '%s'", $src));
+            $destFs->writeFile($destInner, $srcFs->readFile($srcInner));
+            $destFs->chmod($destInner, $fsStat->mode);
+
+            if ($options['preserve'] ?? false) {
+                $destFs->utimes($destInner, $fsStat->mtime);
             }
 
-            $destFs->mkdir($destInner, ['recursive' => true]);
-            $children = $srcFs->readdir($srcInner);
+            return;
+        }
 
-            foreach ($children as $child) {
-                $srcChild = $srcInner === '/' ? '/'.$child : sprintf('%s/%s', $srcInner, $child);
-                $destChild = $destInner === '/' ? '/'.$child : sprintf('%s/%s', $destInner, $child);
-                $srcFullChild = $src === '/' ? '/'.$child : rtrim($src, '/').('/'.$child);
-                $destFullChild = $dest === '/' ? '/'.$child : rtrim($dest, '/').('/'.$child);
-                $this->cp($srcFullChild, $destFullChild, $options);
-            }
+        if (! $recursive) {
+            throw new RuntimeException(sprintf("EISDIR: is a directory, cp '%s'", $src));
+        }
+
+        $destFs->mkdir($destInner, ['recursive' => true]);
+
+        foreach ($srcFs->readdir($srcInner) as $child) {
+            $this->cp(rtrim($src, '/').'/'.$child, rtrim($dest, '/').'/'.$child, $options);
         }
     }
 
     public function mv(string $src, string $dest): void
     {
-        $this->cp($src, $dest, ['recursive' => true]);
+        [$srcFs, $srcInner] = $this->resolve($src);
+        [$destFs, $destInner] = $this->resolve($dest);
+
+        if ($srcFs === $destFs) {
+            $srcFs->mv($srcInner, $destInner);
+
+            return;
+        }
+
+        $this->cp($src, $dest, ['recursive' => true, 'preserve' => true]);
         $this->rm($src, ['recursive' => true]);
     }
 
     public function resolvePath(string $base, string $path): string
     {
-        if (str_starts_with($path, '/')) {
-            return $this->normalizePath($path);
-        }
-
-        $combined = $base === '/' ? '/'.$path : sprintf('%s/%s', $base, $path);
-
-        return $this->normalizePath($combined);
+        return VirtualPath::resolve($base, $path);
     }
 
     public function getAllPaths(): array
@@ -250,23 +225,9 @@ final class MountableFs implements FileSystemInterface
 
     public function realpath(string $path): string
     {
-        $normalized = $this->normalizePath($path);
-        [$fs, $innerPath] = $this->resolve($path);
+        [$fs, $innerPath, $mountPoint] = $this->resolve($path);
 
-        $resolvedInner = $fs->realpath($innerPath);
-
-        // Re-prefix with the mount point
-        $mountPoint = $this->findMountPoint($normalized);
-
-        if ($mountPoint === null) {
-            return $resolvedInner;
-        }
-
-        if ($resolvedInner === '/') {
-            return $mountPoint;
-        }
-
-        return $mountPoint.$resolvedInner;
+        return rtrim($mountPoint.$fs->realpath($innerPath), '/') ?: '/';
     }
 
     public function utimes(string $path, int $mtime): void
@@ -276,95 +237,25 @@ final class MountableFs implements FileSystemInterface
     }
 
     /**
-     * Resolve a path to the appropriate filesystem and the inner path within that filesystem.
+     * Route a path to the filesystem of its longest matching mount point ('' for the default filesystem).
      *
-     * Uses longest-prefix matching to find the most specific mount point.
-     *
-     * @return array{0: FileSystemInterface, 1: string}
+     * @return array{0: FileSystemInterface, 1: string, 2: string}
      */
     private function resolve(string $path): array
     {
-        $normalized = $this->normalizePath($path);
-        $bestMount = null;
-        $bestLength = 0;
+        $normalized = VirtualPath::normalize($path);
+        $best = '';
 
         foreach (array_keys($this->mounts) as $mp) {
-            $mpLength = strlen($mp);
-
-            if ($mpLength <= $bestLength) {
-                continue;
-            }
-
-            if ($normalized === $mp || str_starts_with($normalized, $mp.'/')) {
-                $bestMount = $mp;
-                $bestLength = $mpLength;
+            if (strlen($mp) > strlen($best) && ($normalized === $mp || str_starts_with($normalized, $mp.'/'))) {
+                $best = $mp;
             }
         }
 
-        if ($bestMount === null) {
-            return [$this->fileSystem, $normalized];
+        if ($best === '') {
+            return [$this->fileSystem, $normalized, ''];
         }
 
-        $innerPath = substr($normalized, $bestLength);
-
-        if ($innerPath === '') {
-            $innerPath = '/';
-        }
-
-        return [$this->mounts[$bestMount], $innerPath];
-    }
-
-    /**
-     * Find the mount point that matches the given normalized path, if any.
-     */
-    private function findMountPoint(string $normalizedPath): ?string
-    {
-        $bestMount = null;
-        $bestLength = 0;
-
-        foreach (array_keys($this->mounts) as $mp) {
-            $mpLength = strlen($mp);
-
-            if ($mpLength <= $bestLength) {
-                continue;
-            }
-
-            if ($normalizedPath === $mp || str_starts_with($normalizedPath, $mp.'/')) {
-                $bestMount = $mp;
-                $bestLength = $mpLength;
-            }
-        }
-
-        return $bestMount;
-    }
-
-    private function normalizePath(string $path): string
-    {
-        if ($path === '' || $path === '/') {
-            return '/';
-        }
-
-        $normalized = $path;
-
-        if (str_ends_with($normalized, '/') && $normalized !== '/') {
-            $normalized = rtrim($normalized, '/');
-        }
-
-        if (! str_starts_with($normalized, '/')) {
-            $normalized = '/'.$normalized;
-        }
-
-        $parts = array_filter(explode('/', $normalized), fn (string $p): bool => $p !== '' && $p !== '.');
-        $resolved = [];
-
-        foreach ($parts as $part) {
-            if ($part === '..') {
-                array_pop($resolved);
-            } else {
-                $resolved[] = $part;
-            }
-        }
-
-        return '/'.implode('/', $resolved);
+        return [$this->mounts[$best], substr($normalized, strlen($best)) ?: '/', $best];
     }
 }

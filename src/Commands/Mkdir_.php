@@ -16,32 +16,28 @@ final class Mkdir_ extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, ['p' => false]);
-        $recursive = (bool) $parsed['flags']['p'];
-        $dirs = $parsed['args'];
+        $parsed = $this->getopt($args, 'p', ['parents' => ['p', false]]);
 
-        if ($dirs === []) {
-            return $this->failure("mkdir: missing operand\n");
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
+        }
+
+        [$flags, $operands] = $parsed;
+
+        if ($operands === []) {
+            return $this->usageError('missing operand');
         }
 
         $stderr = '';
-        $exitCode = 0;
 
-        foreach ($dirs as $dir) {
-            $path = $this->resolvePath($commandContext, $dir);
-
+        foreach ($operands as $operand) {
             try {
-                $commandContext->fs->mkdir($path, ['recursive' => $recursive]);
+                $commandContext->fs->mkdir($this->resolvePath($commandContext, $operand), ['recursive' => isset($flags['p'])]);
             } catch (RuntimeException $e) {
-                $stderr .= sprintf("mkdir: cannot create directory '%s': %s%s", $dir, $e->getMessage(), PHP_EOL);
-                $exitCode = 1;
+                $stderr .= sprintf("mkdir: cannot create directory '%s': %s\n", $operand, $this->describeError($e));
             }
         }
 
-        if ($exitCode !== 0) {
-            return $this->failure($stderr, $exitCode);
-        }
-
-        return $this->success();
+        return $stderr === '' ? $this->success() : $this->failure($stderr);
     }
 }

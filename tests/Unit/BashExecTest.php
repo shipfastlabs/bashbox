@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 use BashBox\Bash;
 use BashBox\BashOptions;
-use BashBox\Exceptions\ParseException;
 use BashBox\ExecOptions;
 use BashBox\Limits;
 
@@ -246,7 +245,7 @@ test('local variables in function', function (): void {
 // =========================================================================
 
 test('readonly variable cannot be reassigned', function (): void {
-    $result = $this->bash->exec('readonly x=5; x=10; echo $x');
+    $result = $this->bash->exec("readonly x=5\nx=10\necho \$x");
 
     expect($result->stderr)->toContain('readonly variable');
     expect($result->stdout)->toBe("5\n");
@@ -266,14 +265,14 @@ test('readonly -p lists readonly variables', function (): void {
 });
 
 test('readonly marks existing variable', function (): void {
-    $result = $this->bash->exec('x=5; readonly x; x=10; echo $x');
+    $result = $this->bash->exec("x=5; readonly x\nx=10\necho \$x");
 
     expect($result->stderr)->toContain('readonly variable');
     expect($result->stdout)->toBe("5\n");
 });
 
 test('declare -r enforces readonly', function (): void {
-    $result = $this->bash->exec('declare -r y=42; y=99; echo $y');
+    $result = $this->bash->exec("declare -r y=42\ny=99\necho \$y");
 
     expect($result->stderr)->toContain('readonly variable');
     expect($result->stdout)->toBe("42\n");
@@ -314,11 +313,16 @@ test('trap ERR runs on non-zero exit', function (): void {
     expect($result->stdout)->toContain('done');
 });
 
-test('trap RETURN runs at end of function', function (): void {
+test('trap RETURN set inside a function runs after its body', function (): void {
+    $result = $this->bash->exec('f() { trap "echo returned" RETURN; echo inside; }; f; echo after');
+
+    expect($result->stdout)->toBe("inside\nreturned\nafter\n");
+});
+
+test('trap RETURN set at top level does not fire for functions', function (): void {
     $result = $this->bash->exec('trap "echo returned" RETURN; f() { echo inside; }; f; echo after');
 
-    expect($result->stdout)->toContain('returned');
-    expect($result->stdout)->toContain('inside');
+    expect($result->stdout)->toBe("inside\nafter\n");
 });
 
 // =========================================================================
@@ -394,11 +398,11 @@ test('popd on empty stack errors', function (): void {
 // CALLER
 // =========================================================================
 
-test('caller inside function returns frame', function (): void {
-    $result = $this->bash->exec('f() { caller 0; }; f');
+test('caller reports the calling function', function (): void {
+    $result = $this->bash->exec('g() { caller 0; }; f() { g; }; f');
 
     expect($result->exitCode)->toBe(0);
-    expect($result->stdout)->toContain('f');
+    expect($result->stdout)->toMatch('/^\d+ f \S+\n$/');
 });
 
 test('caller outside function returns error', function (): void {
@@ -508,9 +512,10 @@ test('umask get and set', function (): void {
     expect($result->stdout)->toBe("0077\n");
 });
 
-test('disown returns 0', function (): void {
+test('disown without jobs reports no current job', function (): void {
     $result = $this->bash->exec('disown');
-    expect($result->exitCode)->toBe(0);
+    expect($result->exitCode)->toBe(1);
+    expect($result->stderr)->toBe("bash: disown: current: no such job\n");
 });
 
 test('complete returns 0', function (): void {
@@ -523,9 +528,10 @@ test('compgen returns 1', function (): void {
     expect($result->exitCode)->toBe(1);
 });
 
-test('logout exits shell', function (): void {
-    $result = $this->bash->exec('logout; echo should_not_appear');
-    expect($result->stdout)->not->toContain('should_not_appear');
+test('logout in a non-login shell is an error and does not exit', function (): void {
+    $result = $this->bash->exec('logout; echo still_here');
+    expect($result->stdout)->toBe("still_here\n");
+    expect($result->stderr)->toBe("bash: logout: not login shell: use `exit'\n");
 });
 
 test('type recognizes new builtins', function (): void {
@@ -574,9 +580,10 @@ test('set -e exits on command failure', function (): void {
 });
 
 test('set -u reports unbound variables', function (): void {
-    $result = $this->bash->exec('set -u; echo $MISSING');
+    $result = $this->bash->exec('set -u; echo $MISSING; echo after');
 
-    expect($result->exitCode)->toBe(1);
+    expect($result->exitCode)->toBe(127);
+    expect($result->stdout)->toBe('');
     expect($result->stderr)->toContain('MISSING');
     expect($result->stderr)->toContain('unbound variable');
 });
@@ -623,8 +630,8 @@ test('per-exec cwd override does not leak', function (): void {
 });
 
 test('state is restored after parse errors', function (): void {
-    expect(fn (): \BashBox\BashExecResult => $this->bash->exec('echo ('))
-        ->toThrow(ParseException::class);
+    $result = $this->bash->exec('cd /tmp; echo ok; )');
+    expect([$result->stdout, $result->stderr, $result->exitCode])->toBe(['', "bash: syntax error near unexpected token `)'\n", 2]);
 
     $result = $this->bash->exec('echo $USER; pwd');
     expect($result->stdout)->toBe("testuser\n/home/user\n");

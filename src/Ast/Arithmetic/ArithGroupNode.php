@@ -9,9 +9,4 @@ final readonly class ArithGroupNode implements ArithExpr
     public function __construct(
         public ArithExpr $expression,
     ) {}
-
-    public function getType(): string
-    {
-        return 'ArithGroup';
-    }
 }

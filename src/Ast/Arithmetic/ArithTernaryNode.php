@@ -11,9 +11,4 @@ final readonly class ArithTernaryNode implements ArithExpr
         public ArithExpr $consequent,
         public ArithExpr $alternate,
     ) {}
-
-    public function getType(): string
-    {
-        return 'ArithTernary';
-    }
 }

@@ -5,10 +5,18 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
-use RuntimeException;
 
-final class Head extends AbstractCommand
+/** `head`; `tail` shares everything but which part of the input it keeps. */
+class Head extends AbstractCommand
 {
+    private const array LONG = [
+        'bytes' => ['c', true],
+        'lines' => ['n', true],
+        'quiet' => ['q', false],
+        'silent' => ['q', false],
+        'verbose' => ['v', false],
+    ];
+
     public function getName(): string
     {
         return 'head';
@@ -16,70 +24,52 @@ final class Head extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, [
-            'n' => '',
-            'c' => '',
-        ]);
+        $name = $this->getName();
 
-        $flags = $parsed['flags'];
-        $files = $parsed['args'];
-
-        $useBytes = $flags['c'] !== '';
-        $numBytes = $useBytes ? (int) $flags['c'] : 0;
-        $numLines = $flags['n'] !== '' ? (int) $flags['n'] : 10;
-
-        if ($files === []) {
-            $files = ['-'];
+        // Obsolete `-N` shorthand for `-n N`
+        if (preg_match('/^-\d+$/', $args[0] ?? '') === 1) {
+            $args[0] = '-n'.substr($args[0], 1);
         }
 
+        $parsed = $this->getopt($args, 'c:n:qv', self::LONG);
+
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
+        }
+
+        [$flags, $files] = $parsed;
+        $useBytes = isset($flags['c']);
+        $count = $flags['c'] ?? $flags['n'] ?? '10';
+
+        if (preg_match('/^[+-]?\d+$/', $count) !== 1) {
+            return $this->failure(sprintf("%s: invalid number of %s: '%s'\n", $name, $useBytes ? 'bytes' : 'lines', $count));
+        }
+
+        $files = $files ?: ['-'];
+        $headers = isset($flags['v']) || (count($files) > 1 && ! isset($flags['q']));
+        [$contents, $stderr] = $this->readFiles($commandContext, $files, $name.": cannot open %s for reading: %s\n", true);
         $output = '';
-        $stderr = '';
-        $multiFile = count($files) > 1;
-        $exitCode = 0;
 
-        foreach ($files as $idx => $file) {
-            try {
-                $reader = $this->createInputReader();
-                $input = $reader->read([$file], $commandContext);
-            } catch (RuntimeException) {
-                $stderr .= "head: cannot open '{$file}' for reading: No such file or directory\n";
-                $exitCode = 1;
-
-                continue;
+        foreach ($contents as $i => $content) {
+            if ($headers) {
+                $output .= ($output === '' ? '' : "\n").sprintf("==> %s <==\n", $files[$i] === '-' ? 'standard input' : $files[$i]);
             }
 
-            if ($multiFile) {
-                if ($idx > 0) {
-                    $output .= "\n";
-                }
-
-                $output .= "==> {$file} <==\n";
-            }
-
-            $output .= $this->formatContent($input->content, $useBytes, $numBytes, $numLines);
+            // Units keep their line terminators, so joining them reproduces the input exactly
+            $units = $useBytes ? str_split($content) : (preg_split('/(?<=\n)/', $content, -1, PREG_SPLIT_NO_EMPTY) ?: []);
+            $output .= implode('', $this->select($units, $count));
         }
 
-        if ($exitCode !== 0) {
-            return $this->failure($stderr, $exitCode, $output);
-        }
-
-        return $this->success($output);
+        return $stderr === '' ? $this->success($output) : $this->failure($stderr, 1, $output);
     }
 
-    private function formatContent(string $content, bool $useBytes, int $numBytes, int $numLines): string
+    /**
+     * @param  list<string>  $units
+     * @return list<string>
+     */
+    protected function select(array $units, string $count): array
     {
-        if ($useBytes) {
-            return substr($content, 0, max(0, $numBytes));
-        }
-
-        $lines = explode("\n", $content);
-
-        if ($numLines >= count($lines)) {
-            return $content;
-        }
-
-        $selected = array_slice($lines, 0, $numLines);
-
-        return implode("\n", $selected)."\n";
+        // A negative count means "all but the last N"
+        return array_slice($units, 0, (int) $count);
     }
 }

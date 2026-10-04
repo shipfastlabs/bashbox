@@ -8,20 +8,15 @@ final readonly class StatementNode implements Node
 {
     /**
      * @param  list<PipelineNode>  $pipelines
-     * @param  list<string>  $operators  "&&" | "||" | ";"
-     * @param  array{message: string, token: string}|null  $deferredError
+     * @param  list<string>  $operators  "&&" | "||"
+     * @param  int  $line  where the statement starts
+     * @param  int  $endLine  where it ends: what follows on that line belongs to the same input line
      */
     public function __construct(
-        public array $pipelines = [],
-        public array $operators = [],
-        public bool $background = false,
-        public ?array $deferredError = null,
-        public ?string $sourceText = null,
-        public ?int $line = null,
+        public array $pipelines,
+        public array $operators,
+        public bool $background,
+        public int $line,
+        public int $endLine,
     ) {}
-
-    public function getType(): string
-    {
-        return 'Statement';
-    }
 }

@@ -11,9 +11,4 @@ final readonly class LiteralPart implements WordPart
     public function __construct(
         public string $value,
     ) {}
-
-    public function getType(): string
-    {
-        return 'Literal';
-    }
 }

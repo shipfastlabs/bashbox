@@ -13,11 +13,6 @@ final readonly class GroupNode implements CompoundCommandNode
     public function __construct(
         public array $body,
         public array $redirections = [],
-        public ?int $line = null,
+        public int $line = 0,
     ) {}
-
-    public function getType(): string
-    {
-        return 'Group';
-    }
 }

@@ -15,11 +15,6 @@ final readonly class IfNode implements CompoundCommandNode
         public array $clauses,
         public ?array $elseBody = null,
         public array $redirections = [],
-        public ?int $line = null,
+        public int $line = 0,
     ) {}
-
-    public function getType(): string
-    {
-        return 'If';
-    }
 }

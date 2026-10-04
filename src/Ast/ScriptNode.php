@@ -12,9 +12,4 @@ final readonly class ScriptNode implements Node
     public function __construct(
         public array $statements = [],
     ) {}
-
-    public function getType(): string
-    {
-        return 'Script';
-    }
 }

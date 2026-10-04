@@ -9,9 +9,4 @@ final readonly class CondNotNode implements ConditionalExpressionNode
     public function __construct(
         public ConditionalExpressionNode $operand,
     ) {}
-
-    public function getType(): string
-    {
-        return 'CondNot';
-    }
 }

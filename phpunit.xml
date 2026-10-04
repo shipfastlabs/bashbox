@@ -4,6 +4,13 @@
     xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.0/phpunit.xsd"
     colors="true"
     cacheDirectory=".phpunit.cache"
+    failOnRisky="true"
+    failOnWarning="true"
+    failOnNotice="true"
+    failOnDeprecation="true"
+    failOnPhpunitDeprecation="true"
+    failOnEmptyTestSuite="true"
+    beStrictAboutOutputDuringTests="true"
 >
     <source>
         <include>
@@ -12,7 +19,7 @@
     </source>
     <testsuites>
         <testsuite name="default">
-            <directory suffix=".php">./tests</directory>
+            <directory suffix="Test.php">./tests</directory>
         </testsuite>
     </testsuites>
 </phpunit>

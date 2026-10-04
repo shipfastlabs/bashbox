@@ -7,7 +7,7 @@ namespace BashBox\Ast;
 final readonly class PipelineNode implements Node
 {
     /**
-     * @param  list<SimpleCommandNode|CompoundCommandNode|FunctionDefNode>  $commands
+     * @param  list<CommandNode>  $commands
      * @param  list<bool>|null  $pipeStderr
      */
     public function __construct(
@@ -17,9 +17,4 @@ final readonly class PipelineNode implements Node
         public bool $timePosix = false,
         public ?array $pipeStderr = null,
     ) {}
-
-    public function getType(): string
-    {
-        return 'Pipeline';
-    }
 }

@@ -4,25 +4,32 @@ declare(strict_types=1);
 
 namespace BashBox\Parser;
 
+use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\Exceptions\ParseException;
+use BashBox\Limits;
 
 final class Lexer
 {
-    private string $input;
-
-    private int $pos = 0;
-
-    private int $line = 1;
-
-    private int $column = 1;
+    /** What closes each quote, substitution or group, keyed by the text that opens it. */
+    private const array CLOSERS = [
+        "'" => "'", '"' => '"', '`' => '`', "$'" => "'", '${' => '}', '$(' => ')',
+        // Process substitutions and extglob groups.
+        '<(' => ')', '>(' => ')', '?(' => ')', '*(' => ')', '+(' => ')', '@(' => ')', '!(' => ')',
+    ];
 
     /** @var list<Token> */
     private array $tokens = [];
 
-    /** @var list<array{delimiter: string, stripTabs: bool, quoted: bool}> */
+    /**
+     * Heredocs awaiting their bodies: delimiter token index, delimiter, whether `<<-` strips tabs, whether quoted.
+     *
+     * @var list<array{int, string, bool, bool}>
+     */
     private array $pendingHeredocs = [];
 
     private int $dparenDepth = 0;
+
+    private bool $done = false;
 
     private const array RESERVED_WORDS = [
         'if' => TokenType::IF,
@@ -54,57 +61,87 @@ final class Lexer
         '>' => TokenType::GREAT,
     ];
 
-    public function __construct(string $input, private readonly int $maxHeredocSize = ParserLimits::MAX_HEREDOC_SIZE)
+    /** $pos is where lexing starts and $depth how deeply that is nested in substitutions. */
+    public function __construct(private readonly string $input, private int $line = 1, private readonly Limits $limits = new Limits, private int $pos = 0, private readonly int $depth = 0)
     {
-        if (strlen($input) > ParserLimits::MAX_INPUT_SIZE) {
-            throw new ParseException('Input exceeds maximum size of '.ParserLimits::MAX_INPUT_SIZE.' bytes');
+        if (strlen($input) > $limits->maxInputSize) {
+            throw new ExecutionLimitException(sprintf('Input size limit exceeded (%d bytes)', $limits->maxInputSize));
         }
-
-        $this->input = $input;
     }
 
     /**
+     * The tokens, ending in NEWLINE and EOF as bash -c sees its script; a heredoc body follows its delimiter.
+     *
      * @return list<Token>
      */
     public function tokenize(): array
     {
-        $len = strlen($this->input);
-
-        while ($this->pos < $len) {
-            if (
-                $this->pendingHeredocs !== [] &&
-                $this->tokens !== [] &&
-                $this->tokens[count($this->tokens) - 1]->type === TokenType::NEWLINE
-            ) {
-                $this->readHeredocContent();
-
-                continue;
-            }
-
-            $this->skipWhitespace();
-
-            if ($this->pos >= $len) {
-                break;
-            }
-
-            $token = $this->nextToken();
-            $this->tokens[] = $token;
-
-            if (count($this->tokens) > ParserLimits::MAX_TOKENS) {
-                throw new ParseException('Token limit exceeded');
-            }
+        while ($this->lexNext()) {
         }
 
-        $this->tokens[] = new Token(
-            type: TokenType::EOF,
-            value: '',
-            start: $this->pos,
-            end: $this->pos,
-            line: $this->line,
-            column: $this->column,
-        );
-
         return $this->tokens;
+    }
+
+    /** Token $index, lexing only as far as needed (past the end it's EOF); a line's heredoc bodies are read before its tokens are handed out. */
+    public function token(int $index): Token
+    {
+        while ((! isset($this->tokens[$index]) || $this->pendingHeredocs !== []) && $this->lexNext()) {
+        }
+
+        return $this->tokens[$index] ?? $this->tokens[count($this->tokens) - 1];
+    }
+
+    /** Lexes one more token (or the heredoc bodies due); false once EOF is in. */
+    private function lexNext(): bool
+    {
+        if ($this->done) {
+            return false;
+        }
+
+        $previous = end($this->tokens) ?: null;
+
+        if ($this->pendingHeredocs !== [] && $previous?->type === TokenType::NEWLINE) {
+            $this->readHeredocBodies();
+
+            return true;
+        }
+
+        $this->skipWhitespace();
+        $len = strlen($this->input);
+
+        if ($this->pos >= $len) {
+            if ($this->dparenDepth > 0) {
+                throw new ParseException("unexpected EOF while looking for matching `)'");
+            }
+
+            // A heredoc on the last line has an empty body.
+            $this->readHeredocBodies();
+            $this->tokens[] = new Token(TokenType::NEWLINE, "\n", $len, $len, $this->line);
+            $this->tokens[] = new Token(TokenType::EOF, '', $len, $len, $this->line);
+            $this->done = true;
+
+            return true;
+        }
+
+        $token = $this->nextToken();
+
+        // The word after << is a heredoc delimiter, except inside (( )) where << shifts.
+        if (
+            in_array($previous?->type, [TokenType::DLESS, TokenType::DLESSDASH], true)
+            && $this->dparenDepth === 0
+            && $token->type !== TokenType::COMMENT
+            && ! $this->isWordBoundary($this->input[$token->start])
+        ) {
+            $token = $this->heredocDelimiter($token, $previous->type === TokenType::DLESSDASH);
+        }
+
+        $this->tokens[] = $token;
+
+        if (count($this->tokens) > $this->limits->maxTokens) {
+            throw new ExecutionLimitException(sprintf('Token limit exceeded (%d tokens)', $this->limits->maxTokens));
+        }
+
+        return true;
     }
 
     private function skipWhitespace(): void
@@ -116,11 +153,9 @@ final class Lexer
 
             if ($char === ' ' || $char === "\t") {
                 $this->pos++;
-                $this->column++;
-            } elseif ($char === '\\' && ($this->pos + 1 < $len) && $this->input[$this->pos + 1] === "\n") {
+            } elseif ($char === '\\' && ($this->input[$this->pos + 1] ?? '') === "\n") {
                 $this->pos += 2;
                 $this->line++;
-                $this->column = 1;
             } else {
                 break;
             }
@@ -131,105 +166,50 @@ final class Lexer
     {
         $pos = $this->pos;
         $startLine = $this->line;
-        $startColumn = $this->column;
-        $c0 = $this->input[$pos] ?? '';
+        $c0 = $this->input[$pos];
         $c1 = $this->input[$pos + 1] ?? '';
         $c2 = $this->input[$pos + 2] ?? '';
 
-        // Comments
         if ($c0 === '#' && $this->dparenDepth === 0) {
-            return $this->readComment($pos, $startLine, $startColumn);
+            return $this->readComment($pos, $startLine);
         }
 
-        // Newline
         if ($c0 === "\n") {
             $this->pos = $pos + 1;
             $this->line++;
-            $this->column = 1;
 
-            return new Token(TokenType::NEWLINE, "\n", $pos, $pos + 1, $startLine, $startColumn);
+            return new Token(TokenType::NEWLINE, "\n", $pos, $pos + 1, $startLine);
         }
 
-        // Three-character operators
-        if ($c0 === '<' && $c1 === '<' && $c2 === '-') {
-            $this->pos = $pos + 3;
-            $this->column = $startColumn + 3;
-            $this->registerHeredocFromLookahead(true);
-
-            return new Token(TokenType::DLESSDASH, '<<-', $pos, $pos + 3, $startLine, $startColumn);
+        if (($c0 === '<' || $c0 === '>') && $c1 === '(' && $this->dparenDepth === 0) {
+            return $this->readWord($pos, $startLine);
         }
 
-        if ($c0 === '<' && $c1 === '<' && $c2 === '<') {
-            $this->pos = $pos + 3;
-            $this->column = $startColumn + 3;
+        $three = [
+            '<<-' => TokenType::DLESSDASH,
+            '<<<' => TokenType::TLESS,
+            '&>>' => TokenType::AND_DGREAT,
+            ';;&' => TokenType::SEMI_SEMI_AND,
+        ][$c0.$c1.$c2] ?? null;
 
-            return new Token(TokenType::TLESS, '<<<', $pos, $pos + 3, $startLine, $startColumn);
+        if ($three !== null && ($three !== TokenType::SEMI_SEMI_AND || $this->dparenDepth === 0)) {
+            return $this->operator($three, $pos, 3);
         }
 
-        if ($c0 === '&' && $c1 === '>' && $c2 === '>') {
-            $this->pos = $pos + 3;
-            $this->column = $startColumn + 3;
-
-            return new Token(TokenType::AND_DGREAT, '&>>', $pos, $pos + 3, $startLine, $startColumn);
-        }
-
-        if ($c0 === ';' && $c1 === ';' && $c2 === '&') {
-            $this->pos = $pos + 3;
-            $this->column = $startColumn + 3;
-
-            return new Token(TokenType::SEMI_SEMI_AND, ';;&', $pos, $pos + 3, $startLine, $startColumn);
-        }
-
-        // Two-character operators
-        if ($c0 === '<' && $c1 === '<') {
-            $this->pos = $pos + 2;
-            $this->column = $startColumn + 2;
-            $this->registerHeredocFromLookahead(false);
-
-            return new Token(TokenType::DLESS, '<<', $pos, $pos + 2, $startLine, $startColumn);
-        }
-
-        if ($c0 === '(' && $c1 === '(') {
-            if ($this->dparenDepth > 0) {
-                $this->pos = $pos + 1;
-                $this->column = $startColumn + 1;
-                $this->dparenDepth++;
-
-                return new Token(TokenType::LPAREN, '(', $pos, $pos + 1, $startLine, $startColumn);
-            }
-
-            $this->pos = $pos + 2;
-            $this->column = $startColumn + 2;
+        if ($c0 === '(' && $c1 === '(' && $this->dparenDepth === 0) {
             $this->dparenDepth = 1;
 
-            return new Token(TokenType::DPAREN_START, '((', $pos, $pos + 2, $startLine, $startColumn);
+            return $this->operator(TokenType::DPAREN_START, $pos, 2);
         }
 
-        if ($c0 === ')' && $c1 === ')') {
-            if ($this->dparenDepth === 1) {
-                $this->pos = $pos + 2;
-                $this->column = $startColumn + 2;
-                $this->dparenDepth = 0;
+        if ($c0 === ')' && $c1 === ')' && $this->dparenDepth === 1) {
+            $this->dparenDepth = 0;
 
-                return new Token(TokenType::DPAREN_END, '))', $pos, $pos + 2, $startLine, $startColumn);
-            }
-
-            if ($this->dparenDepth > 1) {
-                $this->pos = $pos + 1;
-                $this->column = $startColumn + 1;
-                $this->dparenDepth--;
-
-                return new Token(TokenType::RPAREN, ')', $pos, $pos + 1, $startLine, $startColumn);
-            }
-
-            $this->pos = $pos + 1;
-            $this->column = $startColumn + 1;
-
-            return new Token(TokenType::RPAREN, ')', $pos, $pos + 1, $startLine, $startColumn);
+            return $this->operator(TokenType::DPAREN_END, $pos, 2);
         }
 
-        // Two-char ops table
         $twoCharOps = [
+            ['<', '<', TokenType::DLESS],
             ['[', '[', TokenType::DBRACK_START],
             [']', ']', TokenType::DBRACK_END],
             ['&', '&', TokenType::AND_AND],
@@ -247,449 +227,265 @@ final class Lexer
 
         foreach ($twoCharOps as [$first, $second, $type]) {
             if ($c0 === $first && $c1 === $second) {
-                if ($type === TokenType::DBRACK_START || $type === TokenType::DBRACK_END) {
-                    $afterOp = $this->input[$pos + 2] ?? '';
-
-                    if ($afterOp !== '' && ! $this->isWordBoundary($afterOp)) {
-                        break;
-                    }
+                if (($type === TokenType::DBRACK_START || $type === TokenType::DBRACK_END) && $c2 !== '' && ! $this->isWordBoundary($c2)) {
+                    break;
                 }
 
-                if (
-                    $this->dparenDepth > 0
-                    && $first === ';'
-                    && in_array($type, [TokenType::DSEMI, TokenType::SEMI_AND, TokenType::SEMI_SEMI_AND], true)
-                ) {
+                if ($this->dparenDepth > 0 && ($type === TokenType::DSEMI || $type === TokenType::SEMI_AND)) {
                     continue;
                 }
 
-                $this->pos = $pos + 2;
-                $this->column = $startColumn + 2;
-
-                return new Token($type, $first.$second, $pos, $pos + 2, $startLine, $startColumn);
+                return $this->operator($type, $pos, 2);
             }
         }
 
-        // Track parens in arithmetic context
         if ($c0 === '(' && $this->dparenDepth > 0) {
-            $this->pos = $pos + 1;
-            $this->column = $startColumn + 1;
             $this->dparenDepth++;
-
-            return new Token(TokenType::LPAREN, '(', $pos, $pos + 1, $startLine, $startColumn);
         }
 
         if ($c0 === ')' && $this->dparenDepth > 1) {
-            $this->pos = $pos + 1;
-            $this->column = $startColumn + 1;
             $this->dparenDepth--;
-
-            return new Token(TokenType::RPAREN, ')', $pos, $pos + 1, $startLine, $startColumn);
         }
 
-        // Single-character operators
         if (isset(self::SINGLE_CHAR_OPS[$c0])) {
-            $this->pos = $pos + 1;
-            $this->column = $startColumn + 1;
-
-            return new Token(self::SINGLE_CHAR_OPS[$c0], $c0, $pos, $pos + 1, $startLine, $startColumn);
+            return $this->operator(self::SINGLE_CHAR_OPS[$c0], $pos, 1);
         }
 
-        // { and } handling
+        // In {name}>file the variable receives the new fd's number.
+        if ($c0 === '{' && $this->dparenDepth === 0 && preg_match('/\G\{([a-zA-Z_]\w*(?:\[[^\]]*\])?)\}(?=[<>](?!\())/', $this->input, $m, 0, $pos) === 1) {
+            $this->pos = $pos + strlen($m[0]);
+
+            return new Token(TokenType::FD_VARIABLE, $m[1], $pos, $this->pos, $startLine);
+        }
+
         if ($c0 === '{') {
             if ($c1 === '}') {
                 $this->pos = $pos + 2;
-                $this->column = $startColumn + 2;
 
-                return new Token(TokenType::WORD, '{}', $pos, $pos + 2, $startLine, $startColumn);
+                return new Token(TokenType::WORD, '{}', $pos, $pos + 2, $startLine);
             }
 
-            $next = $this->input[$pos + 1] ?? '';
-
-            if (in_array($next, ['', ' ', "\t", "\n", ';'], true)) {
-                $this->pos = $pos + 1;
-                $this->column = $startColumn + 1;
-
-                return new Token(TokenType::LBRACE, '{', $pos, $pos + 1, $startLine, $startColumn);
+            if (in_array($c1, ['', ' ', "\t", "\n", ';'], true)) {
+                return $this->operator(TokenType::LBRACE, $pos, 1);
             }
 
-            return $this->readWord($pos, $startLine, $startColumn);
+            return $this->readWord($pos, $startLine);
         }
 
         if ($c0 === '}') {
-            $this->pos = $pos + 1;
-            $this->column = $startColumn + 1;
-
-            return new Token(TokenType::RBRACE, '}', $pos, $pos + 1, $startLine, $startColumn);
+            return $this->operator(TokenType::RBRACE, $pos, 1);
         }
 
         if ($c0 === '!') {
-            $next = $this->input[$pos + 1] ?? '';
+            // `!(...)` negates a subshell in command position; after a word it's an extglob pattern.
+            $afterWord = in_array(($this->tokens[count($this->tokens) - 1] ?? null)?->type, [TokenType::WORD, TokenType::NAME, TokenType::NUMBER, TokenType::ASSIGNMENT_WORD, TokenType::IN], true);
 
-            if (in_array($next, ['', ' ', "\t", "\n"], true)) {
-                $this->pos = $pos + 1;
-                $this->column = $startColumn + 1;
-
-                return new Token(TokenType::BANG, '!', $pos, $pos + 1, $startLine, $startColumn);
+            if (in_array($c1, ['', ' ', "\t", "\n"], true) || ($c1 === '(' && ! $afterWord)) {
+                return $this->operator(TokenType::BANG, $pos, 1);
             }
-
-            return $this->readWord($pos, $startLine, $startColumn);
         }
 
-        // Word (everything else)
-        return $this->readWord($pos, $startLine, $startColumn);
+        return $this->readWord($pos, $startLine);
     }
 
-    private function readComment(int $pos, int $startLine, int $startColumn): Token
+    private function operator(TokenType $tokenType, int $pos, int $length): Token
     {
-        $start = $pos;
-        $len = strlen($this->input);
+        $this->pos = $pos + $length;
 
-        while ($pos < $len && $this->input[$pos] !== "\n") {
-            $pos++;
-        }
-
-        $value = substr($this->input, $start, $pos - $start);
-        $this->pos = $pos;
-        $this->column = $startColumn + ($pos - $start);
-
-        return new Token(TokenType::COMMENT, $value, $start, $pos, $startLine, $startColumn);
+        return new Token($tokenType, substr($this->input, $pos, $length), $pos, $this->pos, $this->line);
     }
 
-    private function readWord(int $pos, int $startLine, int $startColumn): Token
+    private function readComment(int $pos, int $startLine): Token
+    {
+        $end = strpos($this->input, "\n", $pos);
+        $this->pos = $end === false ? strlen($this->input) : $end;
+
+        return new Token(TokenType::COMMENT, substr($this->input, $pos, $this->pos - $pos), $pos, $this->pos, $startLine);
+    }
+
+    private function readWord(int $pos, int $startLine): Token
     {
         $start = $pos;
         $value = '';
-        $wasQuoted = false;
-        $singleQuoted = false;
         $len = strlen($this->input);
 
         while ($pos < $len) {
             $ch = $this->input[$pos];
+            $opener = $this->opener($pos);
 
-            if ($this->isWordBoundary($ch)) {
+            if ($opener !== null || ($ch === '[' && $this->assignmentAcceptable() && preg_match('/^[a-zA-Z_]\w*$/', $value) === 1)) {
+                // Where an assignment can start, `name[...]` takes a whole subscript, blanks included
+                $end = $opener === null ? $this->subscriptEnd($pos) : $this->skipQuoted($pos, $opener);
+                $value .= substr($this->input, $pos, $end - $pos);
+                $pos = $end;
+            } elseif ($this->isWordBoundary($ch)) {
                 break;
-            }
-
-            if ($ch === '\\') {
-                if ($pos + 1 < $len) {
-                    if ($this->input[$pos + 1] === "\n") {
-                        // Line continuation
-                        $pos += 2;
-                        $this->line++;
-                        $this->column = 1;
-
-                        continue;
-                    }
-
-                    $value .= $ch.$this->input[$pos + 1];
-                    $pos += 2;
-                    $wasQuoted = true;
-
-                    continue;
-                }
-
+            } elseif ($ch === '\\') {
+                // A backslash-newline joins lines; any other backslash keeps the character after it.
+                $value .= ($this->input[$pos + 1] ?? '') === "\n" ? '' : substr($this->input, $pos, 2);
+                $pos = min($pos + 2, $len);
+            } else {
                 $value .= $ch;
                 $pos++;
-
-                continue;
             }
-
-            if ($ch === "'") {
-                // Read single-quoted string
-                $pos++;
-                $quoteStart = $pos;
-
-                while ($pos < $len && $this->input[$pos] !== "'") {
-                    if ($this->input[$pos] === "\n") {
-                        $this->line++;
-                        $this->column = 1;
-                    }
-
-                    $pos++;
-                }
-
-                $value .= "'".substr($this->input, $quoteStart, $pos - $quoteStart)."'";
-
-                if ($pos < $len) {
-                    $pos++; // Skip closing quote
-                }
-
-                $singleQuoted = true;
-                $wasQuoted = true;
-
-                continue;
-            }
-
-            if ($ch === '"') {
-                // Read double-quoted string
-                $pos++;
-                $quoteContent = '"';
-
-                while ($pos < $len && $this->input[$pos] !== '"') {
-                    if ($this->input[$pos] === '\\' && $pos + 1 < $len) {
-                        $quoteContent .= $this->input[$pos].$this->input[$pos + 1];
-                        $pos += 2;
-
-                        continue;
-                    }
-
-                    if ($this->input[$pos] === "\n") {
-                        $this->line++;
-                        $this->column = 1;
-                    }
-
-                    $quoteContent .= $this->input[$pos];
-                    $pos++;
-                }
-
-                $quoteContent .= '"';
-
-                if ($pos < $len) {
-                    $pos++; // Skip closing quote
-                }
-
-                $value .= $quoteContent;
-                $wasQuoted = true;
-
-                continue;
-            }
-
-            if ($ch === '$') {
-                // Handle $(...), $(()), ${}, $var
-                $result = $this->readDollarSequence($pos);
-                $value .= $result['value'];
-                $pos = $result['pos'];
-                $wasQuoted = true;
-
-                continue;
-            }
-
-            if ($ch === '`') {
-                // Backtick command substitution
-                $pos++;
-                $btContent = '`';
-
-                while ($pos < $len && $this->input[$pos] !== '`') {
-                    if ($this->input[$pos] === '\\' && $pos + 1 < $len) {
-                        $btContent .= $this->input[$pos].$this->input[$pos + 1];
-                        $pos += 2;
-
-                        continue;
-                    }
-
-                    $btContent .= $this->input[$pos];
-                    $pos++;
-                }
-
-                $btContent .= '`';
-
-                if ($pos < $len) {
-                    $pos++;
-                }
-
-                $value .= $btContent;
-                $wasQuoted = true;
-
-                continue;
-            }
-
-            // Regular character
-            $value .= $ch;
-            $pos++;
         }
 
         $this->pos = $pos;
-        $this->column = $startColumn + ($pos - $start);
+        // Quotes, substitutions and continuations may span lines.
+        $this->line += substr_count($this->input, "\n", $start, $pos - $start);
 
-        // Classify the token
-        $tokenType = $this->classifyWord($value, $wasQuoted);
+        return new Token($this->classifyWord($value), $value, $start, $pos, $startLine);
+    }
 
-        return new Token($tokenType, $value, $start, $pos, $startLine, $startColumn, $wasQuoted, $singleQuoted);
+    /** Whether the next word is in command position, where bash takes `name[...]=` as an assignment. */
+    private function assignmentAcceptable(): bool
+    {
+        return $this->dparenDepth === 0 && in_array((end($this->tokens) ?: null)?->type, [
+            null, TokenType::NEWLINE, TokenType::SEMICOLON, TokenType::AMP, TokenType::PIPE, TokenType::PIPE_AMP,
+            TokenType::AND_AND, TokenType::OR_OR, TokenType::LPAREN, TokenType::RPAREN, TokenType::LBRACE, TokenType::BANG,
+            TokenType::DO, TokenType::ELSE, TokenType::ELIF, TokenType::IF, TokenType::THEN, TokenType::WHILE,
+            TokenType::UNTIL, TokenType::TIME, TokenType::ASSIGNMENT_WORD,
+        ], true);
+    }
+
+    /** Just past the `]` matching the `[` at $pos, skipping quotes and nested brackets. */
+    private function subscriptEnd(int $pos): int
+    {
+        $level = 0;
+
+        for ($len = strlen($this->input); $pos < $len; $pos++) {
+            $opener = $this->opener($pos);
+            $ch = $this->input[$pos];
+
+            if ($opener !== null) {
+                $pos = $this->skipQuoted($pos, $opener) - 1;
+            } elseif ($ch === '\\') {
+                $pos++;
+            } elseif ($ch === '[') {
+                $level++;
+            } elseif ($ch === ']' && --$level === 0) {
+                return $pos + 1;
+            }
+        }
+
+        throw new ParseException("unexpected EOF while looking for matching `]'");
+    }
+
+    /** The quote, substitution or group that opens at $pos, as a key of CLOSERS. */
+    private function opener(int $pos): ?string
+    {
+        $two = substr($this->input, $pos, 2);
+
+        if (isset(self::CLOSERS[$two]) && ($two[0] === '$' || $this->dparenDepth === 0)) {
+            return $two;
+        }
+
+        return isset(self::CLOSERS[$this->input[$pos]]) ? $this->input[$pos] : null;
+    }
+
+    /** The position just past the quote or substitution $open (`$(`, `${`, `<(`...) starts at $pos in $text. */
+    public static function skipPast(string $text, int $pos, string $open, Limits $limits = new Limits): int
+    {
+        return new self($text, 1, $limits)->skipQuoted($pos, $open);
     }
 
     /**
-     * @return array{value: string, pos: int}
+     * The position just past what $open opens at $pos; inside "..." only `...`, $(...) and ${...} nest.
+     * A command substitution ends where its command list does, as bash parses it; with $countParens (or a
+     * list that doesn't parse, which is reported when it runs) parentheses are counted instead.
      */
-    private function readDollarSequence(int $pos): array
+    private function skipQuoted(int $pos, string $open, ?int $depth = null, bool $countParens = false): int
     {
+        $depth ??= $this->depth;
+
+        if ($depth > $this->limits->maxAstDepth) {
+            throw new ExecutionLimitException(sprintf('Nesting depth limit exceeded (%d)', $this->limits->maxAstDepth));
+        }
+
+        if (! $countParens && in_array($open, ['$(', '<(', '>('], true) && ($open !== '$(' || ($this->input[$pos + 2] ?? '') !== '(')) {
+            try {
+                return Parser::substitutionEnd($this->input, $pos + 2, $this->limits, $depth + 1);
+            } catch (ParseException) {
+                $countParens = true;
+            }
+        }
+
+        $close = self::CLOSERS[$open];
+        $nest = $open[1] ?? '';
         $len = strlen($this->input);
-        $pos++; // Skip $
+        $level = 0;
 
-        if ($pos >= $len) {
-            return ['value' => '$', 'pos' => $pos];
-        }
+        for ($i = $pos + strlen($open); $i < $len; $i++) {
+            $ch = $this->input[$i];
 
-        $next = $this->input[$pos];
-
-        // $(( — arithmetic expansion
-        if ($next === '(' && ($pos + 1 < $len) && $this->input[$pos + 1] === '(') {
-            $pos += 2;
-            $depth = 1;
-            $content = '$((';
-
-            while ($pos < $len && $depth > 0) {
-                if ($this->input[$pos] === '(' && ($pos + 1 < $len) && $this->input[$pos + 1] === '(') {
-                    $depth++;
-                    $content .= '((';
-                    $pos += 2;
-
-                    continue;
+            if ($ch === $close) {
+                if ($level-- === 0) {
+                    return $i + 1;
                 }
+            } elseif ($open === "'") {
+                continue;
+            } elseif ($ch === '\\') {
+                $i++;
+            } elseif ($open !== "$'" && $open !== '`') {
+                $inner = $this->opener($i);
 
-                if ($this->input[$pos] === ')' && ($pos + 1 < $len) && $this->input[$pos + 1] === ')') {
-                    $depth--;
-                    $content .= '))';
-                    $pos += 2;
-
-                    continue;
-                }
-
-                $content .= $this->input[$pos];
-                $pos++;
-            }
-
-            return ['value' => $content, 'pos' => $pos];
-        }
-
-        // $( — command substitution
-        if ($next === '(') {
-            $pos++;
-            $depth = 1;
-            $content = '$(';
-
-            while ($pos < $len) {
-                $ch = $this->input[$pos];
-
-                if ($ch === '(') {
-                    $depth++;
-                } elseif ($ch === ')') {
-                    $depth--;
-
-                    if ($depth === 0) {
-                        $content .= ')';
-                        $pos++;
-
-                        break;
-                    }
-                } elseif ($ch === "'" || $ch === '"') {
-                    // Read through quoted strings
-                    $quote = $ch;
-                    $content .= $ch;
-                    $pos++;
-
-                    while ($pos < $len && $this->input[$pos] !== $quote) {
-                        if ($this->input[$pos] === '\\' && $quote === '"' && $pos + 1 < $len) {
-                            $content .= $this->input[$pos].$this->input[$pos + 1];
-                            $pos += 2;
-
-                            continue;
-                        }
-
-                        $content .= $this->input[$pos];
-                        $pos++;
-                    }
-
-                    if ($pos < $len) {
-                        $content .= $this->input[$pos];
-                        $pos++;
-                    }
-
-                    continue;
-                }
-
-                $content .= $ch;
-                $pos++;
-            }
-
-            return ['value' => $content, 'pos' => $pos];
-        }
-
-        // ${ — parameter expansion
-        if ($next === '{') {
-            $pos++;
-            $depth = 1;
-            $content = '${';
-
-            while ($pos < $len && $depth > 0) {
-                $ch = $this->input[$pos];
-
-                if ($ch === '{') {
-                    $depth++;
-                } elseif ($ch === '}') {
-                    $depth--;
-                }
-
-                $content .= $ch;
-                $pos++;
-            }
-
-            return ['value' => $content, 'pos' => $pos];
-        }
-
-        // $var or $special
-        if (ctype_alpha($next) || $next === '_') {
-            $varName = '$';
-
-            while ($pos < $len && (ctype_alnum($this->input[$pos]) || $this->input[$pos] === '_')) {
-                $varName .= $this->input[$pos];
-                $pos++;
-            }
-
-            // Check for array subscript: $var[...]
-            if ($pos < $len && $this->input[$pos] === '[') {
-                $varName .= '[';
-                $pos++;
-                $bracketDepth = 1;
-
-                while ($pos < $len && $bracketDepth > 0) {
-                    if ($this->input[$pos] === '[') {
-                        $bracketDepth++;
-                    } elseif ($this->input[$pos] === ']') {
-                        $bracketDepth--;
-                    }
-
-                    $varName .= $this->input[$pos];
-                    $pos++;
+                if ($inner !== null && ($open !== '"' || in_array($inner, ['`', '$(', '${'], true))) {
+                    $i = $this->skipQuoted($i, $inner, $depth + 1, $countParens) - 1;
+                } elseif ($ch === $nest) {
+                    $level++;
                 }
             }
-
-            return ['value' => $varName, 'pos' => $pos];
         }
 
-        // Special variables: $?, $!, $$, $#, $*, $@, $-, $0-$9
-        if (in_array($next, ['?', '!', '$', '#', '*', '@', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'], true)) {
-            $pos++;
-
-            return ['value' => '$'.$next, 'pos' => $pos];
-        }
-
-        return ['value' => '$', 'pos' => $pos];
+        throw new ParseException(sprintf("unexpected EOF while looking for matching `%s'", $close));
     }
 
-    private function classifyWord(string $value, bool $quoted): TokenType
+    /**
+     * The $'...' starting at $start (on the `$`): its text with the escapes decoded, and the position after it.
+     *
+     * @return array{string, int}
+     */
+    public static function ansiCQuoted(string $text, int $start): array
     {
-        // Check for assignment: VAR=value or VAR+=value
-        if ($this->looksLikeAssignment($value)) {
-            return TokenType::ASSIGNMENT_WORD;
+        $len = strlen($text);
+
+        for ($end = $start + 2; $end < $len && $text[$end] !== "'"; $end++) {
+            $end += $text[$end] === '\\' ? 1 : 0;
         }
 
-        // Check for number (for redirections like 2>&1)
-        if (! $quoted && ctype_digit($value)) {
-            return TokenType::NUMBER;
-        }
+        return [self::ansiC(substr($text, $start + 2, $end - $start - 2)), min($end + 1, $len)];
+    }
 
-        // Check for reserved words (only unquoted)
-        if (! $quoted && isset(self::RESERVED_WORDS[$value])) {
-            return self::RESERVED_WORDS[$value];
-        }
+    /** bash's $'...' escapes; the text ends at a NUL, as a C string would */
+    public static function ansiC(string $text): string
+    {
+        $decoded = (string) preg_replace_callback(
+            '/\\\\(?:([abeEfnrtv\\\\\'"?])|([0-7]{1,3})|x([0-9a-fA-F]{1,2})|u([0-9a-fA-F]{1,4})|U([0-9a-fA-F]{1,8})|c(.))/s',
+            fn (array $m): string => match (true) {
+                $m[1] !== null => strtr($m[1], ['a' => "\x07", 'b' => "\x08", 'e' => "\e", 'E' => "\e", 'f' => "\f", 'n' => "\n", 'r' => "\r", 't' => "\t", 'v' => "\v"]),
+                $m[2] !== null => chr(octdec($m[2]) & 0xFF),
+                $m[3] !== null => chr((int) hexdec($m[3])),
+                $m[4] !== null || $m[5] !== null => mb_chr((int) hexdec((string) ($m[4] ?? $m[5])), 'UTF-8'),
+                default => $m[6] === '?' ? "\x7F" : chr(ord(strtoupper((string) $m[6])) & 0x1F), // \cX
+            },
+            $text,
+            flags: PREG_UNMATCHED_AS_NULL,
+        );
+        $nul = strpos($decoded, "\0");
 
-        // Check for valid name
-        if (! $quoted && preg_match('/^[a-zA-Z_]\w*$/', $value)) {
-            return TokenType::NAME;
-        }
+        return $nul === false ? $decoded : substr($decoded, 0, $nul);
+    }
 
-        return TokenType::WORD;
+    /** A quoted word is never a number, reserved word or name, since those can't hold quotes. */
+    private function classifyWord(string $value): TokenType
+    {
+        return match (true) {
+            $this->looksLikeAssignment($value) => TokenType::ASSIGNMENT_WORD,
+            ctype_digit($value) => TokenType::NUMBER,
+            isset(self::RESERVED_WORDS[$value]) => self::RESERVED_WORDS[$value],
+            preg_match('/^[a-zA-Z_]\w*$/', $value) === 1 => TokenType::NAME,
+            default => TokenType::WORD,
+        };
     }
 
     private function looksLikeAssignment(string $value): bool
@@ -734,17 +530,13 @@ final class Lexer
 
     private function isValidAssignmentLHS(string $str): bool
     {
-        if ($str === '') {
-            return false;
-        }
-
         if (! preg_match('/^[a-zA-Z_]\w*/', $str, $matches)) {
             return false;
         }
 
         $afterName = substr($str, strlen($matches[0]));
 
-        if ($afterName === '' || $afterName === '+') {
+        if ($afterName === '') {
             return true;
         }
 
@@ -765,125 +557,56 @@ final class Lexer
                 }
             }
 
-            if ($depth !== 0 || $i >= $len) {
-                return false;
-            }
-
-            $afterBracket = substr($afterName, $i + 1);
-
-            return $afterBracket === '' || $afterBracket === '+';
+            // $afterName is bracket-balanced (see findAssignmentEquals), so the loop always breaks
+            return $i === $len - 1;
         }
 
         return false;
     }
 
-    private function registerHeredocFromLookahead(bool $stripTabs): void
+    /** The delimiter after << without its quotes, so E"OF" ends at EOF; any quoting leaves the body unexpanded. */
+    private function heredocDelimiter(Token $token, bool $stripTabs): Token
     {
-        $pos = $this->pos;
-        $len = strlen($this->input);
+        $delimiter = (string) preg_replace_callback(
+            '/\'([^\']*)\'|"((?:\\\\.|[^"])*)"|\\\\(.)/s',
+            fn (array $m): string => $m[1].preg_replace('/\\\\([$`"\\\\\n])/', '$1', $m[2] ?? '').($m[3] ?? ''),
+            $token->value,
+        );
+        $this->pendingHeredocs[] = [count($this->tokens), $delimiter, $stripTabs, $delimiter !== $token->value];
 
-        // Skip whitespace
-        while ($pos < $len && ($this->input[$pos] === ' ' || $this->input[$pos] === "\t")) {
-            $pos++;
-        }
-
-        if ($pos >= $len) {
-            return;
-        }
-
-        $quoted = false;
-        $delimiter = '';
-        $ch = $this->input[$pos];
-
-        if ($ch === "'" || $ch === '"') {
-            $quoted = true;
-            $quote = $ch;
-            $pos++;
-
-            while ($pos < $len && $this->input[$pos] !== $quote) {
-                $delimiter .= $this->input[$pos];
-                $pos++;
-            }
-        } elseif ($ch === '\\') {
-            $quoted = true;
-            $pos++;
-
-            while ($pos < $len && ! $this->isWordBoundary($this->input[$pos]) && $this->input[$pos] !== "\n") {
-                if ($this->input[$pos] === '\\' && $pos + 1 < $len) {
-                    $delimiter .= $this->input[$pos + 1];
-                    $pos += 2;
-
-                    continue;
-                }
-
-                $delimiter .= $this->input[$pos];
-                $pos++;
-            }
-        } else {
-            while ($pos < $len && ! $this->isWordBoundary($this->input[$pos]) && $this->input[$pos] !== "\n") {
-                $delimiter .= $this->input[$pos];
-                $pos++;
-            }
-        }
-
-        if ($delimiter !== '') {
-            $this->pendingHeredocs[] = [
-                'delimiter' => $delimiter,
-                'stripTabs' => $stripTabs,
-                'quoted' => $quoted,
-            ];
-        }
+        return new Token(TokenType::WORD, $delimiter, $token->start, $token->end, $token->line);
     }
 
-    private function readHeredocContent(): void
+    /** Read each pending heredoc body into a HEREDOC_CONTENT token right after its delimiter. */
+    private function readHeredocBodies(): void
     {
-        while ($this->pendingHeredocs !== []) {
-            $heredoc = array_shift($this->pendingHeredocs);
-            $delimiter = $heredoc['delimiter'];
-            $stripTabs = $heredoc['stripTabs'];
-            $content = '';
-            $len = strlen($this->input);
-            $startPos = $this->pos;
+        $len = strlen($this->input);
+
+        foreach ($this->pendingHeredocs as $k => [$index, $delimiter, $stripTabs, $quoted]) {
+            $body = '';
 
             while ($this->pos < $len) {
-                $lineStart = $this->pos;
-                $line = '';
+                $end = strpos($this->input, "\n", $this->pos);
+                $line = substr($this->input, $this->pos, ($end === false ? $len : $end) - $this->pos);
+                $this->pos = $end === false ? $len : $end + 1;
+                $this->line++;
 
-                while ($this->pos < $len && $this->input[$this->pos] !== "\n") {
-                    $line .= $this->input[$this->pos];
-                    $this->pos++;
-                }
-
-                if ($this->pos < $len) {
-                    $this->pos++; // Skip newline
-                    $this->line++;
-                    $this->column = 1;
-                }
-
-                // Handle Windows CRLF line endings by removing trailing \r
-                $line = rtrim($line, "\r");
-                $trimmedLine = $stripTabs ? ltrim($line, "\t") : $line;
-
-                if ($trimmedLine === $delimiter) {
+                if (($stripTabs ? ltrim($line, "\t") : $line) === $delimiter) {
                     break;
                 }
 
-                $content .= $line."\n";
-
-                if (strlen($content) > $this->maxHeredocSize) {
-                    throw new ParseException('Heredoc exceeds maximum size');
-                }
+                $body .= $line."\n";
             }
 
-            $this->tokens[] = new Token(
-                type: TokenType::HEREDOC_CONTENT,
-                value: $content,
-                start: $startPos,
-                end: $this->pos,
-                line: $this->line,
-                column: $this->column,
-            );
+            if (strlen($body) > $this->limits->maxHereDocSize) {
+                throw new ExecutionLimitException(sprintf('Here-document size limit exceeded (%d bytes)', $this->limits->maxHereDocSize));
+            }
+
+            $delimiterToken = $this->tokens[$index + $k];
+            array_splice($this->tokens, $index + $k + 1, 0, [new Token(TokenType::HEREDOC_CONTENT, $body, $delimiterToken->end, $delimiterToken->end, $delimiterToken->line, $quoted)]);
         }
+
+        $this->pendingHeredocs = [];
     }
 
     private function isWordBoundary(string $char): bool

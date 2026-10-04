@@ -16,33 +16,24 @@ final class Tee extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, ['a' => false]);
-        $append = (bool) $parsed['flags']['a'];
-        $files = $parsed['args'];
+        $parsed = $this->getopt($args, 'a', ['append' => ['a', false]]);
 
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
+        }
+
+        [$flags, $files] = $parsed;
         $content = $commandContext->stdin;
         $stderr = '';
-        $exitCode = 0;
 
         foreach ($files as $file) {
-            $path = $this->resolvePath($commandContext, $file);
-
             try {
-                if ($append) {
-                    $commandContext->fs->appendFile($path, $content);
-                } else {
-                    $commandContext->fs->writeFile($path, $content);
-                }
-            } catch (RuntimeException) {
-                $stderr .= "tee: {$file}: No such file or directory\n";
-                $exitCode = 1;
+                $this->writeOutputFile($commandContext, $file, $content, isset($flags['a']));
+            } catch (RuntimeException $runtimeException) {
+                $stderr .= sprintf("tee: %s: %s\n", $file, $this->describeError($runtimeException));
             }
         }
 
-        if ($exitCode !== 0) {
-            return $this->failure($stderr, $exitCode, $content);
-        }
-
-        return $this->success($content);
+        return $stderr === '' ? $this->success($content) : $this->failure($stderr, 1, $content);
     }
 }

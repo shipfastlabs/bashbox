@@ -10,9 +10,4 @@ final readonly class CondAndNode implements ConditionalExpressionNode
         public ConditionalExpressionNode $left,
         public ConditionalExpressionNode $right,
     ) {}
-
-    public function getType(): string
-    {
-        return 'CondAnd';
-    }
 }

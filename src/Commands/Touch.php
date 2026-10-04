@@ -16,32 +16,37 @@ final class Touch extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        if ($args === []) {
-            return $this->failure("touch: missing file operand\n");
+        $parsed = $this->getopt($args, 'c', ['no-create' => ['c', false]]);
+
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
         }
 
-        $stderr = '';
-        $exitCode = 0;
+        [$flags, $operands] = $parsed;
 
-        foreach ($args as $arg) {
-            $path = $this->resolvePath($commandContext, $arg);
+        if ($operands === []) {
+            return $this->usageError('missing file operand');
+        }
+
+        $fs = $commandContext->fs;
+        $stderr = '';
+
+        foreach ($operands as $operand) {
+            $path = $this->resolvePath($commandContext, $operand);
 
             try {
-                if ($commandContext->fs->exists($path)) {
-                    $commandContext->fs->utimes($path, time());
-                } else {
-                    $commandContext->fs->writeFile($path, '');
+                if ($fs->exists($path)) {
+                    $fs->utimes($path, time());
+                } elseif (! $fs->exists(dirname($path))) {
+                    throw new RuntimeException('ENOENT: no such file or directory');
+                } elseif (! isset($flags['c'])) {
+                    $fs->writeFile($path, '');
                 }
-            } catch (RuntimeException $e) {
-                $stderr .= sprintf("touch: cannot touch '%s': %s%s", $arg, $e->getMessage(), PHP_EOL);
-                $exitCode = 1;
+            } catch (RuntimeException $runtimeException) {
+                $stderr .= sprintf("touch: %s '%s': %s\n", $fs->exists($path) ? 'setting times of' : 'cannot touch', $operand, $this->describeError($runtimeException));
             }
         }
 
-        if ($exitCode !== 0) {
-            return $this->failure($stderr, $exitCode);
-        }
-
-        return $this->success();
+        return $stderr === '' ? $this->success() : $this->failure($stderr);
     }
 }

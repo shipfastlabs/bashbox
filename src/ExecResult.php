@@ -11,9 +11,4 @@ final readonly class ExecResult
         public string $stderr = '',
         public int $exitCode = 0,
     ) {}
-
-    public function isSuccess(): bool
-    {
-        return $this->exitCode === 0;
-    }
 }

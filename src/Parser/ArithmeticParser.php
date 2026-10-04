@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Parser;
 
+use BashBox\Ast\Arithmetic\ArithArrayElementNode;
 use BashBox\Ast\Arithmetic\ArithAssignmentNode;
 use BashBox\Ast\Arithmetic\ArithBinaryNode;
 use BashBox\Ast\Arithmetic\ArithExpr;
@@ -12,18 +13,31 @@ use BashBox\Ast\Arithmetic\ArithNumberNode;
 use BashBox\Ast\Arithmetic\ArithTernaryNode;
 use BashBox\Ast\Arithmetic\ArithUnaryNode;
 use BashBox\Ast\Arithmetic\ArithVariableNode;
+use BashBox\Exceptions\ArithmeticException;
+use BashBox\Limits;
 
 final class ArithmeticParser
 {
-    private string $input;
+    private const string DIGITS = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ@_';
+
+    private const array ASSIGN_OPS = ['<<=', '>>=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '='];
+
+    private readonly string $input;
 
     private int $pos = 0;
 
+    /** Where the last token read starts, for error messages */
+    private int $tokenStart = 0;
+
     private readonly int $len;
 
-    public function __construct(string $input)
+    /** How deeply the operand being parsed is nested. */
+    private int $depth = 0;
+
+    public function __construct(string $input, private readonly Limits $limits = new Limits)
     {
-        $this->input = trim($input);
+        // bash quotes the expression in errors without its leading blanks, but with its trailing ones
+        $this->input = ltrim($input);
         $this->len = strlen($this->input);
     }
 
@@ -36,6 +50,10 @@ final class ArithmeticParser
         $arithExpr = $this->parseComma();
         $this->skipWhitespace();
 
+        if ($this->pos < $this->len) {
+            throw $this->error('arithmetic syntax error in expression');
+        }
+
         return $arithExpr;
     }
 
@@ -43,9 +61,8 @@ final class ArithmeticParser
     {
         $left = $this->parseAssignment();
 
-        while ($this->matchChar(',')) {
-            $right = $this->parseAssignment();
-            $left = new ArithBinaryNode(',', $left, $right);
+        while ($this->matchOp(',')) {
+            $left = new ArithBinaryNode(',', $left, $this->parseAssignment());
         }
 
         return $left;
@@ -55,16 +72,13 @@ final class ArithmeticParser
     {
         $arithExpr = $this->parseTernary();
 
-        // Check for assignment operators
-        if ($arithExpr instanceof ArithVariableNode) {
-            $this->skipWhitespace();
-            $assignOps = ['<<=', '>>=', '**=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '='];
+        if ($arithExpr instanceof ArithVariableNode || $arithExpr instanceof ArithArrayElementNode) {
+            foreach (self::ASSIGN_OPS as $assignOp) {
+                if ($this->matchOp($assignOp)) {
+                    $divisor = $this->divisorStart();
+                    $arithExpr = new ArithAssignmentNode($assignOp, $arithExpr, $this->nested($this->parseAssignment(...)), $this->divisionError($assignOp, $divisor));
 
-            foreach ($assignOps as $assignOp) {
-                if ($this->matchString($assignOp)) {
-                    $value = $this->parseAssignment();
-
-                    return new ArithAssignmentNode($assignOp, $arithExpr->name, $value);
+                    break;
                 }
             }
         }
@@ -72,204 +86,72 @@ final class ArithmeticParser
         return $arithExpr;
     }
 
-    private function parseTernary(): ArithExpr
+    /**
+     * Parse a nested operand, counting parentheses and chained operators against the depth limit.
+     *
+     * @param  callable(): ArithExpr  $parse
+     */
+    private function nested(callable $parse): ArithExpr
     {
-        $arithExpr = $this->parseOr();
-
-        $this->skipWhitespace();
-
-        if ($this->matchChar('?')) {
-            $consequent = $this->parseAssignment();
-            $this->skipWhitespace();
-            $this->expectChar(':');
-            $alternate = $this->parseAssignment();
-
-            return new ArithTernaryNode($arithExpr, $consequent, $alternate);
+        if (++$this->depth > $this->limits->maxAstDepth) {
+            throw $this->error('expression recursion level exceeded');
         }
+
+        $arithExpr = $parse();
+        $this->depth--;
 
         return $arithExpr;
     }
 
-    private function parseOr(): ArithExpr
+    private function parseTernary(): ArithExpr
     {
-        $left = $this->parseAnd();
+        $arithExpr = $this->parseBinary(0);
 
-        while ($this->matchString('||')) {
-            $right = $this->parseAnd();
-            $left = new ArithBinaryNode('||', $left, $right);
+        if (! $this->matchOp('?')) {
+            return $arithExpr;
         }
 
-        return $left;
-    }
+        $consequent = $this->nested($this->parseAssignment(...));
 
-    private function parseAnd(): ArithExpr
-    {
-        $left = $this->parseBitwiseOr();
-
-        while ($this->matchString('&&')) {
-            $right = $this->parseBitwiseOr();
-            $left = new ArithBinaryNode('&&', $left, $right);
+        if (! $this->matchOp(':')) {
+            throw $this->error("`:' expected for conditional expression");
         }
 
-        return $left;
+        return new ArithTernaryNode($arithExpr, $consequent, $this->nested($this->parseAssignment(...)));
     }
 
-    private function parseBitwiseOr(): ArithExpr
-    {
-        $left = $this->parseBitwiseXor();
+    /**
+     * Binary operators from lowest to highest precedence. Each operator is
+     * listed with the longer operators it must not be mistaken for.
+     *
+     * @var list<array<string, list<string>>>
+     */
+    private const array BINARY_LEVELS = [
+        ['||' => []],
+        ['&&' => []],
+        ['|' => ['||', '|=']],
+        ['^' => ['^=']],
+        ['&' => ['&&', '&=']],
+        ['==' => [], '!=' => []],
+        ['<=' => [], '>=' => [], '<' => ['<<'], '>' => ['>>']],
+        ['<<' => ['<<='], '>>' => ['>>=']],
+        ['+' => ['++', '+='], '-' => ['--', '-=']],
+        ['*' => ['**', '*='], '/' => ['/='], '%' => ['%=']],
+    ];
 
-        while ($this->peekChar() === '|' && $this->peekCharAt(1) !== '|') {
-            $this->pos++;
-            $right = $this->parseBitwiseXor();
-            $left = new ArithBinaryNode('|', $left, $right);
+    private function parseBinary(int $level): ArithExpr
+    {
+        $ops = self::BINARY_LEVELS[$level] ?? null;
+
+        if ($ops === null) {
+            return $this->parseExponentiation();
         }
 
-        return $left;
-    }
+        $left = $this->parseBinary($level + 1);
 
-    private function parseBitwiseXor(): ArithExpr
-    {
-        $left = $this->parseBitwiseAnd();
-
-        while ($this->matchChar('^')) {
-            $right = $this->parseBitwiseAnd();
-            $left = new ArithBinaryNode('^', $left, $right);
-        }
-
-        return $left;
-    }
-
-    private function parseBitwiseAnd(): ArithExpr
-    {
-        $left = $this->parseEquality();
-
-        while ($this->peekChar() === '&' && $this->peekCharAt(1) !== '&') {
-            $this->pos++;
-            $right = $this->parseEquality();
-            $left = new ArithBinaryNode('&', $left, $right);
-        }
-
-        return $left;
-    }
-
-    private function parseEquality(): ArithExpr
-    {
-        $left = $this->parseRelational();
-
-        while (true) {
-            $this->skipWhitespace();
-
-            if ($this->matchString('==')) {
-                $right = $this->parseRelational();
-                $left = new ArithBinaryNode('==', $left, $right);
-            } elseif ($this->matchString('!=')) {
-                $right = $this->parseRelational();
-                $left = new ArithBinaryNode('!=', $left, $right);
-            } else {
-                break;
-            }
-        }
-
-        return $left;
-    }
-
-    private function parseRelational(): ArithExpr
-    {
-        $left = $this->parseShift();
-
-        while (true) {
-            $this->skipWhitespace();
-
-            if ($this->matchString('<=')) {
-                $right = $this->parseShift();
-                $left = new ArithBinaryNode('<=', $left, $right);
-            } elseif ($this->matchString('>=')) {
-                $right = $this->parseShift();
-                $left = new ArithBinaryNode('>=', $left, $right);
-            } elseif ($this->peekChar() === '<' && $this->peekCharAt(1) !== '<') {
-                $this->pos++;
-                $right = $this->parseShift();
-                $left = new ArithBinaryNode('<', $left, $right);
-            } elseif ($this->peekChar() === '>' && $this->peekCharAt(1) !== '>') {
-                $this->pos++;
-                $right = $this->parseShift();
-                $left = new ArithBinaryNode('>', $left, $right);
-            } else {
-                break;
-            }
-        }
-
-        return $left;
-    }
-
-    private function parseShift(): ArithExpr
-    {
-        $left = $this->parseAdditive();
-
-        while (true) {
-            $this->skipWhitespace();
-
-            if ($this->matchString('<<')) {
-                $right = $this->parseAdditive();
-                $left = new ArithBinaryNode('<<', $left, $right);
-            } elseif ($this->matchString('>>')) {
-                $right = $this->parseAdditive();
-                $left = new ArithBinaryNode('>>', $left, $right);
-            } else {
-                break;
-            }
-        }
-
-        return $left;
-    }
-
-    private function parseAdditive(): ArithExpr
-    {
-        $left = $this->parseMultiplicative();
-
-        while (true) {
-            $this->skipWhitespace();
-            $ch = $this->peekChar();
-
-            if ($ch === '+' && $this->peekCharAt(1) !== '+' && $this->peekCharAt(1) !== '=') {
-                $this->pos++;
-                $right = $this->parseMultiplicative();
-                $left = new ArithBinaryNode('+', $left, $right);
-            } elseif ($ch === '-' && $this->peekCharAt(1) !== '-' && $this->peekCharAt(1) !== '=') {
-                $this->pos++;
-                $right = $this->parseMultiplicative();
-                $left = new ArithBinaryNode('-', $left, $right);
-            } else {
-                break;
-            }
-        }
-
-        return $left;
-    }
-
-    private function parseMultiplicative(): ArithExpr
-    {
-        $left = $this->parseExponentiation();
-
-        while (true) {
-            $this->skipWhitespace();
-            $ch = $this->peekChar();
-
-            if ($ch === '*' && $this->peekCharAt(1) !== '*' && $this->peekCharAt(1) !== '=') {
-                $this->pos++;
-                $right = $this->parseExponentiation();
-                $left = new ArithBinaryNode('*', $left, $right);
-            } elseif ($ch === '/' && $this->peekCharAt(1) !== '=') {
-                $this->pos++;
-                $right = $this->parseExponentiation();
-                $left = new ArithBinaryNode('/', $left, $right);
-            } elseif ($ch === '%' && $this->peekCharAt(1) !== '=') {
-                $this->pos++;
-                $right = $this->parseExponentiation();
-                $left = new ArithBinaryNode('%', $left, $right);
-            } else {
-                break;
-            }
+        while (($op = $this->matchAnyOp($ops)) !== null) {
+            $divisor = $this->divisorStart();
+            $left = new ArithBinaryNode($op, $left, $this->parseBinary($level + 1), $this->divisionError($op, $divisor));
         }
 
         return $left;
@@ -279,12 +161,11 @@ final class ArithmeticParser
     {
         $arithExpr = $this->parseUnary();
 
-        $this->skipWhitespace();
+        if ($this->matchOp('**')) {
+            // Right-associative.
+            $exponent = $this->nested($this->parseExponentiation(...));
 
-        if ($this->matchString('**')) {
-            $exp = $this->parseExponentiation(); // Right-associative
-
-            return new ArithBinaryNode('**', $arithExpr, $exp);
+            return new ArithBinaryNode('**', $arithExpr, $exponent, $this->runtimeError('exponent less than 0', $this->token()));
         }
 
         return $arithExpr;
@@ -292,47 +173,16 @@ final class ArithmeticParser
 
     private function parseUnary(): ArithExpr
     {
-        $this->skipWhitespace();
-        $ch = $this->peekChar();
+        $op = $this->matchAnyOp(['++' => [], '--' => [], '+' => [], '-' => [], '!' => ['!='], '~' => []]);
 
-        // Prefix ++ and --
-        if ($ch === '+' && $this->peekCharAt(1) === '+') {
-            $this->pos += 2;
-            $operand = $this->parseUnary();
-
-            return new ArithUnaryNode('++', $operand, true);
-        }
-
-        if ($ch === '-' && $this->peekCharAt(1) === '-') {
-            $this->pos += 2;
-            $operand = $this->parseUnary();
-
-            return new ArithUnaryNode('--', $operand, true);
-        }
-
-        // Unary +, -, !, ~
-        if (in_array($ch, ['+', '-', '!', '~'], true)) {
-            $this->pos++;
-            $operand = $this->parseUnary();
-
-            return new ArithUnaryNode($ch, $operand, true);
+        if ($op !== null) {
+            return new ArithUnaryNode($op, $this->nested($this->parseUnary(...)), true);
         }
 
         $arithExpr = $this->parsePrimary();
 
-        // Postfix ++ and --
-        $this->skipWhitespace();
-
-        if ($this->peekChar() === '+' && $this->peekCharAt(1) === '+') {
-            $this->pos += 2;
-
-            return new ArithUnaryNode('++', $arithExpr, false);
-        }
-
-        if ($this->peekChar() === '-' && $this->peekCharAt(1) === '-') {
-            $this->pos += 2;
-
-            return new ArithUnaryNode('--', $arithExpr, false);
+        if (($arithExpr instanceof ArithVariableNode || $arithExpr instanceof ArithArrayElementNode) && ($op = $this->matchAnyOp(['++' => [], '--' => []])) !== null) {
+            return new ArithUnaryNode($op, $arithExpr, false);
         }
 
         return $arithExpr;
@@ -341,169 +191,199 @@ final class ArithmeticParser
     private function parsePrimary(): ArithExpr
     {
         $this->skipWhitespace();
+        $ch = $this->input[$this->pos] ?? '';
 
-        if ($this->pos >= $this->len) {
-            return new ArithNumberNode(0);
-        }
-
-        $ch = $this->input[$this->pos];
-
-        // Grouping
         if ($ch === '(') {
-            $this->pos++;
-            $expr = $this->parseComma();
-            $this->skipWhitespace();
-            $this->expectChar(')');
+            $this->tokenStart = $this->pos++;
+            $expr = $this->nested($this->parseComma(...));
+
+            if (! $this->matchOp(')')) {
+                throw $this->error("missing `)'");
+            }
 
             return new ArithGroupNode($expr);
         }
 
-        // Number
         if (ctype_digit($ch)) {
             return $this->parseNumber();
         }
 
-        // Variable with $ prefix
-        if ($ch === '$') {
-            $this->pos++;
+        if (preg_match('/\G[a-zA-Z_]\w*/', $this->input, $m, 0, $this->pos) === 1) {
+            $start = $this->pos;
+            $this->tokenStart = $this->pos;
+            $this->pos += strlen($m[0]);
 
-            if ($this->pos < $this->len && $this->input[$this->pos] === '{') {
-                // ${...}
-                $this->pos++;
-                $name = '';
-
-                while ($this->pos < $this->len && $this->input[$this->pos] !== '}') {
-                    $name .= $this->input[$this->pos];
-                    $this->pos++;
-                }
-
-                if ($this->pos < $this->len) {
-                    $this->pos++;
-                }
-
-                return new ArithVariableNode($name, true);
-            }
-
-            $name = $this->readIdentifier();
-
-            return new ArithVariableNode($name, true);
+            return ($this->input[$this->pos] ?? '') === '[' ? $this->parseElement($m[0], $start) : new ArithVariableNode($m[0]);
         }
 
-        // Variable name (identifier)
-        if (ctype_alpha($ch) || $ch === '_') {
-            $name = $this->readIdentifier();
-
-            return new ArithVariableNode($name);
-        }
-
-        // Unknown - return 0
-        $this->pos++;
-
-        return new ArithNumberNode(0);
+        throw $this->error('arithmetic syntax error: operand expected');
     }
 
+    /** `name[subscript]`, with $pos on the `[`; subscripts may nest, as in a[b[1]]. */
+    private function parseElement(string $name, int $start): ArithArrayElementNode
+    {
+        $depth = 0;
+
+        for ($end = $this->pos; $end < $this->len; $end++) {
+            $depth += match ($this->input[$end]) {
+                '[' => 1,
+                ']' => -1,
+                default => 0,
+            };
+
+            if ($depth === 0) {
+                break;
+            }
+        }
+
+        if ($end === $this->len) {
+            throw new ArithmeticException($this->runtimeError('bad array subscript', substr($this->input, $start)));
+        }
+
+        $subscript = substr($this->input, $this->pos + 1, $end - $this->pos - 1);
+        $this->pos = $end + 1;
+
+        return new ArithArrayElementNode($name, $subscript);
+    }
+
+    /**
+     * Integer constants: decimal, 0-prefixed octal, 0x hex and base#digits (base 2-64).
+     */
     private function parseNumber(): ArithNumberNode
     {
         $start = $this->pos;
+        $this->pos += strspn($this->input, self::DIGITS.'#', $this->pos);
+        $text = substr($this->input, $start, $this->pos - $start);
+        $this->pos = $start;
 
-        // Handle hex, octal, binary
-        if ($this->input[$this->pos] === '0' && $this->pos + 1 < $this->len) {
-            $next = $this->input[$this->pos + 1];
-
-            if ($next === 'x' || $next === 'X') {
-                $this->pos += 2;
-
-                while ($this->pos < $this->len && ctype_xdigit($this->input[$this->pos])) {
-                    $this->pos++;
-                }
-
-                return new ArithNumberNode((int) substr($this->input, $start, $this->pos - $start));
+        if (str_contains($text, '#')) {
+            if (preg_match('/^(\d+)#(.+)$/', $text, $m) !== 1) {
+                throw $this->numberError('invalid integer constant', $start, $text);
             }
+
+            [, $base, $digits] = $m;
+            $base = (int) $base;
+
+            if ($base < 2 || $base > 64) {
+                throw $this->numberError('invalid arithmetic base', $start, $text);
+            }
+        } elseif (preg_match('/^0[xX]/', $text) === 1) {
+            [$base, $digits] = [16, substr($text, 2)];
+        } else {
+            [$base, $digits] = [$text[0] === '0' ? 8 : 10, $text];
         }
 
-        while ($this->pos < $this->len && ctype_digit($this->input[$this->pos])) {
-            $this->pos++;
+        if ($base <= 36) {
+            $digits = strtolower($digits);
         }
 
-        return new ArithNumberNode((int) substr($this->input, $start, $this->pos - $start));
+        $value = 0;
+
+        foreach (str_split($digits) as $digit) {
+            $digitValue = strpos(self::DIGITS, $digit);
+
+            if ($digitValue === false) {
+                throw $this->numberError('invalid number', $start, $text);
+            }
+
+            if ($digitValue >= $base) {
+                throw $this->numberError('value too great for base', $start, $text);
+            }
+
+            $value = Int64::add(Int64::mul($value, $base), $digitValue);
+        }
+
+        $this->tokenStart = $start;
+        $this->pos += strlen($text);
+
+        return new ArithNumberNode($value);
     }
 
-    private function readIdentifier(): string
+    /** bash checks a number on its own, so the message quotes the expression only as far as the number */
+    private function numberError(string $message, int $start, string $text): ArithmeticException
     {
-        $start = $this->pos;
-
-        while ($this->pos < $this->len && (ctype_alnum($this->input[$this->pos]) || $this->input[$this->pos] === '_')) {
-            $this->pos++;
-        }
-
-        return substr($this->input, $start, $this->pos - $start);
+        return new ArithmeticException(sprintf('%s: %s (error token is "%s")', substr($this->input, 0, $start + strlen($text)), $message, $text));
     }
 
     private function skipWhitespace(): void
     {
-        while ($this->pos < $this->len && (in_array($this->input[$this->pos], [' ', "\t", "\n"], true))) {
-            $this->pos++;
-        }
+        $this->pos += strspn($this->input, " \t\n", $this->pos);
     }
 
-    private function peekChar(): string
-    {
-        return $this->pos < $this->len ? $this->input[$this->pos] : '';
-    }
-
-    private function peekCharAt(int $offset): string
-    {
-        $idx = $this->pos + $offset;
-
-        return $idx < $this->len ? $this->input[$idx] : '';
-    }
-
-    private function matchChar(string $ch): bool
+    /**
+     * Consume $op unless the input actually holds one of the longer operators in $longer.
+     */
+    private function matchOp(string $op, string ...$longer): bool
     {
         $this->skipWhitespace();
 
-        if ($this->pos < $this->len && $this->input[$this->pos] === $ch) {
-            $this->pos++;
-
-            return true;
-        }
-
-        return false;
-    }
-
-    private function matchString(string $str): bool
-    {
-        $this->skipWhitespace();
-        $slen = strlen($str);
-
-        if ($this->pos + $slen <= $this->len && substr($this->input, $this->pos, $slen) === $str) {
-            // Make sure we're not matching a prefix of a longer operator
-            if ($slen === 1 && $this->pos + 1 < $this->len) {
-                $next = $this->input[$this->pos + 1];
-
-                if ($str === '=' && $next === '=') {
+        foreach ([$op, ...$longer] as $i => $candidate) {
+            if (substr($this->input, $this->pos, strlen($candidate)) === $candidate) {
+                if ($i > 0) {
                     return false;
                 }
+
+                continue;
             }
 
-            $this->pos += $slen;
-
-            return true;
+            if ($i === 0) {
+                return false;
+            }
         }
 
-        return false;
+        $this->tokenStart = $this->pos;
+        $this->pos += strlen($op);
+
+        return true;
     }
 
-    private function expectChar(string $ch): void
+    /**
+     * @param  array<string, list<string>>  $ops
+     */
+    private function matchAnyOp(array $ops): ?string
+    {
+        foreach ($ops as $op => $longer) {
+            if ($this->matchOp($op, ...$longer)) {
+                return $op;
+            }
+        }
+
+        return null;
+    }
+
+    /** Where the operand after a `/`, `%` (or `/=`, `%=`) starts: bash's token for division by 0 */
+    private function divisorStart(): int
     {
         $this->skipWhitespace();
 
-        if ($this->pos < $this->len && $this->input[$this->pos] === $ch) {
-            $this->pos++;
+        return $this->pos;
+    }
 
-            return;
-        }
+    /**
+     * The error token, as bash reports it: from the token it has just looked ahead to, or at the end of the
+     * input from the last token read, to the end.
+     */
+    private function token(): string
+    {
+        $this->skipWhitespace();
 
-        // Silently skip on missing char (be lenient like bash)
+        return substr($this->input, $this->pos < $this->len ? $this->pos : $this->tokenStart);
+    }
+
+    /** For `/`, `%`, `/=` and `%=`: the message should the operand starting at $divisor be 0 */
+    private function divisionError(string $op, int $divisor): string
+    {
+        return in_array($op, ['/', '%', '/=', '%='], true) ? $this->runtimeError('division by 0', substr($this->input, $divisor)) : '';
+    }
+
+    /** A message for an error found while evaluating, kept on the node it belongs to */
+    private function runtimeError(string $message, string $token): string
+    {
+        return sprintf('%s: %s (error token is "%s")', $this->input, $message, $token);
+    }
+
+    private function error(string $message): ArithmeticException
+    {
+        return new ArithmeticException($this->runtimeError($message, $this->token()));
     }
 }

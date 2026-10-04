@@ -15,40 +15,33 @@ final class Dirname_ extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        if ($args === []) {
-            return $this->failure("dirname: missing operand\n");
+        $parsed = $this->getopt($args, 'z', ['zero' => ['z', false]]);
+
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
         }
 
-        $path = $args[0];
+        [$flags, $names] = $parsed;
 
-        // Remove trailing slashes (but not if path is just "/")
-        $path = rtrim($path, '/');
-
-        if ($path === '') {
-            return $this->success("/\n");
+        if ($names === []) {
+            return $this->usageError('missing operand');
         }
 
-        $lastSlash = strrpos($path, '/');
+        $end = isset($flags['z']) ? "\0" : "\n";
+
+        return $this->success(implode('', array_map(fn (string $name): string => $this->directory($name).$end, $names)));
+    }
+
+    private function directory(string $path): string
+    {
+        $trimmed = rtrim($path, '/');
+        $lastSlash = strrpos($trimmed, '/');
 
         if ($lastSlash === false) {
-            // No slash at all - directory is "."
-            return $this->success(".\n");
+            // "/" itself trims to "", a bare name has no directory part
+            return $trimmed === '' && $path !== '' ? '/' : '.';
         }
 
-        if ($lastSlash === 0) {
-            // Slash at position 0 means root
-            return $this->success("/\n");
-        }
-
-        $dir = substr($path, 0, $lastSlash);
-
-        // Remove trailing slashes from the result
-        $dir = rtrim($dir, '/');
-
-        if ($dir === '') {
-            $dir = '/';
-        }
-
-        return $this->success($dir."\n");
+        return rtrim(substr($trimmed, 0, $lastSlash), '/') ?: '/';
     }
 }

@@ -6,16 +6,28 @@ namespace BashBox\Filesystem;
 
 use RuntimeException;
 
+/**
+ * Reads and writes a real directory. Every lookup is resolved on disk one component at a time,
+ * following symlinks, and anything that would leave the root is denied.
+ *
+ * The quota counts what the sandbox adds to the disk: bytes written, less bytes it removes, and entries made.
+ *
+ * Limitation: resolve-then-act is not atomic; a concurrent host process swapping a directory for a
+ * symlink between the two could slip past. Needs openat()/O_NOFOLLOW, which PHP does not expose.
+ */
 final readonly class ReadWriteFs implements FileSystemInterface
 {
     private string $rootDir;
 
-    public function __construct(string $rootDir)
+    /**
+     * @param  bool  $allowSymlinks  false hides on-disk symlinks and refuses any lookup through one
+     */
+    public function __construct(string $rootDir, private bool $allowSymlinks = true, private DiskQuota $diskQuota = new DiskQuota)
     {
         $realRoot = realpath($rootDir);
 
-        if ($realRoot === false || ! is_dir($rootDir)) {
-            throw new RuntimeException(sprintf("ReadWriteFs root directory does not exist: '%s'", $rootDir));
+        if ($realRoot === false || ! is_dir($realRoot)) {
+            throw new RuntimeException(sprintf("Filesystem root directory does not exist: '%s'", $rootDir));
         }
 
         $this->rootDir = $realRoot;
@@ -23,77 +35,70 @@ final readonly class ReadWriteFs implements FileSystemInterface
 
     public function readFile(string $path): string
     {
-        $this->validatePath($path, 'open');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'open', $path);
+        $real = $this->resolve($path, 'open');
 
-        if (! is_file($realPath)) {
-            if (is_dir($realPath)) {
-                throw new RuntimeException(sprintf("EISDIR: illegal operation on a directory, read '%s'", $path));
-            }
-
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path));
+        if (is_dir($real)) {
+            $this->fail('EISDIR: illegal operation on a directory', 'read', $path);
         }
 
-        $content = @file_get_contents($realPath);
-
-        if ($content === false) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path));
+        if (! is_file($real)) {
+            $this->fail('ENOENT: no such file or directory', 'open', $path);
         }
 
-        return $content;
+        return $this->host(fn (): string|false => file_get_contents($real), 'open', $path);
     }
 
     public function writeFile(string $path, string $content): void
     {
-        $this->validatePath($path, 'write');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'write', $path);
+        $this->put($path, $content, 0);
+    }
 
-        $dir = dirname($realPath);
-        $this->ensureDirectory($dir, $path);
+    /**
+     * Atomic on the host, and the new name is never followed: mkdir() for a directory; for a file,
+     * mkstemp (tempnam) makes it under a random name and link() puts it in place. Not fopen('x'):
+     * PHP expands a dangling symlink in the path before open(), so O_EXCL would land on its target.
+     */
+    public function createExclusive(string $path, bool $directory = false): void
+    {
+        $operation = $directory ? 'mkdir' : 'open';
+        $real = $this->resolve($path, $operation, false);
+        $this->diskQuota->charge(0, 1, $path);
+        set_error_handler(fn (): bool => true);
+        $umask = umask(0077);
+        $temp = $directory ? false : tempnam(dirname($real), '.bashbox');
 
-        $result = @file_put_contents($realPath, $content);
+        try {
+            $created = $directory ? mkdir($real, 0700) : $temp !== false && link($temp, $real);
+        } finally {
+            if ($temp !== false) {
+                unlink($temp);
+            }
 
-        if ($result === false) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, write '%s'", $path));
+            umask($umask);
+            restore_error_handler();
         }
+
+        if (! $created) {
+            $this->diskQuota->charge(0, -1, $path);
+            $this->fail(match (true) {
+                file_exists($real) || is_link($real) => 'EEXIST: file already exists',
+                is_dir(dirname($real)) => 'EACCES: permission denied',
+                file_exists(dirname($real)) => 'ENOTDIR: not a directory',
+                default => 'ENOENT: no such file or directory',
+            }, $operation, $path);
+        }
+
     }
 
     public function appendFile(string $path, string $content): void
     {
-        $this->validatePath($path, 'append');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'append', $path);
-
-        if (is_dir($realPath)) {
-            throw new RuntimeException(sprintf("EISDIR: illegal operation on a directory, write '%s'", $path));
-        }
-
-        $dir = dirname($realPath);
-        $this->ensureDirectory($dir, $path);
-
-        $result = @file_put_contents($realPath, $content, FILE_APPEND | LOCK_EX);
-
-        if ($result === false) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, append '%s'", $path));
-        }
+        $this->put($path, $content, FILE_APPEND | LOCK_EX);
     }
 
     public function exists(string $path): bool
     {
-        if (str_contains($path, "\0")) {
-            return false;
-        }
-
         try {
-            $realPath = $this->toRealPath($path);
-
-            if (! $this->isContained($realPath)) {
-                return false;
-            }
-
-            return file_exists($realPath);
+            return file_exists($this->resolve($path, 'access'));
         } catch (RuntimeException) {
             return false;
         }
@@ -101,149 +106,57 @@ final readonly class ReadWriteFs implements FileSystemInterface
 
     public function stat(string $path): FsStat
     {
-        $this->validatePath($path, 'stat');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'stat', $path);
-
-        $status = @stat($realPath);
-
-        if ($status === false) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, stat '%s'", $path));
-        }
-
-        $mode = $status['mode'];
-        $type = UnixFileMode::type($mode);
-
-        return new FsStat(
-            isFile: $type === UnixFileType::RegularFile,
-            isDirectory: $type === UnixFileType::Directory,
-            isSymbolicLink: false,
-            mode: UnixFileMode::permissions($mode),
-            size: $status['size'],
-            mtime: $status['mtime'],
-        );
+        return $this->statPath($path, 'stat', true);
     }
 
     public function lstat(string $path): FsStat
     {
-        $this->validatePath($path, 'lstat');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'lstat', $path);
-
-        $status = @lstat($realPath);
-
-        if ($status === false) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, lstat '%s'", $path));
-        }
-
-        $mode = $status['mode'];
-        $type = UnixFileMode::type($mode);
-
-        if ($type === UnixFileType::SymbolicLink) {
-            return new FsStat(
-                isFile: false,
-                isDirectory: false,
-                isSymbolicLink: true,
-                mode: UnixFileMode::FULL_PERMISSIONS,
-                size: $status['size'],
-                mtime: $status['mtime'],
-            );
-        }
-
-        return new FsStat(
-            isFile: $type === UnixFileType::RegularFile,
-            isDirectory: $type === UnixFileType::Directory,
-            isSymbolicLink: false,
-            mode: UnixFileMode::permissions($mode),
-            size: $status['size'],
-            mtime: $status['mtime'],
-        );
+        return $this->statPath($path, 'lstat', false);
     }
 
     public function mkdir(string $path, array $options = []): void
     {
-        $this->validatePath($path, 'mkdir');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'mkdir', $path);
+        $real = $this->resolve($path, 'mkdir', false);
         $recursive = $options['recursive'] ?? false;
 
-        if (file_exists($realPath)) {
-            $status = @stat($realPath);
-
-            if ($status !== false && UnixFileMode::isRegularFile($status['mode'])) {
-                throw new RuntimeException(sprintf("EEXIST: file already exists, mkdir '%s'", $path));
+        if (file_exists($real)) {
+            if ($recursive && is_dir($real)) {
+                return;
             }
 
-            if (! $recursive) {
-                throw new RuntimeException(sprintf("EEXIST: directory already exists, mkdir '%s'", $path));
-            }
-
-            return;
+            $this->fail('EEXIST: file already exists', 'mkdir', $path);
         }
 
-        $result = @mkdir($realPath, 0755, $recursive);
-
-        if ($result === false) {
-            if (! $recursive) {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, mkdir '%s'", $path));
-            }
-
-            throw new RuntimeException(sprintf("EACCES: permission denied, mkdir '%s'", $path));
+        if (! $recursive && ! is_dir(dirname($real))) {
+            $this->fail('ENOENT: no such file or directory', 'mkdir', $path);
         }
+
+        $this->diskQuota->charge(0, $this->missing($real), $path);
+        $this->host(fn (): bool => mkdir($real, 0755, $recursive), 'mkdir', $path);
     }
 
     public function readdir(string $path): array
     {
-        $entries = $this->readdirWithFileTypes($path);
-
-        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $entries);
+        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $this->readdirWithFileTypes($path));
     }
 
     public function readdirWithFileTypes(string $path): array
     {
-        $this->validatePath($path, 'scandir');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'scandir', $path);
+        $real = $this->resolve($path, 'scandir');
 
-        if (! is_dir($realPath)) {
-            if (! file_exists($realPath)) {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, scandir '%s'", $path));
-            }
-
-            throw new RuntimeException(sprintf("ENOTDIR: not a directory, scandir '%s'", $path));
+        if (! is_dir($real)) {
+            $this->fail(file_exists($real) ? 'ENOTDIR: not a directory' : 'ENOENT: no such file or directory', 'scandir', $path);
         }
 
-        $names = @scandir($realPath);
-
-        if ($names === false) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, scandir '%s'", $path));
-        }
-
+        $names = $this->host(fn (): array|false => scandir($real), 'scandir', $path);
         $entries = [];
 
-        foreach ($names as $name) {
-            if ($name === '.') {
-                continue;
+        foreach (array_diff($names, ['.', '..']) as $name) {
+            $type = @filetype($real.'/'.$name);
+
+            if ($type !== 'link' || $this->allowSymlinks) {
+                $entries[] = new DirentEntry($name, $type === 'file', $type === 'dir', $type === 'link');
             }
-
-            if ($name === '..') {
-                continue;
-            }
-
-            $childPath = $realPath.DIRECTORY_SEPARATOR.$name;
-            $childStatus = @lstat($childPath);
-
-            $childType = $childStatus !== false ? UnixFileMode::type($childStatus['mode']) : null;
-            $isLink = $childType === UnixFileType::SymbolicLink;
-            $isDir = $childType === UnixFileType::Directory;
-            $isFile = $childType === UnixFileType::RegularFile;
-
-            $entries[] = new DirentEntry(
-                name: $name,
-                isFile: $isFile,
-                isDirectory: $isDir,
-                isSymbolicLink: $isLink,
-            );
         }
 
         usort($entries, fn (DirentEntry $a, DirentEntry $b): int => strcmp($a->name, $b->name));
@@ -253,160 +166,96 @@ final readonly class ReadWriteFs implements FileSystemInterface
 
     public function rm(string $path, array $options = []): void
     {
-        $this->validatePath($path, 'rm');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'rm', $path);
-        $force = $options['force'] ?? false;
-        $recursive = $options['recursive'] ?? false;
+        $real = $this->resolve($path, 'rm', false);
 
-        if (! file_exists($realPath)) {
-            if ($force) {
+        if (! file_exists($real) && ! is_link($real)) {
+            if ($options['force'] ?? false) {
                 return;
             }
 
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, rm '%s'", $path));
+            $this->fail('ENOENT: no such file or directory', 'rm', $path);
         }
 
-        $status = @lstat($realPath);
-
-        if ($status === false) {
-            if ($force) {
-                return;
-            }
-
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, rm '%s'", $path));
+        if ($real === $this->rootDir) {
+            $this->fail('EPERM: operation not permitted', 'rm', $path);
         }
 
-        $rmType = UnixFileMode::type($status['mode']);
-        $isLink = $rmType === UnixFileType::SymbolicLink;
-        $isDir = $rmType === UnixFileType::Directory;
+        if (is_link($real) || ! is_dir($real)) {
+            $stat = $this->lstat($path);
+            $this->host(fn (): bool => unlink($real), 'rm', $path);
+            // Only the last name of a file frees its data
+            $this->diskQuota->charge($stat->isFile && $stat->nlink === 1 ? -$stat->size : 0, -1, $path);
 
-        if ($isDir && ! $isLink) {
-            $children = $this->readdir($path);
-
-            if ($children !== []) {
-                if (! $recursive) {
-                    throw new RuntimeException(sprintf("ENOTEMPTY: directory not empty, rm '%s'", $path));
-                }
-
-                $normalized = $this->normalizePath($path);
-
-                foreach ($children as $child) {
-                    $childPath = $normalized === '/' ? '/'.$child : sprintf('%s/%s', $normalized, $child);
-                    $this->rm($childPath, $options);
-                }
-            }
-
-            $result = @rmdir($realPath);
-
-            if ($result === false) {
-                throw new RuntimeException(sprintf("EACCES: permission denied, rm '%s'", $path));
-            }
-        } else {
-            $result = @unlink($realPath);
-
-            if ($result === false) {
-                throw new RuntimeException(sprintf("EACCES: permission denied, rm '%s'", $path));
-            }
+            return;
         }
+
+        $children = $this->readdir($path);
+
+        if ($children !== [] && ! ($options['recursive'] ?? false)) {
+            $this->fail('ENOTEMPTY: directory not empty', 'rm', $path);
+        }
+
+        foreach ($children as $child) {
+            $this->rm($path.'/'.$child, $options);
+        }
+
+        $this->host(fn (): bool => rmdir($real), 'rm', $path);
+        $this->diskQuota->charge(0, -1, $path);
     }
 
     public function cp(string $src, string $dest, array $options = []): void
     {
-        $this->validatePath($src, 'cp');
-        $this->validatePath($dest, 'cp');
-        $srcReal = $this->toRealPath($src);
-        $destReal = $this->toRealPath($dest);
-        $this->assertContained($srcReal, 'cp', $src);
-        $this->assertContained($destReal, 'cp', $dest);
+        $srcReal = $this->resolve($src, 'cp');
 
-        $recursive = $options['recursive'] ?? false;
-        $preserve = $options['preserve'] ?? false;
+        if (! is_dir($srcReal)) {
+            $this->writeFile($dest, $this->readFile($src));
 
-        $status = @stat($srcReal);
+            if ($options['preserve'] ?? false) {
+                $stat = $this->stat($src);
+                $this->chmod($dest, $stat->mode);
+                $this->utimes($dest, $stat->mtime);
+            }
 
-        if ($status === false) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, cp '%s'", $src));
+            return;
         }
 
-        $cpType = UnixFileMode::type($status['mode']);
+        if (! ($options['recursive'] ?? false)) {
+            $this->fail('EISDIR: is a directory', 'cp', $src);
+        }
 
-        if ($cpType === UnixFileType::RegularFile) {
-            $this->ensureDirectory(dirname($destReal), $dest);
+        if (str_starts_with($this->resolve($dest, 'cp').'/', $srcReal.'/')) {
+            $this->fail('EINVAL: cannot copy a directory into itself', 'cp', $src);
+        }
 
-            $content = @file_get_contents($srcReal);
+        $this->mkdir($dest, ['recursive' => true]);
 
-            if ($content === false) {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, cp '%s'", $src));
-            }
-
-            if (@file_put_contents($destReal, $content) === false) {
-                throw new RuntimeException(sprintf("EACCES: permission denied, cp '%s'", $dest));
-            }
-
-            if ($preserve) {
-                @chmod($destReal, $status['mode']);
-                @touch($destReal, $status['mtime']);
-            }
-        } elseif ($cpType === UnixFileType::Directory) {
-            if (! $recursive) {
-                throw new RuntimeException(sprintf("EISDIR: is a directory, cp '%s'", $src));
-            }
-
-            $this->mkdir($dest, ['recursive' => true]);
-
-            $srcNorm = $this->normalizePath($src);
-            $destNorm = $this->normalizePath($dest);
-
-            foreach ($this->readdir($src) as $child) {
-                $srcChild = $srcNorm === '/' ? '/'.$child : sprintf('%s/%s', $srcNorm, $child);
-                $destChild = $destNorm === '/' ? '/'.$child : sprintf('%s/%s', $destNorm, $child);
-                $this->cp($srcChild, $destChild, $options);
-            }
+        foreach ($this->readdir($src) as $child) {
+            $this->cp($src.'/'.$child, $dest.'/'.$child, $options);
         }
     }
 
     public function mv(string $src, string $dest): void
     {
-        $this->validatePath($src, 'rename');
-        $this->validatePath($dest, 'rename');
-        $srcReal = $this->toRealPath($src);
-        $destReal = $this->toRealPath($dest);
-        $this->assertContained($srcReal, 'rename', $src);
-        $this->assertContained($destReal, 'rename', $dest);
+        $srcReal = $this->resolve($src, 'rename', false);
+        $destReal = $this->resolve($dest, 'rename', false);
 
-        if (! file_exists($srcReal)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, rename '%s'", $src));
+        if (! file_exists($srcReal) && ! is_link($srcReal)) {
+            $this->fail('ENOENT: no such file or directory', 'rename', $src);
         }
 
-        $destDir = dirname($destReal);
-        $this->ensureDirectory($destDir, $dest);
-
-        $result = @rename($srcReal, $destReal);
-
-        if ($result === false) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, rename '%s'", $src));
-        }
+        $this->ensureParent($destReal, 'rename', $dest);
+        $this->host(fn (): bool => rename($srcReal, $destReal), 'rename', $src);
     }
 
     public function resolvePath(string $base, string $path): string
     {
-        if (str_starts_with($path, '/')) {
-            return $this->normalizePath($path);
-        }
-
-        $combined = $base === '/' ? '/'.$path : sprintf('%s/%s', $base, $path);
-
-        return $this->normalizePath($combined);
+        return VirtualPath::resolve($base, $path);
     }
 
-    /**
-     * @return list<string>
-     */
     public function getAllPaths(): array
     {
-        $paths = [];
-        $this->collectPaths($this->rootDir, '/', $paths);
+        $paths = ['/'];
+        $this->collectPaths($this->rootDir, '', $paths);
         sort($paths);
 
         return $paths;
@@ -414,224 +263,244 @@ final readonly class ReadWriteFs implements FileSystemInterface
 
     public function chmod(string $path, int $mode): void
     {
-        $this->validatePath($path, 'chmod');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'chmod', $path);
+        $real = $this->resolve($path, 'chmod');
 
-        if (! file_exists($realPath)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, chmod '%s'", $path));
+        if (! file_exists($real)) {
+            $this->fail('ENOENT: no such file or directory', 'chmod', $path);
         }
 
-        $result = @chmod($realPath, $mode);
-
-        if ($result === false) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, chmod '%s'", $path));
-        }
+        $this->host(fn (): bool => chmod($real, $mode), 'chmod', $path);
     }
 
     public function symlink(string $target, string $linkPath): void
     {
-        $this->validatePath($linkPath, 'symlink');
-        $realLinkPath = $this->toRealPath($linkPath);
-        $this->assertContained($realLinkPath, 'symlink', $linkPath);
+        $real = $this->resolve($linkPath, 'symlink', false);
 
-        if (file_exists($realLinkPath)) {
-            throw new RuntimeException(sprintf("EEXIST: file already exists, symlink '%s'", $linkPath));
+        if (! $this->allowSymlinks) {
+            $this->fail('EPERM: symlinks are denied', 'symlink', $linkPath);
         }
 
-        $result = @symlink($this->normalizeSymlinkTarget($target), $realLinkPath);
-
-        if ($result === false) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, symlink '%s'", $linkPath));
+        if (file_exists($real) || is_link($real)) {
+            $this->fail('EEXIST: file already exists', 'symlink', $linkPath);
         }
+
+        // Absolute targets are virtual paths; store them as host paths so the link also works on disk.
+        if (str_starts_with($target, '/')) {
+            $target = $this->rootDir.$target;
+        }
+
+        $this->diskQuota->charge(0, 1, $linkPath);
+        $this->host(fn (): bool => symlink($target, $real), 'symlink', $linkPath);
     }
 
     public function link(string $existingPath, string $newPath): void
     {
-        $this->validatePath($existingPath, 'link');
-        $this->validatePath($newPath, 'link');
-        $existingReal = $this->toRealPath($existingPath);
-        $newReal = $this->toRealPath($newPath);
-        $this->assertContained($existingReal, 'link', $existingPath);
-        $this->assertContained($newReal, 'link', $newPath);
+        $existingReal = $this->resolve($existingPath, 'link');
+        $newReal = $this->resolve($newPath, 'link', false);
 
-        if (! is_file($existingReal)) {
-            if (! file_exists($existingReal)) {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, link '%s'", $existingPath));
-            }
-
-            throw new RuntimeException(sprintf("EPERM: operation not permitted, link '%s'", $existingPath));
+        if (is_dir($existingReal)) {
+            $this->fail('EPERM: operation not permitted', 'link', $existingPath);
         }
 
-        if (file_exists($newReal)) {
-            throw new RuntimeException(sprintf("EEXIST: file already exists, link '%s'", $newPath));
+        if (! file_exists($existingReal)) {
+            $this->fail('ENOENT: no such file or directory', 'link', $existingPath);
         }
 
-        $result = @link($existingReal, $newReal);
-
-        if ($result === false) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, link '%s'", $existingPath));
+        if (file_exists($newReal) || is_link($newReal)) {
+            $this->fail('EEXIST: file already exists', 'link', $newPath);
         }
+
+        $this->diskQuota->charge(0, 1, $newPath);
+        $this->host(fn (): bool => link($existingReal, $newReal), 'link', $newPath);
     }
 
     public function readlink(string $path): string
     {
-        $this->validatePath($path, 'readlink');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'readlink', $path);
+        $real = $this->resolve($path, 'readlink', false);
 
-        if (! is_link($realPath)) {
-            if (! file_exists($realPath)) {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
-            }
-
-            throw new RuntimeException(sprintf("EINVAL: invalid argument, readlink '%s'", $path));
+        if (! is_link($real)) {
+            $this->fail(file_exists($real) ? 'EINVAL: invalid argument' : 'ENOENT: no such file or directory', 'readlink', $path);
         }
 
-        $target = readlink($realPath);
-
-        if ($target === false) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
-        }
-
-        return $this->virtualizeSymlinkTarget($target);
+        return $this->toVirtual((string) readlink($real));
     }
 
     public function realpath(string $path): string
     {
-        $this->validatePath($path, 'realpath');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'realpath', $path);
+        $real = $this->resolve($path, 'realpath');
 
-        $resolved = realpath($realPath);
-
-        if ($resolved === false) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, realpath '%s'", $path));
+        if (! file_exists($real)) {
+            $this->fail('ENOENT: no such file or directory', 'realpath', $path);
         }
 
-        if (! str_starts_with($resolved, $this->rootDir)) {
-            throw new RuntimeException(sprintf("EACCES: path traversal denied, realpath '%s'", $path));
-        }
-
-        if ($resolved === $this->rootDir) {
-            return '/';
-        }
-
-        return substr($resolved, strlen($this->rootDir));
+        return $this->toVirtual($real);
     }
 
     public function utimes(string $path, int $mtime): void
     {
-        $this->validatePath($path, 'utimes');
-        $realPath = $this->toRealPath($path);
-        $this->assertContained($realPath, 'utimes', $path);
+        $real = $this->resolve($path, 'utimes');
 
-        if (! file_exists($realPath)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, utimes '%s'", $path));
+        if (! file_exists($real)) {
+            $this->fail('ENOENT: no such file or directory', 'utimes', $path);
         }
 
-        $result = @touch($realPath, $mtime, $mtime);
-
-        if ($result === false) {
-            throw new RuntimeException(sprintf("EACCES: permission denied, utimes '%s'", $path));
-        }
+        $this->host(fn (): bool => touch($real, $mtime, $mtime), 'utimes', $path);
     }
 
-    private function normalizePath(string $path): string
+    private function put(string $path, string $content, int $flags): void
     {
-        if ($path === '' || $path === '/') {
-            return '/';
+        $real = $this->resolve($path, 'open');
+
+        if (is_dir($real)) {
+            $this->fail('EISDIR: illegal operation on a directory', 'open', $path);
         }
 
-        $normalized = $path;
-
-        if (str_ends_with($normalized, '/') && $normalized !== '/') {
-            $normalized = rtrim($normalized, '/');
-        }
-
-        if (! str_starts_with($normalized, '/')) {
-            $normalized = '/'.$normalized;
-        }
-
-        $parts = array_filter(explode('/', $normalized), fn (string $p): bool => $p !== '' && $p !== '.');
-        $resolved = [];
-
-        foreach ($parts as $part) {
-            if ($part === '..') {
-                array_pop($resolved);
-            } else {
-                $resolved[] = $part;
-            }
-        }
-
-        return '/'.implode('/', $resolved);
+        clearstatcache(true, $real);
+        $replaced = ($flags & FILE_APPEND) === 0 && is_file($real) ? (int) filesize($real) : 0;
+        $this->diskQuota->charge(strlen($content) - $replaced, $this->missing($real), $path);
+        $this->ensureParent($real, 'open', $path);
+        $this->host(fn (): int|false => file_put_contents($real, $content, $flags), 'open', $path);
     }
 
-    private function toRealPath(string $virtualPath): string
+    /** Entries a write to this host path would create: the path itself and any missing parent directories. */
+    private function missing(string $real): int
     {
-        $normalized = $this->normalizePath($virtualPath);
+        $count = 0;
 
-        if ($normalized === '/') {
-            return $this->rootDir;
+        while (! file_exists($real) && ! is_link($real)) {
+            $count++;
+            $real = dirname($real);
         }
 
-        return $this->rootDir.$normalized;
+        return $count;
     }
 
-    private function assertContained(string $realPath, string $operation, string $userPath): void
+    private function statPath(string $path, string $operation, bool $followLast): FsStat
     {
-        if (! $this->isContained($realPath)) {
-            throw new RuntimeException(sprintf("EACCES: path traversal denied, %s '%s'", $operation, $userPath));
+        // Resolved paths contain no symlinks except an unfollowed last component, so lstat() is right for both.
+        $real = $this->resolve($path, $operation, $followLast);
+        clearstatcache(true, $real);
+        $status = file_exists($real) || is_link($real) ? lstat($real) : false;
+
+        if ($status === false) {
+            $this->fail('ENOENT: no such file or directory', $operation, $path);
+        }
+
+        $type = $status['mode'] & 0o170000;
+
+        return new FsStat(
+            isFile: $type === 0o100000,
+            isDirectory: $type === 0o040000,
+            isSymbolicLink: $type === 0o120000,
+            mode: $type === 0o120000 ? 0o777 : $status['mode'] & 0o7777,
+            size: $status['size'],
+            mtime: $status['mtime'],
+            ino: $status['ino'],
+            nlink: $status['nlink'],
+        );
+    }
+
+    private function ensureParent(string $real, string $operation, string $path): void
+    {
+        $dir = dirname($real);
+
+        if (! is_dir($dir)) {
+            $this->host(fn (): bool => mkdir($dir, 0755, true), $operation, $path, 'ENOENT: no such file or directory');
         }
     }
 
-    private function isContained(string $realPath): bool
-    {
-        return $realPath === $this->rootDir || str_starts_with($realPath, $this->rootDir.'/');
-    }
-
-    private function validatePath(string $path, string $operation): void
+    /** Map a virtual path to a host path inside the root, following symlinks (the last only when $followLast); escapes are denied. */
+    private function resolve(string $path, string $operation, bool $followLast = true): string
     {
         if (str_contains($path, "\0")) {
-            throw new RuntimeException(sprintf("ENOENT: path contains null byte, %s '%s'", $operation, $path));
+            $this->fail('ENOENT: path contains null byte', $operation, $path);
         }
-    }
 
-    private function ensureDirectory(string $realDir, string $userPath): void
-    {
-        if (! is_dir($realDir)) {
-            $result = @mkdir($realDir, 0755, true);
+        $pending = explode('/', VirtualPath::normalize($path));
+        $real = $this->rootDir;
+        $hops = 0;
 
-            if ($result === false) {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, write '%s'", $userPath));
+        while ($pending !== []) {
+            $part = array_shift($pending);
+
+            if ($part === '') {
+                continue;
             }
+
+            if ($part === '.') {
+                continue;
+            }
+
+            if ($part === '..') {
+                if ($real === $this->rootDir) {
+                    $this->fail('EACCES: path traversal denied', $operation, $path);
+                }
+
+                $real = dirname($real);
+
+                continue;
+            }
+
+            $next = $real.'/'.$part;
+
+            if (is_link($next) && ! $this->allowSymlinks) {
+                $this->fail('EPERM: symlinks are denied', $operation, $path);
+            }
+
+            if ($pending !== [] && ! is_link($next) && file_exists($next) && ! is_dir($next)) {
+                $this->fail('ENOTDIR: not a directory', $operation, $path);
+            }
+
+            if (! is_link($next) || (! $followLast && $pending === [])) {
+                $real = $next;
+
+                continue;
+            }
+
+            if (++$hops > VirtualPath::MAX_SYMLINKS) {
+                $this->fail('ELOOP: too many levels of symbolic links', $operation, $path);
+            }
+
+            $target = (string) readlink($next);
+
+            if (str_starts_with($target, '/')) {
+                $target = $this->canonical($target);
+
+                if (! $this->isInside($target)) {
+                    $this->fail('EACCES: path traversal denied', $operation, $path);
+                }
+
+                $real = $this->rootDir;
+                $target = substr($target, strlen($this->rootDir));
+            }
+
+            $pending = [...explode('/', $target), ...$pending];
         }
+
+        return $real;
     }
 
-    private function normalizeSymlinkTarget(string $target): string
+    private function isInside(string $hostPath): bool
     {
-        if (! str_starts_with($target, '/')) {
-            return $target;
-        }
-
-        $this->validatePath($target, 'symlink');
-        $realTarget = $this->toRealPath($target);
-        $this->assertContained($realTarget, 'symlink', $target);
-
-        return $realTarget;
+        return $hostPath === $this->rootDir || str_starts_with($hostPath, $this->rootDir.'/');
     }
 
-    private function virtualizeSymlinkTarget(string $target): string
+    /**
+     * Absolute host paths may reach the root through an alias (macOS /var -> /private/var).
+     */
+    private function canonical(string $hostPath): string
     {
-        if ($target === $this->rootDir) {
-            return '/';
-        }
+        return $this->isInside($hostPath) ? $hostPath : (string) realpath($hostPath);
+    }
 
-        if (str_starts_with($target, $this->rootDir.'/')) {
-            return substr($target, strlen($this->rootDir));
-        }
+    /**
+     * Turn a host path (or symlink target) inside the root into its virtual path; anything else is returned as is.
+     */
+    private function toVirtual(string $hostPath): string
+    {
+        $canonical = str_starts_with($hostPath, '/') ? $this->canonical($hostPath) : $hostPath;
 
-        return $target;
+        return $this->isInside($canonical) ? substr($canonical, strlen($this->rootDir)) ?: '/' : $hostPath;
     }
 
     /**
@@ -639,42 +508,44 @@ final readonly class ReadWriteFs implements FileSystemInterface
      */
     private function collectPaths(string $realDir, string $virtualDir, array &$paths): void
     {
-        $paths[] = $virtualDir;
+        foreach (array_diff(@scandir($realDir) ?: [], ['.', '..']) as $name) {
+            $type = @filetype($realDir.'/'.$name);
 
-        if (! is_dir($realDir)) {
-            return;
-        }
-
-        $names = @scandir($realDir);
-
-        if ($names === false) {
-            return;
-        }
-
-        foreach ($names as $name) {
-            if ($name === '.') {
+            if ($type === 'link' && ! $this->allowSymlinks) {
                 continue;
             }
 
-            if ($name === '..') {
-                continue;
-            }
+            $paths[] = $virtualDir.'/'.$name;
 
-            $childReal = $realDir.DIRECTORY_SEPARATOR.$name;
-            $childVirtual = $virtualDir === '/' ? '/'.$name : sprintf('%s/%s', $virtualDir, $name);
-            $paths[] = $childVirtual;
-
-            $childStatus = @lstat($childReal);
-
-            if ($childStatus !== false) {
-                $childType = UnixFileMode::type($childStatus['mode']);
-                $isDir = $childType === UnixFileType::Directory;
-                $isLink = $childType === UnixFileType::SymbolicLink;
-
-                if ($isDir && ! $isLink) {
-                    $this->collectPaths($childReal, $childVirtual, $paths);
-                }
+            if ($type === 'dir') {
+                $this->collectPaths($realDir.'/'.$name, $virtualDir.'/'.$name, $paths);
             }
         }
+    }
+
+    /**
+     * Run a host call that signals failure with false (and a PHP warning) and turn that into an errno.
+     *
+     * @template T
+     *
+     * @param  callable(): (T|false)  $call
+     * @return T
+     */
+    private function host(callable $call, string $operation, string $path, string $error = 'EACCES: permission denied'): mixed
+    {
+        set_error_handler(fn (): bool => true);
+
+        try {
+            $result = $call();
+        } finally {
+            restore_error_handler();
+        }
+
+        return $result !== false ? $result : $this->fail($error, $operation, $path);
+    }
+
+    private function fail(string $error, string $operation, string $path): never
+    {
+        throw new RuntimeException(sprintf("%s, %s '%s'", $error, $operation, $path));
     }
 }

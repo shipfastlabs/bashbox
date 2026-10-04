@@ -7,10 +7,27 @@ namespace BashBox\Commands;
 use BashBox\ExecResult;
 use BashBox\Network\Exceptions\NetworkAccessDeniedException;
 use BashBox\Network\Exceptions\ResponseTooLargeException;
+use BashBox\Network\SecureHttpClient;
 use RuntimeException;
 
 final class Curl_ extends AbstractCommand
 {
+    private const array VALUE_OPTIONS = [
+        '-X' => 'request', '--request' => 'request',
+        '-H' => 'header', '--header' => 'header',
+        '-d' => 'data', '--data' => 'data', '--data-raw' => 'data',
+        '-o' => 'output', '--output' => 'output',
+    ];
+
+    private const array FLAG_OPTIONS = [
+        '-s' => 'silent', '--silent' => 'silent',
+        '-S' => 'show-error', '--show-error' => 'show-error',
+        '-i' => 'include', '--include' => 'include',
+        '-I' => 'head', '--head' => 'head',
+        '-L' => 'location', '--location' => 'location',
+        '-f' => 'fail', '--fail' => 'fail',
+    ];
+
     public function getName(): string
     {
         return 'curl';
@@ -18,41 +35,48 @@ final class Curl_ extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        if (! $commandContext->fetch instanceof \BashBox\Network\SecureHttpClient) {
+        if (! $commandContext->fetch instanceof SecureHttpClient) {
             return $this->failure("curl: network is not configured\n");
         }
 
-        $parsed = $this->parseArgs($args);
+        $options = $this->parseArgs($args);
 
-        if ($parsed === null) {
-            return $this->failure("curl: no URL specified\n");
+        if (is_string($options)) {
+            return $this->failure($options, 2);
         }
 
-        $method = strtoupper($parsed['method']);
-        $url = $parsed['url'];
-        $headers = $parsed['headers'];
-        $body = $parsed['body'];
-        $showHeaders = $parsed['showHeaders'];
-        $outputFile = $parsed['output'];
-        $headOnly = $parsed['headOnly'];
-
-        if ($headOnly) {
-            $method = 'HEAD';
-        }
+        $silent = isset($options['flags']['silent']) && ! isset($options['flags']['show-error']);
+        $headOnly = isset($options['flags']['head']);
+        $data = $options['data'];
+        $method = $options['request'] ?? match (true) {
+            $headOnly => 'HEAD',
+            $data !== null => 'POST',
+            default => 'GET',
+        };
 
         try {
-            $response = $commandContext->fetch->request($method, $url, $headers, $body);
+            $response = $commandContext->fetch->request(
+                $method,
+                $options['url'],
+                $options['headers'],
+                $data ?? '',
+                isset($options['flags']['location']),
+            );
         } catch (NetworkAccessDeniedException $e) {
-            return $this->failure(sprintf("curl: (6) Access denied: %s\n", $e->getMessage()));
+            return $this->error(6, 'Access denied: '.$e->getMessage(), $silent);
         } catch (ResponseTooLargeException $e) {
-            return $this->failure(sprintf("curl: (63) %s\n", $e->getMessage()));
+            return $this->error(63, $e->getMessage(), $silent);
         } catch (RuntimeException $e) {
-            return $this->failure(sprintf("curl: (7) %s\n", $e->getMessage()));
+            return $this->error((int) $e->getCode(), $e->getMessage(), $silent);
+        }
+
+        if (isset($options['flags']['fail']) && $response['statusCode'] >= 400) {
+            return $this->error(22, 'The requested URL returned error: '.$response['statusCode'], $silent);
         }
 
         $output = '';
 
-        if ($showHeaders || $headOnly) {
+        if (isset($options['flags']['include']) || $headOnly) {
             $output .= sprintf("HTTP/1.1 %d\r\n", $response['statusCode']);
 
             foreach ($response['headers'] as $name => $value) {
@@ -62,13 +86,14 @@ final class Curl_ extends AbstractCommand
             $output .= "\r\n";
         }
 
-        if (! $headOnly) {
-            $output .= $response['body'];
-        }
+        $output .= $response['body'];
 
-        if ($outputFile !== null) {
-            $path = $this->resolvePath($commandContext, $outputFile);
-            $commandContext->fs->writeFile($path, $output);
+        if ($options['output'] !== null) {
+            try {
+                $this->writeOutputFile($commandContext, $options['output'], $output);
+            } catch (RuntimeException) {
+                return $this->error(23, 'Failure writing output to destination', $silent);
+            }
 
             return $this->success();
         }
@@ -76,119 +101,103 @@ final class Curl_ extends AbstractCommand
         return $this->success($output);
     }
 
-    /**
-     * @param  list<string>  $args
-     * @return array{method: string, url: string, headers: array<string, string>, body: string, silent: bool, showHeaders: bool, output: string|null, headOnly: bool}|null
-     */
-    private function parseArgs(array $args): ?array
+    private function error(int $code, string $message, bool $silent): ExecResult
     {
-        $method = 'GET';
+        return $this->failure($silent ? '' : sprintf("curl: (%d) %s\n", $code, $message), $code);
+    }
+
+    /**
+     * Returns the parsed options, or an error message for invalid usage.
+     *
+     * @param  list<string>  $args
+     * @return array{url: string, request: ?string, headers: array<string, string>, data: ?string, output: ?string, flags: array<string, true>}|string
+     */
+    private function parseArgs(array $args): array|string
+    {
         $url = null;
+        $request = null;
         $headers = [];
-        $body = '';
-        $silent = false;
-        $showHeaders = false;
+        $data = null;
         $output = null;
-        $headOnly = false;
+        $flags = [];
 
-        $i = 0;
+        // Expand bundled short options ("-fsSL", "-XPOST") into separate arguments.
+        $expanded = [];
 
-        while ($i < count($args)) {
-            $arg = $args[$i];
+        foreach ($args as $arg) {
+            if (strlen($arg) <= 2 || $arg[0] !== '-' || $arg[1] === '-') {
+                $expanded[] = $arg;
 
-            switch ($arg) {
-                case '-X':
-                case '--request':
-                    $i++;
-                    $method = $args[$i] ?? 'GET';
+                continue;
+            }
+
+            for ($j = 1; $j < strlen($arg); $j++) {
+                $expanded[] = '-'.$arg[$j];
+
+                if (isset(self::VALUE_OPTIONS['-'.$arg[$j]]) && $j + 1 < strlen($arg)) {
+                    $expanded[] = substr($arg, $j + 1);
+
+                    break;
+                }
+            }
+        }
+
+        $counter = count($expanded);
+
+        for ($i = 0; $i < $counter; $i++) {
+            $arg = $expanded[$i];
+
+            if (isset(self::FLAG_OPTIONS[$arg])) {
+                $flags[self::FLAG_OPTIONS[$arg]] = true;
+
+                continue;
+            }
+
+            if (! isset(self::VALUE_OPTIONS[$arg])) {
+                if (str_starts_with($arg, '-')) {
+                    return sprintf("curl: option %s: is unknown\n", $arg);
+                }
+
+                $url ??= $arg;
+
+                continue;
+            }
+
+            $value = $expanded[++$i] ?? null;
+
+            if ($value === null) {
+                return sprintf("curl: option %s: requires parameter\n", $arg);
+            }
+
+            switch (self::VALUE_OPTIONS[$arg]) {
+                case 'request':
+                    $request = $value;
 
                     break;
 
-                case '-H':
-                case '--header':
-                    $i++;
-                    $headerLine = $args[$i] ?? '';
-                    $colonPos = strpos($headerLine, ':');
-
-                    if ($colonPos !== false) {
-                        $name = trim(substr($headerLine, 0, $colonPos));
-                        $value = trim(substr($headerLine, $colonPos + 1));
-                        $headers[$name] = $value;
+                case 'header':
+                    if (str_contains($value, ':')) {
+                        [$name, $headerValue] = explode(':', $value, 2);
+                        $headers[trim($name)] = trim($headerValue);
                     }
 
                     break;
 
-                case '-d':
-                case '--data':
-                case '--data-raw':
-                    $i++;
-                    $body = $args[$i] ?? '';
+                case 'data':
+                    // Like curl, repeated -d values are joined with "&".
+                    $data = $data === null ? $value : $data.'&'.$value;
 
-                    if ($method === 'GET') {
-                        $method = 'POST';
-                    }
-
-                    break;
-
-                case '-s':
-                case '--silent':
-                    $silent = true;
-
-                    break;
-
-                case '-i':
-                case '--include':
-                    $showHeaders = true;
-
-                    break;
-
-                case '-I':
-                case '--head':
-                    $headOnly = true;
-
-                    break;
-
-                case '-o':
-                case '--output':
-                    $i++;
-                    $output = $args[$i] ?? null;
-
-                    break;
-
-                case '-L':
-                case '--location':
-                    // Redirects are handled by SecureHttpClient
-                    break;
-
-                case '-f':
-                case '--fail':
-                    // Fail silently handled by checking status code
                     break;
 
                 default:
-                    if (! str_starts_with($arg, '-') && $url === null) {
-                        $url = $arg;
-                    }
-
-                    break;
+                    $output = $value;
             }
-
-            $i++;
         }
 
         if ($url === null) {
-            return null;
+            return "curl: no URL specified\n";
         }
 
-        return [
-            'method' => $method,
-            'url' => $url,
-            'headers' => $headers,
-            'body' => $body,
-            'silent' => $silent,
-            'showHeaders' => $showHeaders,
-            'output' => $output,
-            'headOnly' => $headOnly,
-        ];
+        return ['url' => $url, 'request' => $request, 'headers' => $headers, 'data' => $data, 'output' => $output, 'flags' => $flags];
     }
 }

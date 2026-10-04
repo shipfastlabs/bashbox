@@ -15,32 +15,16 @@ final class Printenv extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
+        $env = $commandContext->env;
+
         if ($args === []) {
-            // Print all environment variables
-            $output = '';
-
-            foreach ($commandContext->env as $key => $value) {
-                $output .= sprintf('%s=%s%s', $key, $value, PHP_EOL);
-            }
-
-            return $this->success($output);
+            return (new Env_)->execute([], $commandContext);
         }
 
-        // Print specific variable(s)
-        $output = '';
-        $found = false;
+        $found = array_values(array_filter($args, fn (string $name): bool => array_key_exists($name, $env)));
+        $output = implode('', array_map(fn (string $name): string => $env[$name]."\n", $found));
 
-        foreach ($args as $arg) {
-            if (array_key_exists($arg, $commandContext->env)) {
-                $output .= $commandContext->env[$arg]."\n";
-                $found = true;
-            }
-        }
-
-        if (! $found) {
-            return $this->failure('', exitCode: 1);
-        }
-
-        return $this->success($output);
+        // Exit status is 1 if any requested variable is unset
+        return count($found) === count($args) ? $this->success($output) : $this->failure('', 1, $output);
     }
 }

@@ -9,6 +9,7 @@ use BashBox\Ast\ArithmeticExpressionNode;
 use BashBox\Ast\AssignmentNode;
 use BashBox\Ast\CaseItemNode;
 use BashBox\Ast\CaseNode;
+use BashBox\Ast\CommandNode;
 use BashBox\Ast\CompoundCommandNode;
 use BashBox\Ast\Conditional\CondAndNode;
 use BashBox\Ast\Conditional\CondBinaryNode;
@@ -36,150 +37,152 @@ use BashBox\Ast\SubshellNode;
 use BashBox\Ast\UntilNode;
 use BashBox\Ast\WhileNode;
 use BashBox\Ast\WordNode;
+use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\Exceptions\ParseException;
+use BashBox\Limits;
 
 final class Parser
 {
-    /** @var list<Token> */
-    private array $tokens = [];
+    /** Operators that a number (`2>`) or {name} (`{fd}>`) can prefix. */
+    private const array FD_OPERATORS = [
+        TokenType::LESS,
+        TokenType::GREAT,
+        TokenType::DLESS,
+        TokenType::DGREAT,
+        TokenType::LESSAND,
+        TokenType::GREATAND,
+        TokenType::LESSGREAT,
+        TokenType::DLESSDASH,
+        TokenType::CLOBBER,
+        TokenType::TLESS,
+    ];
+
+    private Lexer $lexer;
+
+    private string $input = '';
 
     private int $pos = 0;
 
-    private int $parseIterations = 0;
-
     private int $parseDepth = 0;
 
-    /** @var list<array{redirect: RedirectionNode, delimiter: string, stripTabs: bool, quoted: bool}> */
-    private array $pendingHeredocs = [];
+    /**
+     * The compound commands being parsed, innermost last: the word that opened each and its line.
+     *
+     * @var list<array{string, int}>
+     */
+    private array $open = [];
 
-    public function parse(string $input): ScriptNode
+    public function __construct(private readonly Limits $limits = new Limits) {}
+
+    /**
+     * $line numbers the first line, for source text that sits further down a script (eval, $(...)).
+     * A $substitution is the text of $(...) or <(...), parsed up to its closing `)` as bash does.
+     */
+    public function parse(string $input, int $line = 1, bool $substitution = false): ScriptNode
     {
-        $lexer = new Lexer($input);
-        $this->tokens = $lexer->tokenize();
+        $this->input = $substitution ? $input.')' : $input;
+        $this->lexer = new Lexer($this->input, $line, $this->limits);
         $this->pos = 0;
-        $this->pendingHeredocs = [];
-        $this->parseIterations = 0;
         $this->parseDepth = 0;
+        $this->open = [];
 
-        return $this->parseScript();
+        if (! $substitution) {
+            return new ScriptNode($this->parseStatements());
+        }
+
+        $statements = $this->parseStatements(TokenType::RPAREN);
+        $this->expect(TokenType::RPAREN);
+
+        return new ScriptNode($statements);
+    }
+
+    /** Just past the `)` of the command substitution whose list starts at $start in $input, as bash finds it: where the list ends. */
+    public static function substitutionEnd(string $input, int $start, Limits $limits, int $depth): int
+    {
+        $parser = new self($limits);
+        $parser->input = $input;
+        $parser->lexer = new Lexer($input, 1, $limits, $start, $depth);
+        $parser->parseStatements(TokenType::RPAREN);
+
+        return $parser->check(TokenType::RPAREN) ? $parser->current()->end : throw new ParseException("unexpected EOF while looking for matching `)'");
     }
 
     private function current(): Token
     {
-        return $this->tokens[$this->pos] ?? $this->tokens[count($this->tokens) - 1];
+        return $this->lexer->token($this->pos);
     }
 
-    private function peek(int $offset = 0): Token
+    private function peek(int $offset): Token
     {
-        return $this->tokens[$this->pos + $offset] ?? $this->tokens[count($this->tokens) - 1];
+        return $this->lexer->token($this->pos + $offset);
     }
 
     private function advance(): Token
     {
         $token = $this->current();
-
-        if ($this->pos < count($this->tokens) - 1) {
-            $this->pos++;
-        }
+        $this->pos += (int) ($token->type !== TokenType::EOF);
 
         return $token;
     }
 
     private function check(TokenType ...$types): bool
     {
-        $current = $this->current()->type;
-
-        return in_array($current, $types, true);
+        return in_array($this->current()->type, $types, true);
     }
 
-    private function expect(TokenType $tokenType, ?string $message = null): Token
+    private function expect(TokenType $tokenType): Token
     {
-        if ($this->check($tokenType)) {
-            return $this->advance();
+        if (! $this->check($tokenType)) {
+            $this->unexpectedToken();
         }
 
-        $token = $this->current();
-
-        throw new ParseException($message ?? sprintf('Expected %s, got %s', $tokenType->value, $token->type->value));
+        return $this->advance();
     }
 
-    private function error(string $message): never
+    /** Consume the word that opens a compound command, noting it for "unexpected end of file". */
+    private function open(TokenType $tokenType): int
     {
-        throw new ParseException($message);
+        $token = $this->expect($tokenType);
+        $this->open[] = [$token->value, $token->line];
+
+        return $token->line;
+    }
+
+    private function close(TokenType $tokenType): void
+    {
+        $this->expect($tokenType);
+        array_pop($this->open);
+    }
+
+    /** The current token as bash names it; a comment runs to the newline that bash reports. */
+    private function tokenText(): string
+    {
+        return $this->check(TokenType::NEWLINE, TokenType::COMMENT) ? 'newline' : $this->current()->value;
+    }
+
+    private function unexpectedToken(): never
+    {
+        if ($this->check(TokenType::EOF)) {
+            $open = end($this->open);
+
+            throw new ParseException('syntax error: unexpected end of file'.($open === false ? '' : sprintf(" from `%s' command on line %d", ...$open)));
+        }
+
+        throw new ParseException(sprintf("syntax error near unexpected token `%s'", $this->tokenText()));
     }
 
     private function skipNewlines(): void
     {
         while ($this->check(TokenType::NEWLINE, TokenType::COMMENT)) {
-            if ($this->check(TokenType::NEWLINE)) {
-                $this->advance();
-                $this->processHeredocs();
-            } else {
-                $this->advance();
-            }
-        }
-    }
-
-    private function skipSeparators(): void
-    {
-        while (true) {
-            if ($this->check(TokenType::NEWLINE)) {
-                $this->advance();
-                $this->processHeredocs();
-
-                continue;
-            }
-
-            if ($this->check(TokenType::SEMICOLON, TokenType::COMMENT)) {
-                $this->advance();
-
-                continue;
-            }
-
-            break;
-        }
-    }
-
-    private function processHeredocs(): void
-    {
-        foreach ($this->pendingHeredocs as $pendingHeredoc) {
-            if ($this->check(TokenType::HEREDOC_CONTENT)) {
-                $content = $this->advance();
-                $contentWord = new WordNode([new LiteralPart($content->value)]);
-
-                $pendingHeredoc['redirect']->target = new HereDocNode(
-                    delimiter: $pendingHeredoc['delimiter'],
-                    content: $contentWord,
-                    stripTabs: $pendingHeredoc['stripTabs'],
-                    quoted: $pendingHeredoc['quoted'],
-                );
-            }
-        }
-
-        $this->pendingHeredocs = [];
-    }
-
-    private function checkIteration(): void
-    {
-        $this->parseIterations++;
-
-        if ($this->parseIterations > ParserLimits::MAX_PARSE_ITERATIONS) {
-            $this->error('Maximum parse iterations exceeded');
+            $this->advance();
         }
     }
 
     private function enterDepth(): void
     {
-        $this->parseDepth++;
-
-        if ($this->parseDepth > ParserLimits::MAX_PARSER_DEPTH) {
-            $this->error('Maximum parser nesting depth exceeded');
+        if (++$this->parseDepth > $this->limits->maxAstDepth) {
+            throw new ExecutionLimitException(sprintf('Nesting depth limit exceeded (%d)', $this->limits->maxAstDepth));
         }
-    }
-
-    private function exitDepth(): void
-    {
-        $this->parseDepth--;
     }
 
     private function isCommandStart(): bool
@@ -189,16 +192,6 @@ final class Parser
             TokenType::NAME,
             TokenType::NUMBER,
             TokenType::ASSIGNMENT_WORD,
-            TokenType::IF,
-            TokenType::FOR,
-            TokenType::WHILE,
-            TokenType::UNTIL,
-            TokenType::CASE,
-            TokenType::LPAREN,
-            TokenType::LBRACE,
-            TokenType::DPAREN_START,
-            TokenType::DBRACK_START,
-            TokenType::FUNCTION,
             TokenType::BANG,
             TokenType::TIME,
             TokenType::IN,
@@ -206,146 +199,103 @@ final class Parser
             return true;
         }
 
-        return $this->isRedirectionToken();
+        return $this->isRedirectionStart();
     }
 
-    private function isRedirectionToken(): bool
-    {
-        return $this->check(
-            TokenType::LESS,
-            TokenType::GREAT,
-            TokenType::DLESS,
-            TokenType::DGREAT,
-            TokenType::LESSAND,
-            TokenType::GREATAND,
-            TokenType::LESSGREAT,
-            TokenType::DLESSDASH,
-            TokenType::CLOBBER,
-            TokenType::TLESS,
-            TokenType::AND_GREAT,
-            TokenType::AND_DGREAT,
-        );
-    }
-
-    private function isStatementEnd(): bool
-    {
-        return $this->check(
-            TokenType::EOF,
-            TokenType::NEWLINE,
-            TokenType::SEMICOLON,
-            TokenType::AMP,
-            TokenType::AND_AND,
-            TokenType::OR_OR,
-            TokenType::RPAREN,
-            TokenType::RBRACE,
-            TokenType::DSEMI,
-            TokenType::SEMI_AND,
-            TokenType::SEMI_SEMI_AND,
-        );
-    }
-
-    // =========================================================================
-    // SCRIPT PARSING
-    // =========================================================================
-
-    private function parseScript(): ScriptNode
+    /**
+     * Statements up to EOF or one of $terminators, each ended by `;`, `&` or a newline.
+     *
+     * @return list<StatementNode>
+     */
+    private function parseStatements(TokenType ...$terminators): array
     {
         $statements = [];
         $this->skipNewlines();
 
-        while (! $this->check(TokenType::EOF)) {
-            $this->checkIteration();
-            $posBefore = $this->pos;
+        while (! $this->check(TokenType::EOF, ...$terminators)) {
+            $statements[] = $statement = $this->parseStatement();
 
-            $stmt = $this->parseStatement();
-
-            if ($stmt instanceof \BashBox\Ast\StatementNode) {
-                $statements[] = $stmt;
+            if (! $statement->background && ! $this->check(TokenType::NEWLINE, TokenType::COMMENT, ...$terminators)) {
+                $this->expect(TokenType::SEMICOLON);
             }
 
-            $this->skipSeparators();
-
-            if ($this->pos === $posBefore && ! $this->check(TokenType::EOF)) {
-                $this->advance();
-            }
+            $this->skipNewlines();
         }
 
-        return new ScriptNode($statements);
+        return $statements;
     }
 
-    // =========================================================================
-    // STATEMENT PARSING
-    // =========================================================================
-
-    private function parseStatement(): ?StatementNode
+    /**
+     * A compound command's list, which can't be empty.
+     *
+     * @return list<StatementNode>
+     */
+    private function parseCompoundList(TokenType ...$terminators): array
     {
-        $this->skipNewlines();
+        $statements = $this->parseStatements(...$terminators);
 
-        if (! $this->isCommandStart()) {
-            return null;
+        if ($statements === []) {
+            $this->unexpectedToken();
         }
 
-        $pipelines = [];
-        $operators = [];
-        $background = false;
+        return $statements;
+    }
 
-        $pipelines[] = $this->parsePipeline();
+    private function parseStatement(): StatementNode
+    {
+        $line = $this->current()->line;
+        $pipelines = [$this->parsePipeline()];
+        $operators = [];
 
         while ($this->check(TokenType::AND_AND, TokenType::OR_OR)) {
-            $op = $this->advance();
-            $operators[] = $op->type === TokenType::AND_AND ? '&&' : '||';
+            $operators[] = $this->advance()->value;
             $this->skipNewlines();
             $pipelines[] = $this->parsePipeline();
         }
 
-        if ($this->check(TokenType::AMP)) {
+        $background = $this->check(TokenType::AMP);
+
+        if ($background) {
             $this->advance();
-            $background = true;
         }
+
+        $last = $this->lexer->token($this->pos - 1);
 
         return new StatementNode(
             pipelines: $pipelines,
             operators: $operators,
             background: $background,
-            line: ($cmd = $pipelines[0]->commands[0]) instanceof SimpleCommandNode || $cmd instanceof FunctionDefNode ? $cmd->line : null,
+            line: $line,
+            endLine: $last->line + substr_count($this->input, "\n", $last->start, $last->end - $last->start),
         );
     }
 
-    // =========================================================================
-    // PIPELINE PARSING
-    // =========================================================================
-
     private function parsePipeline(): PipelineNode
     {
-        $this->checkIteration();
-
-        $negated = false;
-        $timed = false;
+        $timed = $this->check(TokenType::TIME);
         $timePosix = false;
 
-        if ($this->check(TokenType::TIME)) {
+        if ($timed) {
             $this->advance();
-            $timed = true;
+            $timePosix = $this->current()->value === '-p';
 
-            if ($this->check(TokenType::WORD) && $this->current()->value === '-p') {
+            if ($timePosix) {
                 $this->advance();
-                $timePosix = true;
             }
         }
 
-        if ($this->check(TokenType::BANG)) {
+        $negated = $this->check(TokenType::BANG);
+
+        if ($negated) {
             $this->advance();
-            $negated = true;
         }
 
-        $commands = [];
+        // Bash runs a lone `time` or `!` on an empty command.
+        $commands = [($timed || $negated) && ! $this->isCommandStart() && ! $this->compoundStart() instanceof \BashBox\Parser\TokenType ? new SimpleCommandNode : $this->parseCommand()];
         $pipeStderr = [];
 
-        $commands[] = $this->parseCommand();
-
         while ($this->check(TokenType::PIPE, TokenType::PIPE_AMP)) {
-            $pipeToken = $this->advance();
-            $pipeStderr[] = $pipeToken->type === TokenType::PIPE_AMP;
+            $pipeStderr[] = $this->advance()->type === TokenType::PIPE_AMP;
             $this->skipNewlines();
             $commands[] = $this->parseCommand();
         }
@@ -359,122 +309,69 @@ final class Parser
         );
     }
 
-    // =========================================================================
-    // COMMAND PARSING
-    // =========================================================================
-
-    private function parseCommand(): SimpleCommandNode|CompoundCommandNode|FunctionDefNode
+    private function parseCommand(): CommandNode
     {
-        $this->checkIteration();
         $this->enterDepth();
+        $command = $this->parseCompoundCommand() ?? match (true) {
+            $this->check(TokenType::FUNCTION),
+            $this->check(TokenType::NAME, TokenType::WORD) && $this->peek(1)->type === TokenType::LPAREN => $this->parseFunctionDef(),
+            $this->isCommandStart() => $this->parseSimpleCommand(),
+            default => $this->unexpectedToken(),
+        };
+        $this->parseDepth--;
 
-        try {
-            // Check for compound commands first
-            if ($this->check(TokenType::IF)) {
-                return $this->parseIf();
-            }
-
-            if ($this->check(TokenType::FOR)) {
-                return $this->parseFor();
-            }
-
-            if ($this->check(TokenType::WHILE)) {
-                return $this->parseWhile();
-            }
-
-            if ($this->check(TokenType::UNTIL)) {
-                return $this->parseUntil();
-            }
-
-            if ($this->check(TokenType::CASE)) {
-                return $this->parseCase();
-            }
-
-            if ($this->check(TokenType::LPAREN)) {
-                return $this->parseSubshell();
-            }
-
-            if ($this->check(TokenType::LBRACE)) {
-                return $this->parseGroup();
-            }
-
-            if ($this->check(TokenType::DPAREN_START)) {
-                return $this->parseArithmeticCommand();
-            }
-
-            if ($this->check(TokenType::DBRACK_START)) {
-                return $this->parseConditionalCommand();
-            }
-
-            if ($this->check(TokenType::FUNCTION)) {
-                return $this->parseFunctionDef();
-            }
-
-            // Check for function definition: name () { ... }
-            if (
-                ($this->check(TokenType::NAME, TokenType::WORD))
-                && $this->peek(1)->type === TokenType::LPAREN
-                && $this->peek(2)->type === TokenType::RPAREN
-            ) {
-                return $this->parseFunctionDef();
-            }
-
-            return $this->parseSimpleCommand();
-        } finally {
-            $this->exitDepth();
-        }
+        return $command;
     }
 
-    // =========================================================================
-    // SIMPLE COMMAND
-    // =========================================================================
+    private function compoundStart(): ?TokenType
+    {
+        return $this->check(TokenType::IF, TokenType::FOR, TokenType::WHILE, TokenType::UNTIL, TokenType::CASE, TokenType::LPAREN, TokenType::LBRACE, TokenType::DPAREN_START, TokenType::DBRACK_START)
+            ? $this->current()->type
+            : null;
+    }
+
+    private function parseCompoundCommand(): ?CompoundCommandNode
+    {
+        return match ($this->compoundStart()) {
+            TokenType::IF => $this->parseIf(),
+            TokenType::FOR => $this->parseFor(),
+            TokenType::WHILE, TokenType::UNTIL => $this->parseWhile(),
+            TokenType::CASE => $this->parseCase(),
+            TokenType::LPAREN => $this->parseSubshell(),
+            TokenType::LBRACE => $this->parseGroup(),
+            TokenType::DPAREN_START => $this->parseArithmeticCommand(),
+            TokenType::DBRACK_START => $this->parseConditionalCommand(),
+            default => null,
+        };
+    }
 
     private function parseSimpleCommand(): SimpleCommandNode
     {
         $assignments = [];
         $args = [];
         $redirections = [];
+        $arrayArgs = [];
         $name = null;
         $line = $this->current()->line;
 
-        // Parse prefix assignments
         while ($this->check(TokenType::ASSIGNMENT_WORD)) {
             $assignments[] = $this->parseAssignment();
         }
 
-        // Parse redirections before command name
-        while ($this->isRedirectionToken()) {
-            $redirections[] = $this->parseRedirection();
-        }
-
-        // Parse command name
-        if ($this->isWordToken()) {
-            $name = $this->parseWord();
-        }
-
-        // Parse arguments and redirections
-        while (! $this->isStatementEnd() && ! $this->check(TokenType::PIPE, TokenType::PIPE_AMP)) {
-            $this->checkIteration();
-
-            if ($this->isRedirectionToken()) {
+        while (true) {
+            if ($this->isRedirectionStart()) {
                 $redirections[] = $this->parseRedirection();
-
-                continue;
-            }
-
-            if ($this->check(TokenType::NUMBER) && $this->isRedirectionAfterNumber()) {
-                $redirections[] = $this->parseRedirection();
-
-                continue;
-            }
-
-            if ($this->isWordToken() || $this->check(TokenType::ASSIGNMENT_WORD)) {
+            } elseif (! $this->isWordToken()) {
+                break;
+            } elseif (! $name instanceof WordNode) {
+                $name = $this->parseWord();
+            } elseif ($this->current()->type === TokenType::ASSIGNMENT_WORD && str_ends_with($this->current()->value, '=') && $this->peek(1)->type === TokenType::LPAREN) {
+                // `declare -A m=(...)` keeps the operand's array; the builtin sees just the name.
+                $arrayArgs[count($args)] = $assignment = $this->parseAssignment();
+                $args[] = new WordNode([new LiteralPart($assignment->name)]);
+            } else {
                 $args[] = $this->parseWord();
-
-                continue;
             }
-
-            break;
         }
 
         return new SimpleCommandNode(
@@ -483,6 +380,7 @@ final class Parser
             assignments: $assignments,
             redirections: $redirections,
             line: $line,
+            arrayArgs: $arrayArgs,
         );
     }
 
@@ -492,8 +390,14 @@ final class Parser
             TokenType::WORD,
             TokenType::NAME,
             TokenType::NUMBER,
+            TokenType::ASSIGNMENT_WORD,
             TokenType::IN,
-            TokenType::FD_VARIABLE,
+            // Reserved words and these operators are plain words outside command position.
+            TokenType::LBRACE,
+            TokenType::RBRACE,
+            TokenType::DBRACK_START,
+            TokenType::DBRACK_END,
+            TokenType::BANG,
             TokenType::IF,
             TokenType::THEN,
             TokenType::ELSE,
@@ -513,65 +417,42 @@ final class Parser
         );
     }
 
-    private function isRedirectionAfterNumber(): bool
+    /** A redirection operator, or a number or {name} touching one: `2>f` redirects fd 2 but `2 >f` passes 2. */
+    private function isRedirectionStart(): bool
     {
-        $token = $this->peek(1);
+        if ($this->check(TokenType::NUMBER, TokenType::FD_VARIABLE)) {
+            return $this->current()->end === $this->peek(1)->start && in_array($this->peek(1)->type, self::FD_OPERATORS, true);
+        }
 
-        return in_array($token->type, [
-            TokenType::LESS,
-            TokenType::GREAT,
-            TokenType::DGREAT,
-            TokenType::LESSAND,
-            TokenType::GREATAND,
-            TokenType::LESSGREAT,
-            TokenType::CLOBBER,
-        ], true);
+        return $this->check(TokenType::AND_GREAT, TokenType::AND_DGREAT, ...self::FD_OPERATORS);
     }
 
     private function parseWord(): WordNode
     {
-        $token = $this->advance();
-
-        return $this->tokenToWordNode($token);
+        return new WordNode([new LiteralPart($this->wordToken()->value)]);
     }
 
-    private function tokenToWordNode(Token $token): WordNode
+    private function wordToken(): Token
     {
-        $value = $token->value;
+        if (! $this->isWordToken()) {
+            $this->unexpectedToken();
+        }
 
-        return new WordNode([new LiteralPart($value)]);
+        return $this->advance();
     }
 
     private function parseAssignment(): AssignmentNode
     {
         $token = $this->advance();
-        $value = $token->value;
 
-        // Find = sign
-        $eqPos = strpos($value, '=');
-
-        if ($eqPos === false) {
-            return new AssignmentNode(name: $value, line: $token->line);
-        }
-
-        $lhs = substr($value, 0, $eqPos);
-        $rhs = substr($value, $eqPos + 1);
-
-        $append = false;
-
-        if (str_ends_with($lhs, '+')) {
-            $lhs = substr($lhs, 0, -1);
-            $append = true;
-        }
+        // The lexer only emits ASSIGNMENT_WORD for NAME[subscript]+?=value.
+        preg_match('/^([a-zA-Z_]\w*(?:\[.*?\])?)(\+?)=(.*)$/s', $token->value, $m);
+        [, $lhs, $plus, $rhs] = $m;
+        $append = $plus === '+';
 
         if ($rhs === '' && $this->check(TokenType::LPAREN)) {
             $this->advance();
 
-            return $this->parseArrayAssignment($lhs, $append, $token->line);
-        }
-
-        // Check for array assignment: VAR=(...)
-        if ($rhs === '(') {
             return $this->parseArrayAssignment($lhs, $append, $token->line);
         }
 
@@ -588,20 +469,18 @@ final class Parser
     private function parseArrayAssignment(string $name, bool $append, int $line): AssignmentNode
     {
         $elements = [];
+        $this->skipNewlines();
 
-        while (! $this->check(TokenType::RPAREN, TokenType::EOF)) {
-            $this->skipNewlines();
-
-            if ($this->check(TokenType::RPAREN)) {
-                break;
-            }
-
+        while ($this->isWordToken()) {
             $elements[] = $this->parseWord();
+            $this->skipNewlines();
         }
 
-        if ($this->check(TokenType::RPAREN)) {
-            $this->advance();
+        if ($this->check(TokenType::EOF)) {
+            throw new ParseException("unexpected EOF while looking for matching `)'");
         }
+
+        $this->expect(TokenType::RPAREN);
 
         return new AssignmentNode(
             name: $name,
@@ -613,279 +492,177 @@ final class Parser
 
     private function parseRedirection(): RedirectionNode
     {
-        $fd = null;
+        $fd = $this->check(TokenType::NUMBER) ? (int) $this->advance()->value : null;
+        $fdVariable = $this->check(TokenType::FD_VARIABLE) ? $this->advance()->value : null;
+        $token = $this->advance();
 
-        // Check for number prefix: 2>
-        if ($this->check(TokenType::NUMBER)) {
-            $fd = (int) $this->current()->value;
-            $this->advance();
-        }
+        $target = $this->wordToken();
 
-        $opToken = $this->advance();
-        $operator = $opToken->value;
-
-        // Heredoc operators
-        if ($opToken->type === TokenType::DLESS || $opToken->type === TokenType::DLESSDASH) {
-            $stripTabs = $opToken->type === TokenType::DLESSDASH;
-            $delimToken = $this->advance();
-            $delimiter = $delimToken->value;
-            $quoted = $delimToken->quoted || $delimToken->singleQuoted;
-
-            // Strip quotes from delimiter
-            $delimiter = trim($delimiter, "'\"");
-
-            $target = new WordNode([new LiteralPart('')]);
-            $redirectionNode = new RedirectionNode(
-                operator: $operator,
-                target: $target,
-                fd: $fd ?? 0,
-            );
-
-            $this->pendingHeredocs[] = [
-                'redirect' => $redirectionNode,
-                'delimiter' => $delimiter,
-                'stripTabs' => $stripTabs,
-                'quoted' => $quoted,
-            ];
-
-            return $redirectionNode;
-        }
-
-        // Here-string: <<<
-        if ($opToken->type === TokenType::TLESS) {
-            $target = $this->parseWord();
+        if ($token->type === TokenType::DLESS || $token->type === TokenType::DLESSDASH) {
+            // The lexer puts a heredoc's body right after its delimiter.
+            $body = $this->advance();
 
             return new RedirectionNode(
-                operator: $operator,
-                target: $target,
+                operator: $token->value,
+                target: new HereDocNode($target->value, new WordNode([new LiteralPart($body->value)]), $token->type === TokenType::DLESSDASH, $body->quoted),
                 fd: $fd ?? 0,
+                fdVariable: $fdVariable,
             );
-        }
-
-        // Regular redirect: target is a word
-        $target = $this->parseWord();
-
-        // Set default fd based on operator
-        if ($fd === null) {
-            $fd = match ($opToken->type) {
-                TokenType::LESS, TokenType::LESSAND, TokenType::LESSGREAT => 0,
-                default => 1,
-            };
         }
 
         return new RedirectionNode(
-            operator: $operator,
-            target: $target,
-            fd: $fd,
+            operator: $token->value,
+            target: new WordNode([new LiteralPart($target->value)]),
+            fd: $fd ?? (in_array($token->type, [TokenType::LESS, TokenType::LESSAND, TokenType::LESSGREAT, TokenType::TLESS], true) ? 0 : 1),
+            fdVariable: $fdVariable,
         );
     }
 
-    // =========================================================================
-    // COMPOUND COMMANDS
-    // =========================================================================
-
     private function parseIf(): IfNode
     {
-        $this->expect(TokenType::IF);
-        $line = $this->current()->line;
+        $line = $this->open(TokenType::IF);
         $clauses = [];
-
-        // Parse if/elif clauses
-        $condition = $this->parseCompoundList();
-        $this->expect(TokenType::THEN);
-        $body = $this->parseCompoundList();
-        $clauses[] = new IfClause($condition, $body);
-
-        while ($this->check(TokenType::ELIF)) {
-            $this->advance();
-            $condition = $this->parseCompoundList();
-            $this->expect(TokenType::THEN);
-            $body = $this->parseCompoundList();
-            $clauses[] = new IfClause($condition, $body);
-        }
-
         $elseBody = null;
+
+        while (true) {
+            $condition = $this->parseCompoundList(TokenType::THEN);
+            $this->expect(TokenType::THEN);
+            $clauses[] = new IfClause($condition, $this->parseCompoundList(TokenType::ELIF, TokenType::ELSE, TokenType::FI));
+
+            if (! $this->check(TokenType::ELIF)) {
+                break;
+            }
+
+            $this->advance();
+        }
 
         if ($this->check(TokenType::ELSE)) {
             $this->advance();
-            $elseBody = $this->parseCompoundList();
+            $elseBody = $this->parseCompoundList(TokenType::FI);
         }
 
-        $this->expect(TokenType::FI);
-
-        $redirections = $this->parseTrailingRedirections();
+        $this->close(TokenType::FI);
 
         return new IfNode(
             clauses: $clauses,
             elseBody: $elseBody,
-            redirections: $redirections,
+            redirections: $this->parseTrailingRedirections(),
             line: $line,
         );
     }
 
     private function parseFor(): ForNode|CStyleForNode
     {
-        $this->expect(TokenType::FOR);
-        $line = $this->current()->line;
+        $line = $this->open(TokenType::FOR);
 
-        // C-style for: for (( ... ))
         if ($this->check(TokenType::DPAREN_START)) {
             return $this->parseCStyleFor($line);
         }
 
-        $varToken = $this->advance();
-        $variable = $varToken->value;
+        $variable = $this->wordToken()->value;
         $words = null;
-
         $this->skipNewlines();
 
         if ($this->check(TokenType::IN)) {
             $this->advance();
             $words = [];
 
-            while (! $this->check(TokenType::SEMICOLON, TokenType::NEWLINE, TokenType::EOF, TokenType::DO)) {
+            while ($this->isWordToken()) {
                 $words[] = $this->parseWord();
             }
         }
 
-        $this->skipSeparators();
-        $this->expect(TokenType::DO);
-        $body = $this->parseCompoundList();
-        $this->expect(TokenType::DONE);
-
-        $redirections = $this->parseTrailingRedirections();
-
         return new ForNode(
             variable: $variable,
             words: $words,
-            body: $body,
-            redirections: $redirections,
+            body: $this->parseDoGroup(),
+            redirections: $this->parseTrailingRedirections(),
             line: $line,
         );
     }
 
     private function parseCStyleFor(int $line): CStyleForNode
     {
-        $this->expect(TokenType::DPAREN_START);
+        // Bash prints each clause without its leading blanks.
+        $start = $this->advance()->end;
+        $parts = [];
 
-        // Parse init; cond; update as raw text between semicolons
-        // For now, create placeholder expressions
-        $init = null;
-        $condition = null;
-        $update = null;
+        // The lexer pairs every (( with a )).
+        while (! $this->check(TokenType::DPAREN_END)) {
+            $token = $this->advance();
 
-        // Read tokens until ))
-        $parts = [[], [], []];
-        $partIndex = 0;
-
-        while (! $this->check(TokenType::DPAREN_END, TokenType::EOF)) {
-            if ($this->check(TokenType::SEMICOLON)) {
-                $this->advance();
-                $partIndex = min($partIndex + 1, 2);
-
-                continue;
+            if ($token->type === TokenType::SEMICOLON && count($parts) < 2) {
+                $parts[] = substr($this->input, $start, $token->start - $start);
+                $start = $token->end;
             }
-
-            $parts[$partIndex][] = $this->advance();
         }
 
-        $this->expect(TokenType::DPAREN_END);
+        $parts[] = substr($this->input, $start, $this->advance()->start - $start);
 
-        if ($parts[0] !== []) {
-            $init = $this->tokensToArithExpr($parts[0]);
-        }
-
-        if ($parts[1] !== []) {
-            $condition = $this->tokensToArithExpr($parts[1]);
-        }
-
-        if ($parts[2] !== []) {
-            $update = $this->tokensToArithExpr($parts[2]);
-        }
-
-        $this->skipSeparators();
-        $this->expect(TokenType::DO);
-        $body = $this->parseCompoundList();
-        $this->expect(TokenType::DONE);
-
-        $redirections = $this->parseTrailingRedirections();
+        [$init, $condition, $update] = array_map(
+            fn (string $part): ?ArithmeticExpressionNode => trim($part) === '' ? null : new ArithmeticExpressionNode(ltrim($part)),
+            array_pad($parts, 3, ''),
+        );
 
         return new CStyleForNode(
             init: $init,
             condition: $condition,
             update: $update,
-            body: $body,
-            redirections: $redirections,
+            body: $this->parseDoGroup(),
+            redirections: $this->parseTrailingRedirections(),
             line: $line,
         );
     }
 
-    private function parseWhile(): WhileNode
+    /**
+     * The `[;] do list done` after a for loop's header.
+     *
+     * @return list<StatementNode>
+     */
+    private function parseDoGroup(): array
     {
-        $this->expect(TokenType::WHILE);
-        $line = $this->current()->line;
+        if ($this->check(TokenType::SEMICOLON)) {
+            $this->advance();
+        }
 
-        $condition = $this->parseCompoundList();
+        $this->skipNewlines();
         $this->expect(TokenType::DO);
-        $body = $this->parseCompoundList();
-        $this->expect(TokenType::DONE);
+        $body = $this->parseCompoundList(TokenType::DONE);
+        $this->close(TokenType::DONE);
 
-        $redirections = $this->parseTrailingRedirections();
-
-        return new WhileNode(
-            condition: $condition,
-            body: $body,
-            redirections: $redirections,
-            line: $line,
-        );
+        return $body;
     }
 
-    private function parseUntil(): UntilNode
+    private function parseWhile(): WhileNode|UntilNode
     {
-        $this->expect(TokenType::UNTIL);
-        $line = $this->current()->line;
-
-        $condition = $this->parseCompoundList();
+        $until = $this->check(TokenType::UNTIL);
+        $line = $this->open($this->current()->type);
+        $condition = $this->parseCompoundList(TokenType::DO);
         $this->expect(TokenType::DO);
-        $body = $this->parseCompoundList();
-        $this->expect(TokenType::DONE);
-
+        $body = $this->parseCompoundList(TokenType::DONE);
+        $this->close(TokenType::DONE);
         $redirections = $this->parseTrailingRedirections();
 
-        return new UntilNode(
-            condition: $condition,
-            body: $body,
-            redirections: $redirections,
-            line: $line,
-        );
+        return $until
+            ? new UntilNode($condition, $body, $redirections, $line)
+            : new WhileNode($condition, $body, $redirections, $line);
     }
 
     private function parseCase(): CaseNode
     {
-        $this->expect(TokenType::CASE);
-        $line = $this->current()->line;
-
+        $line = $this->open(TokenType::CASE);
         $wordNode = $this->parseWord();
         $this->skipNewlines();
         $this->expect(TokenType::IN);
         $this->skipNewlines();
-
         $items = [];
 
-        while (! $this->check(TokenType::ESAC, TokenType::EOF)) {
-            $this->skipNewlines();
-
-            if ($this->check(TokenType::ESAC)) {
-                break;
-            }
-
-            // Skip optional ( before pattern
+        while (! $this->check(TokenType::ESAC)) {
             if ($this->check(TokenType::LPAREN)) {
                 $this->advance();
             }
 
-            $patterns = [];
-            $patterns[] = $this->parseWord();
+            $patterns = [$this->parseWord()];
 
             while ($this->check(TokenType::PIPE)) {
                 $this->advance();
@@ -893,129 +670,85 @@ final class Parser
             }
 
             $this->expect(TokenType::RPAREN);
-
-            $body = [];
-
-            while (! $this->check(TokenType::DSEMI, TokenType::SEMI_AND, TokenType::SEMI_SEMI_AND, TokenType::ESAC, TokenType::EOF)) {
-                $stmt = $this->parseStatement();
-
-                if ($stmt instanceof \BashBox\Ast\StatementNode) {
-                    $body[] = $stmt;
-                }
-
-                $this->skipSeparators();
-
-                if ($this->check(TokenType::DSEMI, TokenType::SEMI_AND, TokenType::SEMI_SEMI_AND, TokenType::ESAC)) {
-                    break;
-                }
-            }
-
-            $terminator = ';;';
-
-            if ($this->check(TokenType::DSEMI)) {
-                $this->advance();
-                $terminator = ';;';
-            } elseif ($this->check(TokenType::SEMI_AND)) {
-                $this->advance();
-                $terminator = ';&';
-            } elseif ($this->check(TokenType::SEMI_SEMI_AND)) {
-                $this->advance();
-                $terminator = ';;&';
-            }
+            $body = $this->parseStatements(TokenType::DSEMI, TokenType::SEMI_AND, TokenType::SEMI_SEMI_AND, TokenType::ESAC);
 
             $items[] = new CaseItemNode(
                 patterns: $patterns,
                 body: $body,
-                terminator: $terminator,
+                terminator: $this->check(TokenType::ESAC, TokenType::EOF) ? ';;' : $this->advance()->value,
             );
+
+            $this->skipNewlines();
         }
 
-        $this->expect(TokenType::ESAC);
-
-        $redirections = $this->parseTrailingRedirections();
+        $this->close(TokenType::ESAC);
 
         return new CaseNode(
             word: $wordNode,
             items: $items,
-            redirections: $redirections,
+            redirections: $this->parseTrailingRedirections(),
             line: $line,
         );
     }
 
     private function parseSubshell(): SubshellNode
     {
-        $this->expect(TokenType::LPAREN);
-        $line = $this->current()->line;
-
-        $body = $this->parseCompoundList();
-
-        $this->expect(TokenType::RPAREN);
-
-        $redirections = $this->parseTrailingRedirections();
+        $line = $this->open(TokenType::LPAREN);
+        $body = $this->parseCompoundList(TokenType::RPAREN);
+        $this->close(TokenType::RPAREN);
 
         return new SubshellNode(
             body: $body,
-            redirections: $redirections,
+            redirections: $this->parseTrailingRedirections(),
             line: $line,
         );
     }
 
     private function parseGroup(): GroupNode
     {
-        $this->expect(TokenType::LBRACE);
-        $line = $this->current()->line;
-
-        $body = $this->parseCompoundList();
-
-        $this->expect(TokenType::RBRACE);
-
-        $redirections = $this->parseTrailingRedirections();
+        $line = $this->open(TokenType::LBRACE);
+        $body = $this->parseCompoundList(TokenType::RBRACE);
+        $this->close(TokenType::RBRACE);
 
         return new GroupNode(
             body: $body,
-            redirections: $redirections,
+            redirections: $this->parseTrailingRedirections(),
             line: $line,
         );
     }
 
     private function parseArithmeticCommand(): ArithmeticCommandNode
     {
-        $this->expect(TokenType::DPAREN_START);
-        $line = $this->current()->line;
+        $token = $this->advance();
 
-        $exprTokens = [];
-
-        while (! $this->check(TokenType::DPAREN_END, TokenType::EOF)) {
-            $exprTokens[] = $this->advance();
+        // The lexer pairs every (( with a )).
+        while (! $this->check(TokenType::DPAREN_END)) {
+            $this->advance();
         }
 
-        $this->expect(TokenType::DPAREN_END);
-
-        $arithmeticExpressionNode = $this->tokensToArithExpr($exprTokens);
-
-        $redirections = $this->parseTrailingRedirections();
+        $text = substr($this->input, $token->end, $this->advance()->start - $token->end);
 
         return new ArithmeticCommandNode(
-            expression: $arithmeticExpressionNode,
-            redirections: $redirections,
-            line: $line,
+            expression: new ArithmeticExpressionNode($text),
+            redirections: $this->parseTrailingRedirections(),
+            line: $token->line,
         );
     }
 
     private function parseConditionalCommand(): ConditionalCommandNode
     {
-        $this->expect(TokenType::DBRACK_START);
-        $line = $this->current()->line;
+        $line = $this->advance()->line;
+        $conditionalExpressionNode = $this->parseCondOr();
 
-        $conditionalExpressionNode = $this->parseConditionalExpression();
+        if (! $this->check(TokenType::DBRACK_END)) {
+            $this->condError("unexpected token `%s', conditional binary operator expected");
+        }
 
-        $this->expect(TokenType::DBRACK_END);
-
-        $redirections = $this->parseTrailingRedirections();
+        $this->advance();
 
         return new ConditionalCommandNode(
             expression: $conditionalExpressionNode,
-            redirections: $redirections,
+            redirections: $this->parseTrailingRedirections(),
             line: $line,
         );
     }
@@ -1028,10 +761,8 @@ final class Parser
             $this->advance();
         }
 
-        $nameToken = $this->advance();
-        $name = $nameToken->value;
+        $name = $this->wordToken()->value;
 
-        // Skip optional ()
         if ($this->check(TokenType::LPAREN)) {
             $this->advance();
             $this->expect(TokenType::RPAREN);
@@ -1039,66 +770,11 @@ final class Parser
 
         $this->skipNewlines();
 
-        $body = $this->parseCommand();
-
-        if (! ($body instanceof CompoundCommandNode)) {
-            $this->error('Function body must be a compound command');
-        }
-
-        $redirections = $this->parseTrailingRedirections();
-
         return new FunctionDefNode(
             name: $name,
-            body: $body,
-            redirections: $redirections,
+            body: $this->parseCompoundCommand() ?? $this->unexpectedToken(),
             line: $line,
         );
-    }
-
-    // =========================================================================
-    // COMPOUND LIST
-    // =========================================================================
-
-    /**
-     * @return list<StatementNode>
-     */
-    private function parseCompoundList(): array
-    {
-        $statements = [];
-        $this->skipSeparators();
-
-        while (! $this->check(
-            TokenType::EOF,
-            TokenType::THEN,
-            TokenType::ELSE,
-            TokenType::ELIF,
-            TokenType::FI,
-            TokenType::DO,
-            TokenType::DONE,
-            TokenType::ESAC,
-            TokenType::RPAREN,
-            TokenType::RBRACE,
-            TokenType::DSEMI,
-            TokenType::SEMI_AND,
-            TokenType::SEMI_SEMI_AND,
-        )) {
-            $this->checkIteration();
-            $posBefore = $this->pos;
-
-            $stmt = $this->parseStatement();
-
-            if ($stmt instanceof \BashBox\Ast\StatementNode) {
-                $statements[] = $stmt;
-            }
-
-            $this->skipSeparators();
-
-            if ($this->pos === $posBefore) {
-                break;
-            }
-        }
-
-        return $statements;
     }
 
     /**
@@ -1108,20 +784,11 @@ final class Parser
     {
         $redirections = [];
 
-        while ($this->isRedirectionToken() || ($this->check(TokenType::NUMBER) && $this->isRedirectionAfterNumber())) {
+        while ($this->isRedirectionStart()) {
             $redirections[] = $this->parseRedirection();
         }
 
         return $redirections;
-    }
-
-    // =========================================================================
-    // CONDITIONAL EXPRESSIONS ([[ ]])
-    // =========================================================================
-
-    private function parseConditionalExpression(): ConditionalExpressionNode
-    {
-        return $this->parseCondOr();
     }
 
     private function parseCondOr(): ConditionalExpressionNode
@@ -1130,8 +797,7 @@ final class Parser
 
         while ($this->check(TokenType::OR_OR)) {
             $this->advance();
-            $right = $this->parseCondAnd();
-            $left = new CondOrNode($left, $right);
+            $left = new CondOrNode($left, $this->parseCondAnd());
         }
 
         return $left;
@@ -1143,8 +809,7 @@ final class Parser
 
         while ($this->check(TokenType::AND_AND)) {
             $this->advance();
-            $right = $this->parseCondPrimary();
-            $left = new CondAndNode($left, $right);
+            $left = new CondAndNode($left, $this->parseCondPrimary());
         }
 
         return $left;
@@ -1152,49 +817,81 @@ final class Parser
 
     private function parseCondPrimary(): ConditionalExpressionNode
     {
-        // Negation
+        $this->enterDepth();
+
         if ($this->check(TokenType::BANG)) {
             $this->advance();
-
-            return new CondNotNode($this->parseCondPrimary());
-        }
-
-        // Grouping
-        if ($this->check(TokenType::LPAREN)) {
+            $node = new CondNotNode($this->parseCondPrimary());
+        } elseif ($this->check(TokenType::LPAREN)) {
             $this->advance();
-            $expr = $this->parseConditionalExpression();
-            $this->expect(TokenType::RPAREN);
+            $node = new CondGroupNode($this->parseCondOr());
 
-            return new CondGroupNode($expr);
-        }
+            if (! $this->check(TokenType::RPAREN)) {
+                $this->condError("unexpected token `%s', expected `)'");
+            }
 
-        // Unary operators
-        if ($this->isCondUnaryOperator()) {
+            $this->advance();
+        } elseif ($this->isCondUnaryOperator()) {
             $op = $this->advance()->value;
-            $operand = $this->parseWord();
+            $node = new CondUnaryNode($op, $this->condOperand('unary'));
+        } else {
+            $word = $this->condOperand();
 
-            return new CondUnaryNode($op, $operand);
+            if ($this->isCondBinaryOperator()) {
+                $op = $this->advance()->value;
+                $node = new CondBinaryNode($op, $word, $op === '=~' ? $this->condRegex() : $this->condOperand('binary'));
+            } else {
+                $node = new CondWordNode($word);
+            }
         }
 
-        // Read left operand
-        $wordNode = $this->parseWord();
+        $this->parseDepth--;
 
-        // Check for binary operator
-        if ($this->isCondBinaryOperator()) {
-            $op = $this->advance()->value;
-            $right = $this->parseWord();
+        return $node;
+    }
 
-            return new CondBinaryNode($op, $wordNode, $right);
+    /** A word inside [[ ]]; $operator names the operator it's an argument to. */
+    private function condOperand(?string $operator = null): WordNode
+    {
+        if (! $this->isWordToken() || $this->check(TokenType::DBRACK_END)) {
+            $this->condError($operator === null ? "syntax error near `%s'" : sprintf("unexpected argument `%%s' to conditional %s operator", $operator));
         }
 
-        return new CondWordNode($wordNode);
+        return $this->parseWord();
+    }
+
+    /** The regex after =~: tokens up to the first blank outside parentheses, as source text. */
+    private function condRegex(): WordNode
+    {
+        $start = $this->current()->start;
+        $end = $start;
+        $depth = 0;
+
+        while (! $this->check(TokenType::NEWLINE, TokenType::EOF) && ($depth > 0 || ($this->current()->start === $end && ! $this->check(TokenType::DBRACK_END, TokenType::AND_AND, TokenType::OR_OR)))) {
+            $token = $this->advance();
+            $depth += match ($token->type) {
+                TokenType::LPAREN => 1,
+                TokenType::RPAREN => -1,
+                default => 0,
+            };
+            $end = $token->end;
+        }
+
+        if ($end === $start) {
+            $this->condError("unexpected argument `%s' to conditional binary operator");
+        }
+
+        return new WordNode([new LiteralPart(substr($this->input, $start, $end - $start))]);
+    }
+
+    private function condError(string $format): never
+    {
+        throw new ParseException(sprintf($format, $this->tokenText()));
     }
 
     private function isCondUnaryOperator(): bool
     {
-        $value = $this->current()->value;
-
-        return in_array($value, [
+        return in_array($this->current()->value, [
             '-a', '-b', '-c', '-d', '-e', '-f', '-g', '-h', '-k', '-p',
             '-r', '-s', '-t', '-u', '-w', '-x', '-G', '-L', '-N', '-O',
             '-S', '-z', '-n', '-o', '-v', '-R',
@@ -1203,38 +900,10 @@ final class Parser
 
     private function isCondBinaryOperator(): bool
     {
-        $value = $this->current()->value;
-
-        return in_array($value, [
+        return in_array($this->current()->value, [
             '=', '==', '!=', '=~', '<', '>',
             '-eq', '-ne', '-lt', '-le', '-gt', '-ge',
             '-nt', '-ot', '-ef',
         ], true);
-    }
-
-    // =========================================================================
-    // ARITHMETIC EXPRESSIONS
-    // =========================================================================
-
-    /**
-     * @param  list<Token>  $tokens
-     */
-    private function tokensToArithExpr(array $tokens): ArithmeticExpressionNode
-    {
-        $text = implode('', array_map(fn (Token $token): string => $token->value, $tokens));
-
-        $arithExpr = $this->parseArithExpression($text);
-
-        return new ArithmeticExpressionNode(
-            expression: $arithExpr,
-            originalText: $text,
-        );
-    }
-
-    private function parseArithExpression(string $text): \BashBox\Ast\Arithmetic\ArithExpr
-    {
-        $arithmeticParser = new ArithmeticParser($text);
-
-        return $arithmeticParser->parse();
     }
 }

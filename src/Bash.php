@@ -7,12 +7,13 @@ namespace BashBox;
 use BashBox\Commands\CommandInterface;
 use BashBox\Commands\CommandRegistry;
 use BashBox\Commands\Curl_;
+use BashBox\Filesystem\DevFs;
+use BashBox\Filesystem\DiskQuota;
 use BashBox\Filesystem\FileSystemInterface;
 use BashBox\Filesystem\InMemoryFs;
 use BashBox\Interpreter\Interpreter;
 use BashBox\Interpreter\InterpreterState;
 use BashBox\Network\SecureHttpClient;
-use BashBox\Parser\Parser;
 
 final readonly class Bash
 {
@@ -24,7 +25,9 @@ final readonly class Bash
 
     public function __construct(private BashOptions $bashOptions = new BashOptions)
     {
-        $this->fileSystem = $this->bashOptions->fs ?? new InMemoryFs($this->bashOptions->initialFiles);
+        $limits = $this->bashOptions->limits;
+        $diskQuota = new DiskQuota($limits->maxFilesystemBytes, $limits->maxFilesystemFiles);
+        $this->fileSystem = new DevFs($this->bashOptions->fs ?? new InMemoryFs($this->bashOptions->initialFiles, $diskQuota), $diskQuota);
         $this->commandRegistry = new CommandRegistry;
         $this->commandRegistry->registerDefaults();
 
@@ -35,13 +38,14 @@ final readonly class Bash
             $this->secureHttpClient = null;
         }
 
-        // Ensure cwd and standard directories exist
-        if (! $this->fileSystem->exists($this->bashOptions->cwd)) {
-            $this->fileSystem->mkdir($this->bashOptions->cwd, ['recursive' => true]);
-        }
+        $this->ensureDirectory($this->bashOptions->cwd);
+        $this->ensureDirectory('/tmp');
+    }
 
-        if (! $this->fileSystem->exists('/tmp')) {
-            $this->fileSystem->mkdir('/tmp', ['recursive' => true]);
+    private function ensureDirectory(string $path): void
+    {
+        if (! $this->fileSystem->exists($path)) {
+            $this->fileSystem->mkdir($path, ['recursive' => true]);
         }
     }
 
@@ -51,6 +55,7 @@ final readonly class Bash
         $cwd = $execOptions->cwd ?? $this->bashOptions->cwd;
         $limits = $execOptions->limits ?? $this->bashOptions->limits;
         $stdin = $execOptions->stdin ?? '';
+        $this->ensureDirectory($cwd);
 
         $interpreterState = new InterpreterState(
             env: $env,
@@ -60,10 +65,7 @@ final readonly class Bash
 
         $interpreter = new Interpreter($interpreterState, $this->fileSystem, $this->commandRegistry, $this->secureHttpClient);
 
-        $parser = new Parser;
-        $scriptNode = $parser->parse($script);
-
-        $execResult = $interpreter->executeScript($scriptNode, $stdin);
+        $execResult = $interpreter->executeScript($script, $stdin);
 
         return new BashExecResult(
             stdout: $execResult->stdout,

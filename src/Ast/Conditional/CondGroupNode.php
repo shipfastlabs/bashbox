@@ -9,9 +9,4 @@ final readonly class CondGroupNode implements ConditionalExpressionNode
     public function __construct(
         public ConditionalExpressionNode $expression,
     ) {}
-
-    public function getType(): string
-    {
-        return 'CondGroup';
-    }
 }

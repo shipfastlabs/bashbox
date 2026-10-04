@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
-use RuntimeException;
 
 final class Wc extends AbstractCommand
 {
@@ -16,90 +15,50 @@ final class Wc extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, [
-            'l' => false,
-            'w' => false,
-            'c' => false,
-        ]);
+        $parsed = $this->getopt($args, 'clmw', ['bytes' => ['c', false], 'chars' => ['m', false], 'lines' => ['l', false], 'words' => ['w', false]]);
 
-        $flags = $parsed['flags'];
-        $files = $parsed['args'];
-
-        $showLines = (bool) $flags['l'];
-        $showWords = (bool) $flags['w'];
-        $showBytes = (bool) $flags['c'];
-
-        if (! $showLines && ! $showWords && ! $showBytes) {
-            $showLines = true;
-            $showWords = true;
-            $showBytes = true;
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
         }
 
-        if ($files === []) {
-            $files = ['-'];
+        [$flags, $operands] = $parsed;
+        // Columns come out in this order whatever order the flags were given in.
+        $columns = array_values(array_filter(['l', 'w', 'm', 'c'], fn (string $column): bool => isset($flags[$column]))) ?: ['l', 'w', 'c'];
+
+        [$contents, $stderr] = $this->readFiles($commandContext, $operands, "wc: %s: %s\n");
+        $rows = [];
+        $totals = ['l' => 0, 'w' => 0, 'm' => 0, 'c' => 0];
+
+        foreach ($contents as $i => $content) {
+            $counts = [
+                'l' => substr_count($content, "\n"),
+                'w' => count(preg_split('/\s+/', $content, -1, PREG_SPLIT_NO_EMPTY) ?: []),
+                // Characters are bytes in the C locale.
+                'm' => strlen($content),
+                'c' => strlen($content),
+            ];
+            $rows[] = [$counts, $operands === [] ? '' : ' '.$operands[$i]];
+
+            foreach ($counts as $column => $count) {
+                $totals[$column] += $count;
+            }
         }
+
+        if (count($operands) > 1) {
+            $rows[] = [$totals, ' total'];
+        }
+
+        // GNU sizes columns to fit the total byte count; stdin's size is unknown, so it reserves 7
+        $width = count($columns) === 1 && count($operands) <= 1
+            ? 1
+            : max(in_array('-', $operands ?: ['-'], true) ? 7 : 1, strlen((string) $totals['c']));
 
         $output = '';
-        $totalLines = 0;
-        $totalWords = 0;
-        $totalBytes = 0;
-        $multiFile = count($files) > 1;
 
-        foreach ($files as $file) {
-            try {
-                $reader = $this->createInputReader();
-                $input = $reader->read([$file], $commandContext);
-                $content = $input->content;
-            } catch (RuntimeException) {
-                $output .= "wc: {$file}: No such file or directory\n";
-
-                continue;
-            }
-
-            $lines = $content !== '' ? substr_count($content, "\n") : 0;
-            $words = $content !== '' ? count(preg_split('/\s+/', trim($content), -1, PREG_SPLIT_NO_EMPTY) ?: []) : 0;
-            $bytes = strlen($content);
-
-            $totalLines += $lines;
-            $totalWords += $words;
-            $totalBytes += $bytes;
-
-            $parts = [];
-
-            if ($showLines) {
-                $parts[] = sprintf('%8d', $lines);
-            }
-
-            if ($showWords) {
-                $parts[] = sprintf('%8d', $words);
-            }
-
-            if ($showBytes) {
-                $parts[] = sprintf('%8d', $bytes);
-            }
-
-            $label = $file === '-' ? '' : ' '.$file;
-            $output .= implode('', $parts).$label."\n";
+        foreach ($rows as [$counts, $label]) {
+            $output .= implode(' ', array_map(fn (string $column): string => sprintf('%*d', $width, $counts[$column]), $columns)).$label."\n";
         }
 
-        if ($multiFile) {
-            $parts = [];
-
-            if ($showLines) {
-                $parts[] = sprintf('%8d', $totalLines);
-            }
-
-            if ($showWords) {
-                $parts[] = sprintf('%8d', $totalWords);
-            }
-
-            if ($showBytes) {
-                $parts[] = sprintf('%8d', $totalBytes);
-            }
-
-            $output .= implode('', $parts).' total'."\n";
-        }
-
-        return $this->success($output);
+        return $stderr === '' ? $this->success($output) : $this->failure($stderr, 1, $output);
     }
 }

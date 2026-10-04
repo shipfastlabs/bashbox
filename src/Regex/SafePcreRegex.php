@@ -4,167 +4,65 @@ declare(strict_types=1);
 
 namespace BashBox\Regex;
 
-use BashBox\Exceptions\BashException;
-
-final readonly class SafePcreRegex implements RegexInterface
+/** Where commands run user-supplied regexes: under fixed PCRE limits, with a failed match raised instead of read as "no match". */
+final class SafePcreRegex
 {
-    private const array DELIMITER_CHARS = ['/', '#', '~', '!', '@', '%'];
+    public const int BACKTRACK_LIMIT = 1_000_000;
 
-    public function __construct(
-        private int $backtrackLimit = 10_000,
-        private int $recursionLimit = 5_000,
-        private int $maxPatternLength = 10_000,
-    ) {}
+    public const int RECURSION_LIMIT = 100_000;
 
-    public function test(string $pattern, string $subject): bool
+    /**
+     * Runs preg_match() under the limits.
+     *
+     * @param  array<array-key, mixed>|null  $matches
+     * @param  0|256|512|768  $flags
+     *
+     * @param-out array<array-key, mixed> $matches
+     *
+     * @throws RegexException
+     */
+    public static function match(string $regex, string $subject, ?array &$matches = null, int $flags = 0, int $offset = 0): bool
     {
-        $pattern = $this->ensureDelimited($pattern);
-        $this->validatePatternLength($pattern);
+        $previous = self::limit();
+        $result = preg_match($regex, $subject, $matches, $flags, $offset);
+        self::limit($previous);
 
-        return $this->withLimits(function () use ($pattern, $subject): bool {
-            $result = @preg_match($pattern, $subject);
-
-            $this->checkPcreError($pattern);
-
-            return $result === 1;
-        });
-    }
-
-    /** @return array<int, string>|null */
-    public function match(string $pattern, string $subject): ?array
-    {
-        $pattern = $this->ensureDelimited($pattern);
-        $this->validatePatternLength($pattern);
-
-        return $this->withLimits(function () use ($pattern, $subject): ?array {
-            $matches = [];
-            $result = @preg_match($pattern, $subject, $matches);
-
-            $this->checkPcreError($pattern);
-
-            if ($result === 0) {
-                return null;
-            }
-
-            /** @var array<int, string> $matches */
-            return $matches;
-        });
-    }
-
-    public function replace(string $pattern, string $replacement, string $subject): string
-    {
-        $pattern = $this->ensureDelimited($pattern);
-        $this->validatePatternLength($pattern);
-
-        return $this->withLimits(function () use ($pattern, $replacement, $subject): string {
-            $result = @preg_replace($pattern, $replacement, $subject);
-
-            $this->checkPcreError($pattern);
-
-            if ($result === null) {
-                throw new BashException('Regex replace failed for pattern: '.$pattern);
-            }
-
-            return $result;
-        });
-    }
-
-    /** @return list<string> */
-    public function split(string $pattern, string $subject, int $limit = -1): array
-    {
-        $pattern = $this->ensureDelimited($pattern);
-        $this->validatePatternLength($pattern);
-
-        return $this->withLimits(function () use ($pattern, $subject, $limit): array {
-            $result = @preg_split($pattern, $subject, $limit);
-
-            $this->checkPcreError($pattern);
-
-            if ($result === false) {
-                throw new BashException('Regex split failed for pattern: '.$pattern);
-            }
-
-            /** @var list<string> $result */
-            return $result;
-        });
-    }
-
-    private function validatePatternLength(string $pattern): void
-    {
-        if (mb_strlen($pattern) > $this->maxPatternLength) {
-            throw new BashException(
-                sprintf('Regex pattern exceeds maximum length of %d characters', $this->maxPatternLength)
-            );
-        }
-    }
-
-    private function ensureDelimited(string $pattern): string
-    {
-        if ($pattern === '') {
-            return '//';
-        }
-
-        $firstChar = $pattern[0];
-
-        foreach (self::DELIMITER_CHARS as $delimiter) {
-            if ($firstChar === $delimiter) {
-                return $pattern;
-            }
-        }
-
-        // Choose a delimiter that does not appear in the pattern
-        foreach (self::DELIMITER_CHARS as $delimiter) {
-            if (! str_contains($pattern, $delimiter)) {
-                return $delimiter.$pattern.$delimiter;
-            }
-        }
-
-        // Fallback: escape forward slashes in the pattern
-        $escaped = str_replace('/', '\\/', $pattern);
-
-        return '/'.$escaped.'/';
+        return self::check($result) === 1;
     }
 
     /**
-     * @template T
+     * Returns every match of the whole regex.
      *
-     * @param  callable(): T  $callback
-     * @return T
+     * @return list<string>
+     *
+     * @throws RegexException
      */
-    private function withLimits(callable $callback): mixed
+    public static function matchAll(string $regex, string $subject): array
     {
-        $previousBacktrack = ini_get('pcre.backtrack_limit');
-        $previousRecursion = ini_get('pcre.recursion_limit');
+        $previous = self::limit();
+        $result = preg_match_all($regex, $subject, $matches);
+        self::limit($previous);
+        self::check($result);
 
-        ini_set('pcre.backtrack_limit', (string) $this->backtrackLimit);
-        ini_set('pcre.recursion_limit', (string) $this->recursionLimit);
-
-        try {
-            return $callback();
-        } finally {
-            ini_set('pcre.backtrack_limit', $previousBacktrack !== false ? $previousBacktrack : '1000000');
-            ini_set('pcre.recursion_limit', $previousRecursion !== false ? $previousRecursion : '100000');
-        }
+        return $matches[0];
     }
 
-    private function checkPcreError(string $pattern): void
+    /**
+     * Sets the limits, since the host's ini may allow far more backtracking, or puts back the given values.
+     *
+     * @param  array{string|false, string|false}|null  $restore
+     * @return array{string|false, string|false}
+     */
+    private static function limit(?array $restore = null): array
     {
-        $error = preg_last_error();
+        return [
+            ini_set('pcre.backtrack_limit', (string) ($restore[0] ?? self::BACKTRACK_LIMIT)),
+            ini_set('pcre.recursion_limit', (string) ($restore[1] ?? self::RECURSION_LIMIT)),
+        ];
+    }
 
-        if ($error === PREG_NO_ERROR) {
-            return;
-        }
-
-        $message = match ($error) {
-            PREG_INTERNAL_ERROR => 'Internal PCRE error',
-            PREG_BACKTRACK_LIMIT_ERROR => 'Backtrack limit exhausted (possible catastrophic backtracking)',
-            PREG_RECURSION_LIMIT_ERROR => 'Recursion limit exhausted',
-            PREG_BAD_UTF8_ERROR => 'Malformed UTF-8 data',
-            PREG_BAD_UTF8_OFFSET_ERROR => 'Invalid UTF-8 offset',
-            PREG_JIT_STACKLIMIT_ERROR => 'JIT stack limit exhausted',
-            default => 'Unknown PCRE error (code: '.$error.')',
-        };
-
-        throw new BashException(sprintf('Regex error for pattern %s: %s', $pattern, $message));
+    private static function check(int|false $result): int
+    {
+        return $result === false ? throw new RegexException('regex match failed: '.preg_last_error_msg()) : $result;
     }
 }

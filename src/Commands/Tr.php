@@ -5,9 +5,17 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
+use RuntimeException;
 
 final class Tr extends AbstractCommand
 {
+    private const array LONG = [
+        'complement' => ['c', false],
+        'delete' => ['d', false],
+        'squeeze-repeats' => ['s', false],
+        'truncate-set1' => ['t', false],
+    ];
+
     public function getName(): string
     {
         return 'tr';
@@ -15,56 +23,64 @@ final class Tr extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, [
-            'd' => false,
-            's' => false,
-        ]);
+        $parsed = $this->getopt($args, 'cCdst', self::LONG);
 
-        $flags = $parsed['flags'];
-        $remaining = $parsed['args'];
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
+        }
 
+        [$flags, $operands] = $parsed;
+        $delete = isset($flags['d']);
+        $squeeze = isset($flags['s']);
         $input = $commandContext->stdin;
 
-        if ($flags['d']) {
-            // Delete mode: tr -d SET1
-            if ($remaining === []) {
-                return $this->failure("tr: missing operand\n");
-            }
+        if ($operands === []) {
+            return $this->usageError('missing operand');
+        }
 
-            $set1 = $this->expandSet($remaining[0]);
+        if (! $delete && ! $squeeze && count($operands) < 2) {
+            return $this->usageError(sprintf("missing operand after '%s'\nTwo strings must be given when translating.", $operands[0]));
+        }
+
+        $deleteOnly = $delete && ! $squeeze;
+
+        if (isset($operands[$deleteOnly ? 1 : 2])) {
+            return $this->usageError(sprintf("extra operand '%s'", $operands[$deleteOnly ? 1 : 2]).($deleteOnly ? "\nOnly one string may be given when deleting without squeezing repeats." : ''));
+        }
+
+        try {
+            $set1 = $this->expandSet($operands[0]);
+            $set2 = isset($operands[1]) ? $this->expandSet($operands[1]) : null;
+        } catch (RuntimeException $runtimeException) {
+            return $this->failure('tr: '.$runtimeException->getMessage()."\n");
+        }
+
+        if (isset($flags['c']) || isset($flags['C'])) {
+            // The complement is in byte order, as in the C locale.
+            $set1 = implode('', array_diff(array_map(chr(...), range(0, 255)), str_split($set1)));
+        }
+
+        if (isset($flags['t']) && $set2 !== null) {
+            $set1 = substr($set1, 0, strlen($set2));
+        }
+
+        if ($delete) {
             $output = $this->deleteChars($input, $set1);
 
-            if ($flags['s'] && isset($remaining[1])) {
-                $set2 = $this->expandSet($remaining[1]);
-                $output = $this->squeezeChars($output, $set2);
-            }
-
-            return $this->success($output);
+            return $this->success($squeeze && $set2 !== null ? $this->squeezeChars($output, $set2) : $output);
         }
 
-        if ($flags['s'] && count($remaining) === 1) {
-            // Squeeze only: tr -s SET1
-            $set1 = $this->expandSet($remaining[0]);
-            $output = $this->squeezeChars($input, $set1);
-
-            return $this->success($output);
+        if ($set2 === null) {
+            return $this->success($this->squeezeChars($input, $set1));
         }
 
-        if (count($remaining) < 2) {
-            return $this->failure("tr: missing operand\n");
+        if ($set2 === '') {
+            return $this->failure("tr: when not truncating set1, string2 must be non-empty\n");
         }
 
-        $set1 = $this->expandSet($remaining[0]);
-        $set2 = $this->expandSet($remaining[1]);
-
-        // Translate mode
         $output = $this->translateChars($input, $set1, $set2);
 
-        if ($flags['s']) {
-            $output = $this->squeezeChars($output, $set2);
-        }
-
-        return $this->success($output);
+        return $this->success($squeeze ? $this->squeezeChars($output, $set2) : $output);
     }
 
     private function expandSet(string $spec): string
@@ -75,6 +91,13 @@ final class Tr extends AbstractCommand
         for ($i = 0; $i < $len; $i++) {
             // Handle escape sequences
             if ($spec[$i] === '\\' && $i + 1 < $len) {
+                if (preg_match('/[0-7]{1,3}/A', $spec, $octal, 0, $i + 1) === 1) {
+                    $result .= chr(octdec($octal[0]) & 0xFF);
+                    $i += strlen($octal[0]);
+
+                    continue;
+                }
+
                 $next = $spec[$i + 1];
                 $result .= match ($next) {
                     'n' => "\n",
@@ -97,15 +120,11 @@ final class Tr extends AbstractCommand
                 $start = ord($spec[$i]);
                 $end = ord($spec[$i + 2]);
 
-                if ($start <= $end) {
-                    for ($c = $start; $c <= $end; $c++) {
-                        $result .= chr($c);
-                    }
-                } else {
-                    for ($c = $start; $c >= $end; $c--) {
-                        $result .= chr($c);
-                    }
+                if ($start > $end) {
+                    throw new RuntimeException(sprintf("range-endpoints of '%s' are in reverse collating sequence order", substr($spec, $i, 3)));
                 }
+
+                $result .= implode('', array_map(chr(...), range($start, $end)));
 
                 $i += 2;
 
@@ -121,11 +140,6 @@ final class Tr extends AbstractCommand
                     $result .= $this->expandClass($class);
                     $i = $end + 1;
 
-                    // skip the closing ]
-                    if ($i + 1 < $len && $spec[$i + 1] === ']') {
-                        $i++;
-                    }
-
                     continue;
                 }
             }
@@ -138,16 +152,24 @@ final class Tr extends AbstractCommand
 
     private function expandClass(string $class): string
     {
-        return match ($class) {
-            'upper' => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
-            'lower' => 'abcdefghijklmnopqrstuvwxyz',
-            'alpha' => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
-            'digit' => '0123456789',
-            'alnum' => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789',
-            'space' => " \t\n\r\x0B\x0C",
-            'blank' => " \t",
-            default => '',
+        $test = match ($class) {
+            'alnum' => ctype_alnum(...),
+            'alpha' => ctype_alpha(...),
+            'blank' => fn (string $c): bool => $c === ' ' || $c === "\t",
+            'cntrl' => ctype_cntrl(...),
+            'digit' => ctype_digit(...),
+            'graph' => ctype_graph(...),
+            'lower' => ctype_lower(...),
+            'print' => ctype_print(...),
+            'punct' => ctype_punct(...),
+            'space' => ctype_space(...),
+            'upper' => ctype_upper(...),
+            'xdigit' => ctype_xdigit(...),
+            default => throw new RuntimeException(sprintf("invalid character class '%s'", $class)),
         };
+
+        // Members in byte order, as in the C locale
+        return implode('', array_filter(array_map(chr(...), range(0, 255)), $test));
     }
 
     private function deleteChars(string $input, string $set): string
@@ -186,10 +208,6 @@ final class Tr extends AbstractCommand
 
     private function translateChars(string $input, string $set1, string $set2): string
     {
-        if ($set2 === '') {
-            return $input;
-        }
-
         // Build translation map
         $map = [];
         $len1 = strlen($set1);

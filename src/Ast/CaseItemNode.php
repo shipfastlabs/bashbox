@@ -15,9 +15,4 @@ final readonly class CaseItemNode implements Node
         public array $body = [],
         public string $terminator = ';;',
     ) {}
-
-    public function getType(): string
-    {
-        return 'CaseItem';
-    }
 }

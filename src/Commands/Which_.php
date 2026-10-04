@@ -15,28 +15,10 @@ final class Which_ extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        if ($args === []) {
-            return $this->failure();
-        }
+        $found = array_filter($args, fn (string $name): bool => $commandContext->registry?->has($name) === true);
+        $output = implode('', array_map(fn (string $name): string => '/usr/bin/'.$name."\n", $found));
 
-        $registry = $commandContext->registry;
-        $lines = [];
-        $notFound = false;
-
-        foreach ($args as $arg) {
-            if ($registry?->has($arg)) {
-                $lines[] = sprintf('/usr/bin/%s', $arg);
-            } else {
-                $notFound = true;
-            }
-        }
-
-        $output = implode(PHP_EOL, $lines);
-
-        if ($output !== '') {
-            $output .= PHP_EOL;
-        }
-
-        return $notFound ? $this->failure($output, 1) : $this->success($output);
+        // Exit status is 1 if no operands were given or any of them was not found
+        return $args !== [] && count($found) === count($args) ? $this->success($output) : $this->failure('', 1, $output);
     }
 }

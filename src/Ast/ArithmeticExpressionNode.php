@@ -4,17 +4,10 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-use BashBox\Ast\Arithmetic\ArithExpr;
-
+/** Arithmetic source text, kept as written: it's expanded and evaluated when run, as in bash. */
 final readonly class ArithmeticExpressionNode implements Node
 {
     public function __construct(
-        public ArithExpr $expression,
-        public ?string $originalText = null,
+        public string $originalText,
     ) {}
-
-    public function getType(): string
-    {
-        return 'ArithmeticExpression';
-    }
 }

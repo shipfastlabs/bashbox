@@ -5,10 +5,39 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
+use BashBox\Regex\PosixRegex;
+use BashBox\Regex\RegexException;
+use BashBox\Regex\SafePcreRegex;
+use InvalidArgumentException;
 use RuntimeException;
 
+/**
+ * GNU grep with options -E -F -G -e -i -v -w -x -c -l -n -o -q -h -H -r.
+ */
 final class Grep_ extends AbstractCommand
 {
+    private const string USAGE = "Usage: grep [OPTION]... PATTERNS [FILE]...\nTry 'grep --help' for more information.\n";
+
+    private const array LONG = [
+        'extended-regexp' => ['E', false],
+        'fixed-strings' => ['F', false],
+        'basic-regexp' => ['G', false],
+        'regexp' => ['e', true],
+        'ignore-case' => ['i', false],
+        'word-regexp' => ['w', false],
+        'line-regexp' => ['x', false],
+        'invert-match' => ['v', false],
+        'count' => ['c', false],
+        'files-with-matches' => ['l', false],
+        'line-number' => ['n', false],
+        'only-matching' => ['o', false],
+        'quiet' => ['q', false],
+        'silent' => ['q', false],
+        'no-filename' => ['h', false],
+        'with-filename' => ['H', false],
+        'recursive' => ['r', false],
+    ];
+
     public function getName(): string
     {
         return 'grep';
@@ -16,216 +45,203 @@ final class Grep_ extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, [
-            'i' => false,
-            'v' => false,
-            'c' => false,
-            'n' => false,
-            'l' => false,
-            'r' => false,
-            'E' => false,
-            'F' => false,
-            'w' => false,
-            'q' => false,
-            'e' => '',
-        ]);
-
-        $flags = $parsed['flags'];
-        $remaining = $parsed['args'];
-
-        /** @var string $pattern */
-        $pattern = '';
-
-        if ($flags['e'] !== '' && $flags['e'] !== false) {
-            $pattern = (string) $flags['e'];
-        } elseif ($remaining !== []) {
-            $pattern = array_shift($remaining);
-        } else {
-            return $this->failure("grep: no pattern specified\n");
+        try {
+            [$options, $files] = Getopt::parse($args, 'EFGHce:hilnoqrvwx', self::LONG);
+        } catch (InvalidArgumentException $invalidArgumentException) {
+            return $this->failure(sprintf("grep: %s\n", $invalidArgumentException->getMessage()).self::USAGE, 2);
         }
 
-        $files = $remaining;
-        $readingStdin = $files === [];
+        $flags = array_fill_keys(str_split('EFGicvnlrwxoqhH'), false);
+        $matcher = null;
+        $patterns = [];
 
-        if ($readingStdin && ! $flags['r']) {
-            return $this->grepContent($commandContext->stdin, '-', $pattern, $flags, false);
-        }
-
-        if ($flags['r'] && $files === []) {
-            $files = ['.'];
-        }
-
-        $allFiles = [];
-
-        foreach ($files as $file) {
-            $path = $this->resolvePath($commandContext, $file);
-
-            if ($flags['r']) {
-                $this->collectFiles($commandContext, $path, $allFiles);
+        foreach ($options as [$option, $value]) {
+            if ($option === 'e') {
+                $patterns[] = $value;
+            } elseif (str_contains('EFG', $option) && ($matcher ??= $option) !== $option) {
+                return $this->failure("grep: conflicting matchers specified\n", 2);
             } else {
-                $allFiles[] = ['path' => $path, 'label' => $file];
+                $flags[$option] = true;
             }
         }
 
-        $multiFile = count($allFiles) > 1;
+        if ($patterns === []) {
+            if ($files === []) {
+                return $this->failure(self::USAGE, 2);
+            }
+
+            $patterns[] = array_shift($files);
+        }
+
+        $regex = $this->buildRegex($patterns, $flags);
+        $error = PosixRegex::error($regex);
+
+        if ($error !== null) {
+            return $this->failure(sprintf("grep: %s\n", $error), 2);
+        }
+
+        try {
+            return $files === [] && ! $flags['r']
+                ? $this->grepContent($commandContext->stdin, '(standard input)', $regex, $flags, $flags['H'])
+                : $this->grepFiles($commandContext, $files, $regex, $flags);
+        } catch (RegexException $regexException) {
+            return $this->failure(sprintf("grep: %s\n", $regexException->getMessage()), 2);
+        }
+    }
+
+    /**
+     * @param  list<string>  $files
+     * @param  array<string, bool>  $flags
+     */
+    private function grepFiles(CommandContext $commandContext, array $files, string $regex, array $flags): ExecResult
+    {
+
+        $stderr = '';
+        $targets = [];
+
+        // grep -r with no operand searches '.' but prints names without the './' prefix
+        $operands = $files === [] ? [['', '.']] : array_map(fn (string $file): array => [$file, $file], $files);
+
+        foreach ($operands as [$label, $file]) {
+            $path = $this->resolvePath($commandContext, $file);
+
+            if ($flags['r']) {
+                $this->collectFiles($commandContext, $path, $label, false, $targets, $stderr);
+            } else {
+                $targets[] = ['path' => $path, 'label' => $label, 'recursed' => false];
+            }
+        }
+
         $output = '';
         $matchFound = false;
 
-        foreach ($allFiles as $allFile) {
+        foreach ($targets as $target) {
             try {
-                $content = $commandContext->fs->readFile($allFile['path']);
-            } catch (RuntimeException) {
-                if (! $flags['q']) {
-                    $output .= "grep: {$allFile['label']}: No such file or directory\n";
-                }
+                $content = $commandContext->fs->readFile($target['path']);
+            } catch (RuntimeException $runtimeException) {
+                $stderr .= sprintf("grep: %s: %s\n", $target['label'], $this->describeError($runtimeException));
 
                 continue;
             }
 
-            $result = $this->grepContent($content, $allFile['label'], $pattern, $flags, $multiFile);
+            // File names are shown for several operands or files found by recursion, unless -h; -H forces them
+            $withName = $flags['H'] || (! $flags['h'] && (count($files) > 1 || $target['recursed']));
+            $result = $this->grepContent($content, $target['label'], $regex, $flags, $withName);
+            $output .= $result->stdout;
 
             if ($result->exitCode === 0) {
                 $matchFound = true;
-            }
 
-            $output .= $result->stdout;
-
-            if ($flags['q'] && $matchFound) {
-                return $this->success();
+                if ($flags['q']) {
+                    return $this->success();
+                }
             }
         }
 
-        if ($flags['q']) {
-            return new ExecResult(stdout: '', stderr: '', exitCode: $matchFound ? 0 : 1);
-        }
+        $exitCode = $stderr !== '' ? 2 : ($matchFound ? 0 : 1);
 
-        return new ExecResult(stdout: $output, stderr: '', exitCode: $matchFound ? 0 : 1);
+        return new ExecResult(stdout: $output, stderr: $stderr, exitCode: $exitCode);
     }
 
     /**
-     * @param  array<string, string|bool>  $flags
+     * @param  array<string, bool>  $flags
      */
-    private function grepContent(string $content, string $label, string $pattern, array $flags, bool $multiFile): ExecResult
+    private function grepContent(string $content, string $label, string $regex, array $flags, bool $withName): ExecResult
     {
-        ['lines' => $lines] = $this->splitLines($content);
-
-        $regex = $this->buildRegex($pattern, $flags);
-        $matchedLines = [];
+        $output = '';
         $matchCount = 0;
-        $earlyExit = $flags['q'] || $flags['l'];
 
-        foreach ($lines as $idx => $line) {
-            $matches = (bool) @preg_match($regex, $line);
-
-            if ($flags['v']) {
-                $matches = ! $matches;
+        foreach ($this->splitLines($content)['lines'] as $idx => $line) {
+            if (SafePcreRegex::match($regex, $line) === $flags['v']) {
+                continue;
             }
 
-            if ($matches) {
-                $matchCount++;
+            $matchCount++;
 
-                if ($earlyExit) {
-                    break;
+            if ($flags['q'] || $flags['l']) {
+                break;
+            }
+
+            $prefix = ($withName ? $label.':' : '').($flags['n'] ? ($idx + 1).':' : '');
+
+            if (! $flags['o']) {
+                $output .= $prefix.$line."\n";
+            } elseif (! $flags['v']) {
+                // -o prints each non-empty match on its own line
+                foreach (array_filter(SafePcreRegex::matchAll($regex, $line), fn (string $match): bool => $match !== '') as $match) {
+                    $output .= $prefix.$match."\n";
                 }
-
-                $matchedLines[] = ['num' => $idx + 1, 'text' => $line];
             }
         }
 
         if ($flags['q']) {
-            return new ExecResult(stdout: '', stderr: '', exitCode: $matchCount > 0 ? 0 : 1);
-        }
-
-        if ($flags['l']) {
-            if ($matchCount > 0) {
-                return $this->success($label."\n");
-            }
-
-            return new ExecResult(stdout: '', stderr: '', exitCode: 1);
-        }
-
-        if ($flags['c']) {
-            $prefix = $multiFile ? $label.':' : '';
-
-            return new ExecResult(
-                stdout: $prefix.$matchCount."\n",
-                stderr: '',
-                exitCode: $matchCount > 0 ? 0 : 1,
-            );
-        }
-
-        $output = '';
-
-        foreach ($matchedLines as $matchedLine) {
-            $parts = [];
-
-            if ($multiFile) {
-                $parts[] = $label;
-            }
-
-            if ($flags['n']) {
-                $parts[] = (string) $matchedLine['num'];
-            }
-
-            if ($parts !== []) {
-                $output .= implode(':', $parts).':'.$matchedLine['text']."\n";
-            } else {
-                $output .= $matchedLine['text']."\n";
-            }
+            $output = '';
+        } elseif ($flags['l']) {
+            $output = $matchCount > 0 ? $label."\n" : '';
+        } elseif ($flags['c']) {
+            $output = ($withName ? $label.':' : '').$matchCount."\n";
         }
 
         return new ExecResult(stdout: $output, stderr: '', exitCode: $matchCount > 0 ? 0 : 1);
     }
 
     /**
-     * @param  array<string, string|bool>  $flags
+     * Several patterns (from -e or newlines) match when any of them does.
+     *
+     * @param  list<string>  $patterns
+     * @param  array<string, bool>  $flags
      */
-    private function buildRegex(string $pattern, array $flags): string
+    private function buildRegex(array $patterns, array $flags): string
     {
-        $regex = $flags['F'] ? preg_quote($pattern, '/') : $pattern;
+        $alternatives = [];
 
-        if ($flags['w']) {
-            $regex = '\b'.$regex.'\b';
+        foreach (explode("\n", implode("\n", $patterns)) as $pattern) {
+            $regex = $flags['F'] ? preg_quote($pattern, '/') : PosixRegex::toPcre($pattern, $flags['E']);
+
+            if ($flags['x']) {
+                $regex = '^(?:'.$regex.')$';
+            } elseif ($flags['w']) {
+                $regex = '(?<!\w)(?:'.$regex.')(?!\w)';
+            }
+
+            $alternatives[] = $regex;
         }
 
-        $modifiers = '';
-
-        if ($flags['i']) {
-            $modifiers .= 'i';
-        }
-
-        return '/'.$regex.'/'.$modifiers;
+        return '/'.implode('|', $alternatives).'/'.($flags['i'] ? 'i' : '');
     }
 
     /**
-     * @param  list<array{path: string, label: string}>  $result
+     * @param  list<array{path: string, label: string, recursed: bool}>  $result
      */
-    private function collectFiles(CommandContext $commandContext, string $dirPath, array &$result): void
+    private function collectFiles(CommandContext $commandContext, string $path, string $label, bool $recursed, array &$result, string &$stderr): void
     {
         try {
-            $entries = $commandContext->fs->readdirWithFileTypes($dirPath);
+            $isDirectory = $commandContext->fs->stat($path)->isDirectory;
         } catch (RuntimeException) {
-            // If it's a file, not a directory
-            try {
-                $stat = $commandContext->fs->stat($dirPath);
+            $isDirectory = false;
+        }
 
-                if ($stat->isFile) {
-                    $result[] = ['path' => $dirPath, 'label' => $dirPath];
-                }
-            } catch (RuntimeException) {
-                // ignore
-            }
+        if (! $isDirectory) {
+            // Missing operands are reported when the read fails.
+            $result[] = ['path' => $path, 'label' => $label, 'recursed' => $recursed];
 
             return;
         }
 
-        foreach ($entries as $entry) {
-            $childPath = $dirPath.'/'.$entry->name;
+        try {
+            $entries = $commandContext->fs->readdirWithFileTypes($path);
+        } catch (RuntimeException) {
+            $stderr .= "grep: {$label}: Permission denied\n";
 
-            if ($entry->isFile) {
-                $result[] = ['path' => $childPath, 'label' => $childPath];
-            } elseif ($entry->isDirectory) {
-                $this->collectFiles($commandContext, $childPath, $result);
+            return;
+        }
+
+        $prefix = $label === '' ? '' : rtrim($label, '/').'/';
+
+        foreach ($entries as $entry) {
+            // Like GNU grep -r, symlinks met while recursing are not followed.
+            if (! $entry->isSymbolicLink) {
+                $this->collectFiles($commandContext, rtrim($path, '/').'/'.$entry->name, $prefix.$entry->name, true, $result, $stderr);
             }
         }
     }

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Rector\CodingStyle\Rector\Encapsed\EncapsedStringsToSprintfRector;
 use Rector\Config\RectorConfig;
 
 return RectorConfig::configure()
@@ -18,4 +19,6 @@ return RectorConfig::configure()
         codingStyle: true,
         naming: true
     )
-    ->withPhpSets();
+    ->withPhpSets()
+    // It rewrites "\n" to PHP_EOL, which makes output depend on the platform
+    ->withSkip([EncapsedStringsToSprintfRector::class]);

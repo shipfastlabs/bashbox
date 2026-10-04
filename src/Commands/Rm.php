@@ -16,44 +16,38 @@ final class Rm extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, [
-            'r' => false,
-            'R' => false,
-            'f' => false,
-        ]);
+        $parsed = $this->getopt($args, 'fRr', ['force' => ['f', false], 'recursive' => ['r', false]]);
 
-        $recursive = (bool) $parsed['flags']['r'] || (bool) $parsed['flags']['R'];
-        $force = (bool) $parsed['flags']['f'];
-        $targets = $parsed['args'];
-
-        if ($targets === [] && ! $force) {
-            return $this->failure("rm: missing operand\n");
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
         }
 
-        if ($targets === []) {
-            return $this->success();
+        [$flags, $targets] = $parsed;
+        $recursive = isset($flags['r']) || isset($flags['R']);
+        $force = isset($flags['f']);
+
+        if ($targets === [] && ! $force) {
+            return $this->usageError('missing operand');
         }
 
         $stderr = '';
-        $exitCode = 0;
 
         foreach ($targets as $target) {
             $path = $this->resolvePath($commandContext, $target);
 
-            try {
-                $commandContext->fs->rm($path, ['recursive' => $recursive, 'force' => $force]);
-            } catch (RuntimeException $e) {
-                if (! $force) {
-                    $stderr .= sprintf("rm: cannot remove '%s': %s%s", $target, $e->getMessage(), PHP_EOL);
-                    $exitCode = 1;
+            if (! $commandContext->fs->exists($path)) {
+                $stderr .= $force ? '' : "rm: cannot remove '{$target}': No such file or directory\n";
+            } elseif (! $recursive && $commandContext->fs->stat($path)->isDirectory) {
+                $stderr .= "rm: cannot remove '{$target}': Is a directory\n";
+            } else {
+                try {
+                    $commandContext->fs->rm($path, ['recursive' => true]);
+                } catch (RuntimeException $runtimeException) {
+                    $stderr .= sprintf("rm: cannot remove '%s': %s\n", $target, $this->describeError($runtimeException));
                 }
             }
         }
 
-        if ($exitCode !== 0) {
-            return $this->failure($stderr, $exitCode);
-        }
-
-        return $this->success();
+        return $stderr === '' ? $this->success() : $this->failure($stderr);
     }
 }

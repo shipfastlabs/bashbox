@@ -11,9 +11,4 @@ final readonly class ArithUnaryNode implements ArithExpr
         public ArithExpr $operand,
         public bool $prefix = true,
     ) {}
-
-    public function getType(): string
-    {
-        return 'ArithUnary';
-    }
 }

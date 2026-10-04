@@ -6,440 +6,219 @@ namespace BashBox\Filesystem;
 
 use RuntimeException;
 
+/**
+ * Reads a real directory (through a contained ReadWriteFs) and keeps every change in an
+ * in-memory copy-on-write layer, so the disk is never modified.
+ *
+ * Paths are resolved here over the merged view, one component at a time, so a symlink in either
+ * layer can point at an entry in the other. Each layer then only sees symlink-free paths, and every
+ * disk access still goes through the ReadWriteFs containment. Like Linux overlayfs, copying a file
+ * up gives it a new inode, so hard links that exist only on disk are not shared in the overlay.
+ */
 final class OverlayFs implements FileSystemInterface
 {
+    private readonly ReadWriteFs $readWriteFs;
+
     private readonly InMemoryFs $inMemoryFs;
 
     /**
-     * Tracks paths that have been explicitly deleted.
-     * These must not "show through" from the real filesystem.
+     * Paths removed in the overlay. Disk entries at or below them no longer show through,
+     * even after the path is recreated in the in-memory layer.
      *
      * @var array<string, true>
      */
     private array $deletedPaths = [];
 
-    private readonly string $rootDir;
-
-    public function __construct(
-        string $rootDir,
-        private readonly bool $denySymlinks = true,
-    ) {
-        $realRoot = realpath($rootDir);
-
-        if ($realRoot === false || ! is_dir($rootDir)) {
-            throw new RuntimeException(sprintf("OverlayFs root directory does not exist: '%s'", $rootDir));
-        }
-
-        $this->rootDir = $realRoot;
-        $this->inMemoryFs = new InMemoryFs;
+    /** @param  DiskQuota  $diskQuota  caps the in-memory layer, copied-up files included */
+    public function __construct(string $rootDir, private readonly bool $denySymlinks = true, DiskQuota $diskQuota = new DiskQuota)
+    {
+        $this->readWriteFs = new ReadWriteFs($rootDir, ! $denySymlinks);
+        $this->inMemoryFs = new InMemoryFs([], $diskQuota);
     }
-
-    // ---------------------------------------------------------------
-    //  FileSystemInterface
-    // ---------------------------------------------------------------
 
     public function readFile(string $path): string
     {
-        $this->validatePath($path, 'open');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'open');
+        $path = $this->resolve($path, 'open');
 
-        // COW layer first
-        if ($this->inMemoryFs->exists($normalized)) {
-            return $this->inMemoryFs->readFile($normalized);
-        }
-
-        // Deleted in overlay -> gone
-        if ($this->isDeleted($normalized)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path));
-        }
-
-        // Fall back to real filesystem
-        $realPath = $this->toRealPath($normalized);
-        $this->guardSymlink($realPath, 'open', $path);
-
-        if (! is_file($realPath)) {
-            if (is_dir($realPath)) {
-                throw new RuntimeException(sprintf("EISDIR: illegal operation on a directory, read '%s'", $path));
-            }
-
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path));
-        }
-
-        $content = file_get_contents($realPath);
-
-        if ($content === false) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path));
-        }
-
-        return $content;
+        return $this->layerFor($path, 'open')->readFile($path);
     }
 
     public function writeFile(string $path, string $content): void
     {
-        $this->validatePath($path, 'write');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'write');
+        $path = $this->resolve($path, 'open');
+        $this->copyUp($path);
+        $this->inMemoryFs->writeFile($path, $content);
+    }
 
-        $this->ensureCowParentDirs($normalized);
-        $this->inMemoryFs->writeFile($normalized, $content);
-        $this->undelete($normalized);
+    public function createExclusive(string $path, bool $directory = false): void
+    {
+        $path = $this->resolve($path, $directory ? 'mkdir' : 'open', false);
+        // Copying up whatever is already there makes the in-memory layer report EEXIST for it
+        $this->copyUp($path);
+        $this->inMemoryFs->createExclusive($path, $directory);
     }
 
     public function appendFile(string $path, string $content): void
     {
-        $this->validatePath($path, 'append');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'append');
-
-        if ($this->inMemoryFs->exists($normalized)) {
-            $this->inMemoryFs->appendFile($normalized, $content);
-
-            return;
-        }
-
-        // If the file exists on the real FS and is not deleted, pull it in first
-        if (! $this->isDeleted($normalized)) {
-            $realPath = $this->toRealPath($normalized);
-
-            if (is_file($realPath)) {
-                $this->guardSymlink($realPath, 'append', $path);
-                $existing = file_get_contents($realPath);
-
-                if ($existing === false) {
-                    $existing = '';
-                }
-
-                $this->ensureCowParentDirs($normalized);
-                $this->inMemoryFs->writeFile($normalized, $existing.$content);
-                $this->undelete($normalized);
-
-                return;
-            }
-        }
-
-        // Otherwise treat as a fresh write
-        $this->ensureCowParentDirs($normalized);
-        $this->inMemoryFs->writeFile($normalized, $content);
-        $this->undelete($normalized);
+        $path = $this->resolve($path, 'open');
+        $this->copyUp($path);
+        $this->inMemoryFs->appendFile($path, $content);
     }
 
     public function exists(string $path): bool
     {
-        if (str_contains($path, "\0")) {
-            return false;
-        }
-
         try {
-            $normalized = $this->normalizePath($path);
-
-            if (! $this->isContained($normalized)) {
-                return false;
-            }
+            return $this->entry($this->resolve($path, 'access')) instanceof FsStat;
         } catch (RuntimeException) {
             return false;
         }
-
-        if ($this->inMemoryFs->exists($normalized)) {
-            return true;
-        }
-
-        if ($this->isDeleted($normalized)) {
-            return false;
-        }
-
-        $realPath = $this->toRealPath($normalized);
-
-        if ($this->denySymlinks && is_link($realPath)) {
-            return false;
-        }
-
-        return file_exists($realPath);
     }
 
     public function stat(string $path): FsStat
     {
-        $this->validatePath($path, 'stat');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'stat');
+        $path = $this->resolve($path, 'stat');
 
-        if ($this->inMemoryFs->exists($normalized)) {
-            return $this->inMemoryFs->stat($normalized);
-        }
-
-        if ($this->isDeleted($normalized)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, stat '%s'", $path));
-        }
-
-        $realPath = $this->toRealPath($normalized);
-        $this->guardSymlink($realPath, 'stat', $path);
-
-        if (! file_exists($realPath)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, stat '%s'", $path));
-        }
-
-        return $this->statRealPath($realPath);
+        return $this->layerFor($path, 'stat')->stat($path);
     }
 
     public function lstat(string $path): FsStat
     {
-        $this->validatePath($path, 'lstat');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'lstat');
+        $path = $this->resolve($path, 'lstat', false);
 
-        if ($this->inMemoryFs->exists($normalized)) {
-            return $this->inMemoryFs->lstat($normalized);
-        }
-
-        if ($this->isDeleted($normalized)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, lstat '%s'", $path));
-        }
-
-        $realPath = $this->toRealPath($normalized);
-
-        if (is_link($realPath)) {
-            if ($this->denySymlinks) {
-                throw new RuntimeException(sprintf("EPERM: symlinks are denied, lstat '%s'", $path));
-            }
-
-            $target = readlink($realPath);
-
-            return new FsStat(
-                isFile: false,
-                isDirectory: false,
-                isSymbolicLink: true,
-                mode: 0777,
-                size: $target !== false ? strlen($target) : 0,
-                mtime: filemtime($realPath) ?: time(),
-            );
-        }
-
-        if (! file_exists($realPath)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, lstat '%s'", $path));
-        }
-
-        return $this->statRealPath($realPath);
+        return $this->layerFor($path, 'lstat')->lstat($path);
     }
 
     public function mkdir(string $path, array $options = []): void
     {
-        $this->validatePath($path, 'mkdir');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'mkdir');
+        if (($options['recursive'] ?? false) && $this->isDirectory($path)) {
+            return;
+        }
 
-        $this->ensureCowParentDirs($normalized);
-        $this->inMemoryFs->mkdir($normalized, $options);
-        $this->undelete($normalized);
+        $path = $this->resolve($path, 'mkdir', false);
+        $this->copyUp($path);
+        $this->inMemoryFs->mkdir($path, $options);
     }
 
     public function readdir(string $path): array
     {
-        $entries = $this->readdirWithFileTypes($path);
-
-        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $entries);
+        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $this->readdirWithFileTypes($path));
     }
 
     public function readdirWithFileTypes(string $path): array
     {
-        $this->validatePath($path, 'scandir');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'scandir');
+        $path = $this->resolve($path, 'scandir');
+        $inUpper = $this->inUpper($path);
+        $entries = [];
 
-        // The directory must exist somewhere (COW or real FS)
-        $inCow = $this->inMemoryFs->exists($normalized);
-        $realPath = $this->toRealPath($normalized);
-        $onReal = ! $this->isDeleted($normalized) && is_dir($realPath);
+        try {
+            $this->assertNotDeleted($path, 'scandir');
 
-        if (! $inCow && ! $onReal) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, scandir '%s'", $path));
-        }
-
-        /** @var array<string, DirentEntry> $entriesMap */
-        $entriesMap = [];
-
-        // 1. Pull entries from real FS
-        if ($onReal) {
-            $handle = opendir($realPath);
-
-            if ($handle !== false) {
-                while (($entry = readdir($handle)) !== false) {
-                    if ($entry === '.') {
-                        continue;
-                    }
-
-                    if ($entry === '..') {
-                        continue;
-                    }
-
-                    $childNormalized = $normalized === '/' ? '/'.$entry : sprintf('%s/%s', $normalized, $entry);
-
-                    if ($this->isDeleted($childNormalized)) {
-                        continue;
-                    }
-
-                    $childReal = $realPath.DIRECTORY_SEPARATOR.$entry;
-
-                    if ($this->denySymlinks && is_link($childReal)) {
-                        continue;
-                    }
-
-                    $entriesMap[$entry] = new DirentEntry(
-                        name: $entry,
-                        isFile: is_file($childReal),
-                        isDirectory: is_dir($childReal),
-                        isSymbolicLink: is_link($childReal),
-                    );
+            foreach ($this->readWriteFs->readdirWithFileTypes($path) as $direntEntry) {
+                if (! isset($this->deletedPaths[rtrim($path, '/').'/'.$direntEntry->name])) {
+                    $entries[$direntEntry->name] = $direntEntry;
                 }
-
-                closedir($handle);
+            }
+        } catch (RuntimeException $runtimeException) {
+            if (! $inUpper) {
+                throw $runtimeException;
             }
         }
 
-        // 2. Overlay COW entries (they win)
-        if ($inCow) {
-            try {
-                $cowEntries = $this->inMemoryFs->readdirWithFileTypes($normalized);
-
-                foreach ($cowEntries as $cowEntry) {
-                    $entriesMap[$cowEntry->name] = $cowEntry;
-                }
-            } catch (RuntimeException) {
-                // COW path exists but is not a directory — ignore
+        if ($inUpper) {
+            foreach ($this->inMemoryFs->readdirWithFileTypes($path) as $direntEntry) {
+                $entries[$direntEntry->name] = $direntEntry;
             }
         }
 
-        $entries = array_values($entriesMap);
-        usort($entries, fn (DirentEntry $a, DirentEntry $b): int => strcmp($a->name, $b->name));
+        ksort($entries, SORT_STRING);
 
-        return $entries;
+        return array_values($entries);
     }
 
     public function rm(string $path, array $options = []): void
     {
-        $this->validatePath($path, 'rm');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'rm');
-        $force = $options['force'] ?? false;
-        $recursive = $options['recursive'] ?? false;
-
-        $existsInCow = $this->inMemoryFs->exists($normalized);
-        $realPath = $this->toRealPath($normalized);
-        $existsOnReal = ! $this->isDeleted($normalized) && file_exists($realPath);
-
-        if (! $existsInCow && ! $existsOnReal) {
-            if ($force) {
+        try {
+            $path = $this->resolve($path, 'rm', false);
+            $stat = $this->layerFor($path, 'rm')->lstat($path);
+        } catch (RuntimeException $runtimeException) {
+            if ($options['force'] ?? false) {
                 return;
             }
 
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, rm '%s'", $path));
+            throw $runtimeException;
         }
 
-        // If it is a directory, handle children recursively
-        $isDir = false;
-
-        if ($existsInCow) {
-            try {
-                $stat = $this->inMemoryFs->stat($normalized);
-                $isDir = $stat->isDirectory;
-            } catch (RuntimeException) {
-                // not in cow
-            }
+        if ($path === '/') {
+            throw new RuntimeException("EPERM: operation not permitted, rm '/'");
         }
 
-        if (! $isDir && $existsOnReal && is_dir($realPath)) {
-            $isDir = true;
+        if ($stat->isDirectory && ! ($options['recursive'] ?? false) && $this->readdir($path) !== []) {
+            throw new RuntimeException(sprintf("ENOTEMPTY: directory not empty, rm '%s'", $path));
         }
 
-        if ($isDir) {
-            if (! $recursive) {
-                // Check if directory is non-empty
-                $children = $this->readdir($normalized);
-
-                if ($children !== []) {
-                    throw new RuntimeException(sprintf("ENOTEMPTY: directory not empty, rm '%s'", $path));
-                }
-            } else {
-                $children = $this->readdir($normalized);
-
-                foreach ($children as $child) {
-                    $childPath = $normalized === '/' ? '/'.$child : sprintf('%s/%s', $normalized, $child);
-                    $this->rm($childPath, $options);
-                }
-            }
+        if ($this->inUpper($path)) {
+            $this->inMemoryFs->rm($path, ['recursive' => true]);
         }
 
-        // Remove from COW if present
-        if ($existsInCow) {
-            $this->inMemoryFs->rm($normalized, ['force' => true, 'recursive' => $recursive]);
-        }
-
-        // Mark as deleted so it doesn't show through from real FS
-        $this->markDeleted($normalized);
+        $this->deletedPaths[$path] = true;
     }
 
     public function cp(string $src, string $dest, array $options = []): void
     {
-        $this->validatePath($src, 'cp');
-        $this->validatePath($dest, 'cp');
-        $srcNorm = $this->normalizePath($src);
-        $destNorm = $this->normalizePath($dest);
-        $this->assertContained($srcNorm, 'cp');
-        $this->assertContained($destNorm, 'cp');
-        $recursive = $options['recursive'] ?? false;
+        $src = $this->resolve($src, 'cp');
+        $dest = $this->resolve($dest, 'cp');
+        $stat = $this->stat($src);
 
-        // Determine source type
-        $fsStat = $this->stat($srcNorm);
+        if (! $stat->isDirectory) {
+            $this->writeFile($dest, $this->readFile($src));
 
-        if ($fsStat->isFile) {
-            $content = $this->readFile($srcNorm);
-            $this->writeFile($destNorm, $content);
-        } elseif ($fsStat->isDirectory) {
-            if (! $recursive) {
-                throw new RuntimeException(sprintf("EISDIR: is a directory, cp '%s'", $src));
+            if ($options['preserve'] ?? false) {
+                $this->inMemoryFs->chmod($dest, $stat->mode);
+                $this->inMemoryFs->utimes($dest, $stat->mtime);
             }
 
-            $this->mkdir($destNorm, ['recursive' => true]);
-            $children = $this->readdir($srcNorm);
+            return;
+        }
 
-            foreach ($children as $child) {
-                $srcChild = $srcNorm === '/' ? '/'.$child : sprintf('%s/%s', $srcNorm, $child);
-                $destChild = $destNorm === '/' ? '/'.$child : sprintf('%s/%s', $destNorm, $child);
-                $this->cp($srcChild, $destChild, $options);
-            }
+        if (! ($options['recursive'] ?? false)) {
+            throw new RuntimeException(sprintf("EISDIR: is a directory, cp '%s'", $src));
+        }
+
+        if (str_starts_with($dest.'/', $src.'/')) {
+            throw new RuntimeException(sprintf("EINVAL: cannot copy a directory into itself, cp '%s'", $src));
+        }
+
+        $this->mkdir($dest, ['recursive' => true]);
+
+        foreach ($this->readdir($src) as $child) {
+            $this->cp(rtrim($src, '/').'/'.$child, rtrim($dest, '/').'/'.$child, $options);
         }
     }
 
+    /**
+     * rename(2) in memory: both trees are copied up whole, so the in-memory rename sees (and keeps)
+     * every entry, and the disk versions of both paths are hidden afterwards.
+     */
     public function mv(string $src, string $dest): void
     {
-        $this->cp($src, $dest, ['recursive' => true]);
-        $this->rm($src, ['recursive' => true]);
+        $src = $this->resolve($src, 'rename', false);
+        $dest = $this->resolve($dest, 'rename', false);
+        $this->copyUpTree($src);
+        $this->copyUpTree($dest);
+        $this->inMemoryFs->mv($src, $dest);
+        $this->deletedPaths[$src] = true;
+        $this->deletedPaths[$dest] = true;
     }
 
     public function resolvePath(string $base, string $path): string
     {
-        if (str_starts_with($path, '/')) {
-            return $this->normalizePath($path);
-        }
-
-        $combined = $base === '/' ? '/'.$path : sprintf('%s/%s', $base, $path);
-
-        return $this->normalizePath($combined);
+        return VirtualPath::resolve($base, $path);
     }
 
     public function getAllPaths(): array
     {
-        $paths = [];
-
-        // Collect real FS paths (not deleted)
-        $this->collectRealPaths($this->rootDir, '/', $paths);
-
-        // Overlay COW paths
-        foreach ($this->inMemoryFs->getAllPaths() as $allPath) {
-            if (! in_array($allPath, $paths, true)) {
-                $paths[] = $allPath;
-            }
-        }
-
+        $visible = array_filter($this->readWriteFs->getAllPaths(), fn (string $path): bool => ! $this->isDeleted($path));
+        $paths = array_values(array_unique([...$visible, ...$this->inMemoryFs->getAllPaths()]));
         sort($paths);
 
         return $paths;
@@ -447,360 +226,252 @@ final class OverlayFs implements FileSystemInterface
 
     public function chmod(string $path, int $mode): void
     {
-        $this->validatePath($path, 'chmod');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'chmod');
-
-        // Pull into COW if only on real FS
-        $this->pullIntoCow($normalized, 'chmod');
-
-        $this->inMemoryFs->chmod($normalized, $mode);
+        $path = $this->resolve($path, 'chmod');
+        $this->copyUp($path);
+        $this->inMemoryFs->chmod($path, $mode);
     }
 
     public function symlink(string $target, string $linkPath): void
     {
-        $this->validatePath($linkPath, 'symlink');
-        $normalized = $this->normalizePath($linkPath);
-        $this->assertContained($normalized, 'symlink');
-
         if ($this->denySymlinks) {
             throw new RuntimeException(sprintf("EPERM: symlinks are denied, symlink '%s'", $linkPath));
         }
 
-        $this->ensureCowParentDirs($normalized);
-        $this->inMemoryFs->symlink($target, $normalized);
-        $this->undelete($normalized);
+        $linkPath = $this->resolve($linkPath, 'symlink', false);
+        $this->copyUp($linkPath);
+        $this->inMemoryFs->symlink($target, $linkPath);
     }
 
     public function link(string $existingPath, string $newPath): void
     {
-        $this->validatePath($existingPath, 'link');
-        $this->validatePath($newPath, 'link');
-        $existingNorm = $this->normalizePath($existingPath);
-        $newNorm = $this->normalizePath($newPath);
-        $this->assertContained($existingNorm, 'link');
-        $this->assertContained($newNorm, 'link');
-
-        // Pull existing into COW if needed
-        $this->pullIntoCow($existingNorm, 'link');
-
-        $this->ensureCowParentDirs($newNorm);
-        $this->inMemoryFs->link($existingNorm, $newNorm);
-        $this->undelete($newNorm);
+        $existingPath = $this->resolve($existingPath, 'link', false);
+        $newPath = $this->resolve($newPath, 'link', false);
+        $this->copyUp($existingPath);
+        $this->copyUp($newPath);
+        $this->inMemoryFs->link($existingPath, $newPath);
     }
 
     public function readlink(string $path): string
     {
-        $this->validatePath($path, 'readlink');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'readlink');
+        $path = $this->resolve($path, 'readlink', false);
 
-        if ($this->inMemoryFs->exists($normalized)) {
-            return $this->inMemoryFs->readlink($normalized);
-        }
-
-        if ($this->isDeleted($normalized)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
-        }
-
-        $realPath = $this->toRealPath($normalized);
-
-        if (! is_link($realPath)) {
-            if (! file_exists($realPath)) {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
-            }
-
-            throw new RuntimeException(sprintf("EINVAL: invalid argument, readlink '%s'", $path));
-        }
-
-        if ($this->denySymlinks) {
-            throw new RuntimeException(sprintf("EPERM: symlinks are denied, readlink '%s'", $path));
-        }
-
-        $target = readlink($realPath);
-
-        if ($target === false) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
-        }
-
-        return $target;
+        return $this->layerFor($path, 'readlink')->readlink($path);
     }
 
     public function realpath(string $path): string
     {
-        $this->validatePath($path, 'realpath');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'realpath');
+        $resolved = $this->resolve($path, 'realpath');
 
-        if (! $this->exists($normalized)) {
+        if (! $this->entry($resolved) instanceof FsStat) {
             throw new RuntimeException(sprintf("ENOENT: no such file or directory, realpath '%s'", $path));
         }
 
-        return $normalized;
+        return $resolved;
     }
 
     public function utimes(string $path, int $mtime): void
     {
-        $this->validatePath($path, 'utimes');
-        $normalized = $this->normalizePath($path);
-        $this->assertContained($normalized, 'utimes');
-
-        $this->pullIntoCow($normalized, 'utimes');
-
-        $this->inMemoryFs->utimes($normalized, $mtime);
+        $path = $this->resolve($path, 'utimes');
+        $this->copyUp($path);
+        $this->inMemoryFs->utimes($path, $mtime);
     }
 
-    // ---------------------------------------------------------------
-    //  Private helpers
-    // ---------------------------------------------------------------
-
-    private function normalizePath(string $path): string
+    /** Resolve symlinks of both layers in every component (the last only when $followLast), within the virtual root. */
+    private function resolve(string $path, string $operation, bool $followLast = true): string
     {
-        if ($path === '' || $path === '/') {
-            return '/';
-        }
-
-        $normalized = $path;
-
-        if (str_ends_with($normalized, '/') && $normalized !== '/') {
-            $normalized = rtrim($normalized, '/');
-        }
-
-        if (! str_starts_with($normalized, '/')) {
-            $normalized = '/'.$normalized;
-        }
-
-        $parts = array_filter(explode('/', $normalized), fn (string $p): bool => $p !== '' && $p !== '.');
+        $pending = explode('/', VirtualPath::normalize($path));
         $resolved = [];
+        $hops = 0;
 
-        foreach ($parts as $part) {
+        while ($pending !== []) {
+            $part = array_shift($pending);
+
+            if ($part === '') {
+                continue;
+            }
+
+            if ($part === '.') {
+                continue;
+            }
+
             if ($part === '..') {
                 array_pop($resolved);
-            } else {
-                $resolved[] = $part;
+
+                continue;
             }
+
+            $next = '/'.implode('/', [...$resolved, $part]);
+            $entry = $this->entry($next);
+
+            if ($pending !== [] && $entry instanceof FsStat && ! $entry->isDirectory && ! $entry->isSymbolicLink) {
+                throw new RuntimeException(sprintf("ENOTDIR: not a directory, %s '%s'", $operation, $path));
+            }
+
+            if (! $entry instanceof FsStat || ! $entry->isSymbolicLink || (! $followLast && $pending === [])) {
+                $resolved[] = $part;
+
+                continue;
+            }
+
+            if (++$hops > VirtualPath::MAX_SYMLINKS) {
+                throw new RuntimeException(sprintf("ELOOP: too many levels of symbolic links, %s '%s'", $operation, $path));
+            }
+
+            if ($this->inUpper($next)) {
+                $target = $this->inMemoryFs->readlink($next);
+            } else {
+                $this->assertDiskLinkContained($next, $operation, $path);
+                $target = $this->readWriteFs->readlink($next);
+            }
+
+            if (str_starts_with($target, '/')) {
+                $resolved = [];
+            }
+
+            $pending = [...explode('/', $target), ...$pending];
         }
 
         return '/'.implode('/', $resolved);
     }
 
-    private function dirname(string $path): string
+    /**
+     * A disk symlink whose target leaves the root (an absolute host path, or ".." above it) is
+     * denied, as the ReadWriteFs denies it, rather than reinterpreted inside the root.
+     */
+    private function assertDiskLinkContained(string $link, string $operation, string $path): void
     {
-        $normalized = $this->normalizePath($path);
-
-        if ($normalized === '/') {
-            return '/';
-        }
-
-        $lastSlash = strrpos($normalized, '/');
-
-        if ($lastSlash === false || $lastSlash === 0) {
-            return '/';
-        }
-
-        return substr($normalized, 0, $lastSlash);
-    }
-
-    private function validatePath(string $path, string $operation): void
-    {
-        if (str_contains($path, "\0")) {
-            throw new RuntimeException(sprintf("ENOENT: path contains null byte, %s '%s'", $operation, $path));
+        try {
+            $this->readWriteFs->realpath($link);
+        } catch (RuntimeException $runtimeException) {
+            if (str_starts_with($runtimeException->getMessage(), 'EACCES')) {
+                throw new RuntimeException(sprintf("EACCES: path traversal denied, %s '%s'", $operation, $path), 0, $runtimeException);
+            }
         }
     }
 
     /**
-     * Ensure the normalized path is within the root directory (virtual "/" maps to $rootDir).
+     * The merged lstat of a path whose ancestors are symlink-free, or null when nothing is there.
      */
-    private function assertContained(string $normalizedPath, string $operation): void
+    private function entry(string $path): ?FsStat
     {
-        // All normalized paths start with "/", which maps to $rootDir. They are always contained
-        // as long as normalizePath has resolved ".." properly. Since normalizePath never lets
-        // ".." escape past "/", this is inherently safe. But let's be defensive:
-        if (! str_starts_with($normalizedPath, '/')) {
-            throw new RuntimeException(sprintf("EACCES: path traversal denied, %s '%s'", $operation, $normalizedPath));
+        if ($this->inUpper($path)) {
+            return $this->inMemoryFs->lstat($path);
+        }
+
+        if ($this->isDeleted($path)) {
+            return null;
+        }
+
+        try {
+            return $this->readWriteFs->lstat($path);
+        } catch (RuntimeException $runtimeException) {
+            // A denied disk symlink stays an error rather than looking absent
+            if (str_starts_with($runtimeException->getMessage(), 'ENOENT')) {
+                return null;
+            }
+
+            throw $runtimeException;
         }
     }
 
-    private function isContained(string $normalizedPath): bool
+    private function isDirectory(string $path): bool
     {
-        return str_starts_with($normalizedPath, '/');
+        try {
+            return $this->stat($path)->isDirectory;
+        } catch (RuntimeException) {
+            return false;
+        }
     }
 
     /**
-     * Convert a virtual normalized path to the real filesystem path.
+     * The layer that owns a path: the in-memory copy when there is one, otherwise the disk.
      */
-    private function toRealPath(string $normalizedPath): string
+    private function layerFor(string $path, string $operation): FileSystemInterface
     {
-        if ($normalizedPath === '/') {
-            return $this->rootDir;
+        if ($this->inUpper($path)) {
+            return $this->inMemoryFs;
         }
 
-        return $this->rootDir.$normalizedPath;
+        $this->assertNotDeleted($path, $operation);
+
+        return $this->readWriteFs;
     }
 
-    private function guardSymlink(string $realPath, string $operation, string $userPath): void
+    private function assertNotDeleted(string $path, string $operation): void
     {
-        if ($this->denySymlinks && is_link($realPath)) {
-            throw new RuntimeException(sprintf("EPERM: symlinks are denied, %s '%s'", $operation, $userPath));
+        if ($this->isDeleted($path)) {
+            throw new RuntimeException(sprintf("ENOENT: no such file or directory, %s '%s'", $operation, $path));
         }
     }
 
-    private function isDeleted(string $normalizedPath): bool
+    private function inUpper(string $path): bool
     {
-        if (isset($this->deletedPaths[$normalizedPath])) {
+        try {
+            $this->inMemoryFs->lstat($path);
+
             return true;
+        } catch (RuntimeException) {
+            return false;
         }
+    }
 
-        // Check if any ancestor has been deleted
-        $parent = $this->dirname($normalizedPath);
-
-        while ($parent !== $normalizedPath) {
-            if (isset($this->deletedPaths[$parent])) {
-                return true;
+    private function isDeleted(string $path): bool
+    {
+        while (! isset($this->deletedPaths[$path])) {
+            if ($path === '/') {
+                return false;
             }
 
-            $normalizedPath = $parent;
-            $parent = $this->dirname($parent);
+            $path = dirname($path);
         }
 
-        return false;
-    }
-
-    private function markDeleted(string $normalizedPath): void
-    {
-        $this->deletedPaths[$normalizedPath] = true;
-    }
-
-    private function undelete(string $normalizedPath): void
-    {
-        unset($this->deletedPaths[$normalizedPath]);
-    }
-
-    private function statRealPath(string $realPath): FsStat
-    {
-        $phpStat = stat($realPath);
-
-        if ($phpStat === false) {
-            throw new RuntimeException('Failed to stat real path');
-        }
-
-        return new FsStat(
-            isFile: is_file($realPath),
-            isDirectory: is_dir($realPath),
-            isSymbolicLink: false,
-            mode: UnixFileMode::permissions($phpStat['mode']),
-            size: $phpStat['size'],
-            mtime: $phpStat['mtime'],
-        );
+        return true;
     }
 
     /**
-     * Pull a file/directory from the real FS into the COW layer so it can be mutated.
+     * Copy a disk entry, and its ancestors, into the in-memory layer before it is changed, so the
+     * change sees what is on disk (an existing directory, a file in the way, the current mode).
+     * A symlink is copied as a symlink. The path must already be resolved.
      */
-    private function pullIntoCow(string $normalizedPath, string $operation): void
+    private function copyUp(string $path): void
     {
-        if ($this->inMemoryFs->exists($normalizedPath)) {
+        if ($path !== '/') {
+            $this->copyUp(dirname($path));
+        }
+
+        $stat = $this->inUpper($path) ? null : $this->entry($path);
+
+        if (! $stat instanceof FsStat) {
             return;
         }
 
-        if ($this->isDeleted($normalizedPath)) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, %s '%s'", $operation, $normalizedPath));
+        if ($stat->isSymbolicLink) {
+            $this->inMemoryFs->symlink($this->readWriteFs->readlink($path), $path);
+
+            return;
         }
 
-        $realPath = $this->toRealPath($normalizedPath);
-        $this->guardSymlink($realPath, $operation, $normalizedPath);
-
-        if (is_file($realPath)) {
-            $content = file_get_contents($realPath);
-
-            if ($content === false) {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, %s '%s'", $operation, $normalizedPath));
-            }
-
-            $this->ensureCowParentDirs($normalizedPath);
-            $this->inMemoryFs->writeFile($normalizedPath, $content);
-        } elseif (is_dir($realPath)) {
-            $this->ensureCowParentDirs($normalizedPath);
-            $this->inMemoryFs->mkdir($normalizedPath, ['recursive' => true]);
+        if ($stat->isDirectory) {
+            $this->inMemoryFs->mkdir($path);
         } else {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, %s '%s'", $operation, $normalizedPath));
+            $this->inMemoryFs->writeFile($path, $this->readWriteFs->readFile($path));
         }
+
+        $this->inMemoryFs->chmod($path, $stat->mode);
+        $this->inMemoryFs->utimes($path, $stat->mtime);
     }
 
     /**
-     * Ensure parent directories exist in the COW layer, creating them from the
-     * real FS or as new directories as needed.
+     * Copy up an entry and, for a directory, everything below it.
      */
-    private function ensureCowParentDirs(string $normalizedPath): void
+    private function copyUpTree(string $path): void
     {
-        $dir = $this->dirname($normalizedPath);
+        $this->copyUp($path);
 
-        if ($dir === '/') {
-            if (! $this->inMemoryFs->exists('/')) {
-                $this->inMemoryFs->mkdir('/', ['recursive' => true]);
-            }
-
-            return;
-        }
-
-        if ($this->inMemoryFs->exists($dir)) {
-            return;
-        }
-
-        $this->ensureCowParentDirs($dir);
-        $this->inMemoryFs->mkdir($dir, ['recursive' => true]);
-    }
-
-    /**
-     * Recursively collect paths from the real filesystem.
-     *
-     * @param  list<string>  $paths
-     */
-    private function collectRealPaths(string $realDir, string $virtualDir, array &$paths): void
-    {
-        if ($this->isDeleted($virtualDir)) {
-            return;
-        }
-
-        $paths[] = $virtualDir;
-
-        if (! is_dir($realDir)) {
-            return;
-        }
-
-        $handle = opendir($realDir);
-
-        if ($handle === false) {
-            return;
-        }
-
-        while (($entry = readdir($handle)) !== false) {
-            if ($entry === '.') {
-                continue;
-            }
-
-            if ($entry === '..') {
-                continue;
-            }
-
-            $childReal = $realDir.DIRECTORY_SEPARATOR.$entry;
-            $childVirtual = $virtualDir === '/' ? '/'.$entry : sprintf('%s/%s', $virtualDir, $entry);
-
-            if ($this->isDeleted($childVirtual)) {
-                continue;
-            }
-
-            if ($this->denySymlinks && is_link($childReal)) {
-                continue;
-            }
-
-            $paths[] = $childVirtual;
-
-            if (is_dir($childReal) && ! is_link($childReal)) {
-                $this->collectRealPaths($childReal, $childVirtual, $paths);
+        if ($this->inUpper($path) && $this->inMemoryFs->lstat($path)->isDirectory) {
+            foreach ($this->readdir($path) as $child) {
+                $this->copyUpTree(rtrim($path, '/').'/'.$child);
             }
         }
-
-        closedir($handle);
     }
 }

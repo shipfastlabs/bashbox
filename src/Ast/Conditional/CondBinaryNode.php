@@ -13,9 +13,4 @@ final readonly class CondBinaryNode implements ConditionalExpressionNode
         public WordNode $left,
         public WordNode $right,
     ) {}
-
-    public function getType(): string
-    {
-        return 'CondBinary';
-    }
 }

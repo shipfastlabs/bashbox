@@ -4,21 +4,11 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final readonly class FunctionDefNode implements Node
+final readonly class FunctionDefNode implements CommandNode
 {
-    /**
-     * @param  list<RedirectionNode>  $redirections
-     */
     public function __construct(
         public string $name,
         public CompoundCommandNode $body,
-        public array $redirections = [],
-        public ?string $sourceFile = null,
-        public ?int $line = null,
+        public int $line = 0,
     ) {}
-
-    public function getType(): string
-    {
-        return 'FunctionDef';
-    }
 }

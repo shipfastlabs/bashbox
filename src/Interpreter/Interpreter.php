@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Interpreter;
 
+use BashBox\Ast\Arithmetic\ArithArrayElementNode;
 use BashBox\Ast\Arithmetic\ArithAssignmentNode;
 use BashBox\Ast\Arithmetic\ArithBinaryNode;
 use BashBox\Ast\Arithmetic\ArithExpr;
@@ -14,6 +15,8 @@ use BashBox\Ast\Arithmetic\ArithUnaryNode;
 use BashBox\Ast\Arithmetic\ArithVariableNode;
 use BashBox\Ast\ArithmeticCommandNode;
 use BashBox\Ast\CaseNode;
+use BashBox\Ast\CommandNode;
+use BashBox\Ast\CompoundCommandNode;
 use BashBox\Ast\Conditional\CondAndNode;
 use BashBox\Ast\Conditional\CondBinaryNode;
 use BashBox\Ast\Conditional\CondGroupNode;
@@ -26,6 +29,7 @@ use BashBox\Ast\ConditionalCommandNode;
 use BashBox\Ast\CStyleForNode;
 use BashBox\Ast\ForNode;
 use BashBox\Ast\FunctionDefNode;
+use BashBox\Ast\FunctionPrinter;
 use BashBox\Ast\GroupNode;
 use BashBox\Ast\HereDocNode;
 use BashBox\Ast\IfNode;
@@ -41,18 +45,30 @@ use BashBox\Ast\WhileNode;
 use BashBox\Ast\WordNode;
 use BashBox\Commands\CommandContext;
 use BashBox\Commands\CommandRegistry;
+use BashBox\Exceptions\ArithmeticException;
+use BashBox\Exceptions\AssignmentException;
 use BashBox\Exceptions\BreakException;
 use BashBox\Exceptions\ContinueException;
 use BashBox\Exceptions\ErrexitException;
 use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\Exceptions\ExitException;
+use BashBox\Exceptions\ExpansionException;
+use BashBox\Exceptions\ParseException;
 use BashBox\Exceptions\ReturnException;
 use BashBox\Exceptions\UnboundVariableException;
 use BashBox\ExecResult;
 use BashBox\Filesystem\FileSystemInterface;
+use BashBox\Interpreter\Expansion\Glob;
 use BashBox\Interpreter\Expansion\WordExpander;
 use BashBox\Network\SecureHttpClient;
+use BashBox\Parser\Int64;
+use BashBox\Parser\Parser;
+use BashBox\Regex\PosixRegex;
+use BashBox\Regex\RegexException;
+use BashBox\Regex\SafePcreRegex;
+use Closure;
 use RuntimeException;
+use Throwable;
 
 final class Interpreter
 {
@@ -62,6 +78,55 @@ final class Interpreter
 
     private string $stderr = '';
 
+    private int $loopDepth = 0;
+
+    /** Nested $(...), <(...), eval, source and trap texts being run */
+    private int $nesting = 0;
+
+    /** Above 0 while a command's status is being tested (if/while/until conditions, `a && b`, `! a`): no ERR trap or errexit */
+    private int $conditionDepth = 0;
+
+    /** @var array<string, true> aliases being expanded, which don't expand again inside themselves */
+    private array $expandingAliases = [];
+
+    /** @var array<string, string> the aliases when the current input line began */
+    private array $lineAliases = [];
+
+    private int $sourceDepth = 0;
+
+    /**
+     * The `name=(...)` operands of the declaration builtin being run, by name
+     *
+     * @var array<string, array{type: 'scalar'|'array'|'element', name: string, value?: string, append: bool, elements?: list<array{int|string|null, string}>, subscript?: int|string}>
+     */
+    private array $arrayOperands = [];
+
+    /** `declare: ` while a builtin that names itself in assignment errors is assigning, else '' */
+    private string $assigning = '';
+
+    /** getopts' position inside a grouped option argument such as -abc */
+    private int $getoptsCharIndex = 1;
+
+    /**
+     * The open fds (0 travels as the StdinStream argument instead). Output goes to '@1:<level>' (the
+     * stdout of that capture level: the shell, a pipe, a `$(...)`), '@2' (the shell's stderr), '@null'
+     * or a file path; a StdinStream is a file opened for reading (or read-write). Every write is
+     * routed through this table when it happens, so a command's own redirections are in force for
+     * everything it runs and `exec 3>file` lasts until closed.
+     *
+     * @var array<int, string|StdinStream>
+     */
+    private array $fds = [1 => '@1:0', 2 => '@2'];
+
+    /** @var list<array{path: string, reader: ?SubshellNode}> open process substitutions; reader is a `>(...)` command still to run */
+    private array $processSubstitutions = [];
+
+    /** Capture level of the innermost pipe or `$(...)`; output for an outer level waits in $passthrough */
+    private int $captureLevel = 0;
+
+    /** @var array<int, string> output written to an outer level's stdout from inside a capture, keyed by level */
+    private array $passthrough = [];
+
     public function __construct(
         private readonly InterpreterState $interpreterState,
         private readonly FileSystemInterface $fileSystem,
@@ -69,304 +134,916 @@ final class Interpreter
         private readonly ?SecureHttpClient $secureHttpClient = null,
     ) {
         $this->wordExpander = new WordExpander($this->interpreterState, $this);
+        $this->interpreterState->arithmetic = $this->integerValue(...);
+        $this->interpreterState->warn = fn (string $message) => $this->writeStderr("bash: warning: {$message}\n");
     }
 
-    public function getState(): InterpreterState
+    /** An -i variable's new value; an expression that doesn't evaluate ends the shell, as in bash. */
+    private function integerValue(string $expression): int
     {
-        return $this->interpreterState;
+        return $this->fatalArithmetic($expression, $this->assigning);
     }
 
-    public function executeScript(ScriptNode $scriptNode, string $stdin = ''): ExecResult
+    /** Evaluates an -i value or an array subscript, already expanded: one that doesn't evaluate ends the shell, as in bash. */
+    public function fatalArithmetic(string $expression, string $builtin = ''): int
     {
-        $exitCode = 0;
+        try {
+            return $this->evaluateArithmeticText($expression);
+        } catch (ArithmeticException $arithmeticException) {
+            $this->writeStderr("bash: {$builtin}{$arithmeticException->getMessage()}\n");
+
+            throw new ExitException(1);
+        }
+    }
+
+    /** Runs a script as the whole shell, like `bash -c`: one that doesn't parse runs nothing and exits with status 2. */
+    public function executeScript(string $script, string|StdinStream $stdin = '', string $errorPrefix = 'bash: '): ExecResult
+    {
+        $stdinStream = is_string($stdin) ? new StdinStream($stdin) : $stdin;
 
         try {
-            foreach ($scriptNode->statements as $statement) {
-                $exitCode = $this->executeStatement($statement, $stdin);
-            }
+            $exitCode = $this->executeTopLevel($this->parse($script)->statements, $stdinStream);
+        } catch (ParseException $parseException) {
+            $this->writeStderr($errorPrefix.$parseException->getMessage()."\n");
+            $exitCode = 2;
         } catch (ExitException|ErrexitException $e) {
             $exitCode = $e->exitCode;
-        } finally {
-            $trapStdout = '';
-            $trapStderr = '';
-
-            if (isset($this->interpreterState->traps['EXIT']) && $this->interpreterState->traps['EXIT'] !== '') {
-                $trapCmd = $this->interpreterState->traps['EXIT'];
-                unset($this->interpreterState->traps['EXIT']);
-
-                try {
-                    $trapResult = $this->execSubcommand($trapCmd);
-                    $trapStdout = $trapResult->stdout;
-                    $trapStderr = $trapResult->stderr;
-                } catch (ExitException|ErrexitException) {
-                    // Ignore exit inside EXIT trap
-                }
-            }
-
-            // Capture stdout/stderr accumulated before the trap wiped them
-            // execSubcommand resets $this->stdout, so we must restore + append
-            $stdout = $this->stdout.$trapStdout;
-            $stderr = $this->stderr.$trapStderr;
-            $this->stdout = '';
-            $this->stderr = '';
+        } catch (ExpansionException|UnboundVariableException $e) {
+            // `${x?}` and nounset errors end a non-interactive shell with status 127
+            $this->writeStderr($e->getMessage()."\n");
+            $exitCode = 127;
         }
 
-        return new ExecResult(stdout: $stdout, stderr: $stderr, exitCode: $exitCode);
+        $exitCode = $this->runExitTrap($exitCode, $stdinStream);
+
+        return new ExecResult(stdout: $this->stdout, stderr: $this->stderr, exitCode: $exitCode);
     }
 
-    public function executeStatement(StatementNode $statementNode, string $stdin = ''): int
+    /** $line numbers the first line, for source text that sits further down a script (eval, $(...)) */
+    private function parse(string $script, int $line = 1, bool $substitution = false): ScriptNode
     {
-        if ($statementNode->deferredError !== null) {
-            $this->writeStderr('bash: '.$statementNode->deferredError['message']."\n");
+        return new Parser($this->interpreterState->limits)->parse($script, $line, $substitution);
+    }
 
-            return 2;
-        }
-
+    /**
+     * Runs a script's top-level statements. A non-fatal expansion or arithmetic error abandons the
+     * rest of the input line the failing statement ends on, however deeply nested, with status 1;
+     * the next line still runs.
+     *
+     * @param  list<StatementNode>  $statements
+     */
+    private function executeTopLevel(array $statements, StdinStream $stdinStream): int
+    {
         $exitCode = 0;
-        $counter = count($statementNode->pipelines);
+        $abandonedLine = null;
+        $previousEnd = null;
 
-        for ($i = 0; $i < $counter; $i++) {
-            $pipeline = $statementNode->pipelines[$i];
-            $exitCode = $this->executePipeline($pipeline, $stdin);
-            $this->interpreterState->lastExitCode = $exitCode;
+        foreach ($statements as $statement) {
+            if ($statement->line === $abandonedLine) {
+                continue;
+            }
 
-            if ($i < count($statementNode->operators)) {
-                $op = $statementNode->operators[$i];
+            // bash expands aliases as it reads each line, so a line sees the aliases from before it began
+            if ($statement->line !== $previousEnd) {
+                $this->lineAliases = $this->interpreterState->aliases;
+            }
 
-                if ($op === '&&' && $exitCode !== 0) {
-                    break;
+            $previousEnd = $statement->endLine;
+
+            try {
+                $exitCode = $this->executeStatement($statement, $stdinStream);
+            } catch (ArithmeticException|ExpansionException|AssignmentException $e) {
+                // fatal ones (`${x?}`) keep unwinding to executeScript
+                if ($e instanceof ExpansionException && $e->fatal) {
+                    throw $e;
                 }
 
-                if ($op === '||' && $exitCode === 0) {
-                    break;
-                }
+                $this->writeStderr('bash: '.preg_replace('/^bash: /', '', $e->getMessage())."\n");
+                $exitCode = 1;
+                $this->interpreterState->lastExitCode = 1;
+                $abandonedLine = $statement->endLine;
             }
         }
 
-        // Run ERR trap on non-zero exit
-        if ($exitCode !== 0 && isset($this->interpreterState->traps['ERR']) && $this->interpreterState->traps['ERR'] !== '') {
-            $errTrap = $this->interpreterState->traps['ERR'];
+        return $exitCode;
+    }
+
+    private function runExitTrap(int $exitCode, StdinStream $stdinStream): int
+    {
+        $trap = $this->interpreterState->traps['EXIT'] ?? '';
+        unset($this->interpreterState->traps['EXIT']);
+
+        if ($trap === '') {
+            return $exitCode;
+        }
+
+        $this->interpreterState->lastExitCode = $exitCode;
+
+        try {
+            $this->runInShell($trap, $stdinStream, errorPrefix: 'bash: exit trap: ');
+        } catch (ExitException|ErrexitException $e) {
+            // `exit N` inside the trap replaces the status
+            return $e->exitCode;
+        }
+
+        return $exitCode;
+    }
+
+    /**
+     * Runs source text (eval, source, a trap) in the current shell, where exit/return keep unwinding; a syntax error is status 2.
+     *
+     * @param  array<string, string>|null  $aliases  an alias's text keeps the aliases of the line it was used on
+     */
+    private function runInShell(string $script, StdinStream $stdinStream, int $line = 1, ?array $aliases = null, string $errorPrefix = 'bash: '): int
+    {
+        $currentLine = $this->interpreterState->currentLine;
+        $lineAliases = $this->lineAliases;
+        $this->lineAliases = $aliases ?? $this->interpreterState->aliases;
+
+        try {
+            return $this->nested(fn (): int => $this->executeStatementList($this->parse($script, $line)->statements, $stdinStream));
+        } catch (ParseException $parseException) {
+            $this->writeStderr($errorPrefix.$parseException->getMessage()."\n");
+
+            return 2;
+        } finally {
+            $this->interpreterState->currentLine = $currentLine;
+            $this->lineAliases = $lineAliases;
+        }
+    }
+
+    /**
+     * runInShell() for a builtin, whose output must come back as a result so its redirections apply
+     *
+     * @param  array<string, string>|null  $aliases
+     */
+    private function captureInShell(string $script, StdinStream $stdinStream, int $line = 1, ?array $aliases = null, string $errorPrefix = 'bash: '): ExecResult
+    {
+        $savedStdout = $this->stdout;
+        $savedStderr = $this->stderr;
+        $this->stdout = '';
+        $this->stderr = '';
+
+        try {
+            $exitCode = $this->runInShell($script, $stdinStream, $line, $aliases, $errorPrefix);
+
+            return new ExecResult($this->stdout, $this->stderr, $exitCode);
+        } catch (Throwable $throwable) {
+            // exit/return unwinding: keep what was already written
+            $savedStdout .= $this->stdout;
+            $savedStderr .= $this->stderr;
+
+            throw $throwable;
+        } finally {
+            $this->stdout = $savedStdout;
+            $this->stderr = $savedStderr;
+        }
+    }
+
+    public function executeStatement(StatementNode $statementNode, StdinStream $stdinStream): int
+    {
+        // set -n: the rest of the script is read but not run
+        if ($this->interpreterState->shellOpts['noexec']) {
+            return $this->interpreterState->lastExitCode;
+        }
+
+        $final = count($statementNode->operators);
+        $last = 0;
+        // The ERR trap fires only if it was already set when the command began
+        $trapped = ($this->interpreterState->traps['ERR'] ?? '') !== '';
+        $exitCode = $this->runListPipeline($statementNode, 0, $stdinStream);
+
+        foreach ($statementNode->operators as $i => $op) {
+            // A skipped pipeline keeps the status, so `false && a || b` still reaches b
+            if (($op === '&&') === ($exitCode === 0)) {
+                $last = $i + 1;
+                $trapped = ($this->interpreterState->traps['ERR'] ?? '') !== '';
+                $exitCode = $this->runListPipeline($statementNode, $last, $stdinStream);
+            }
+        }
+
+        $pipeline = $statementNode->pipelines[$last];
+        $command = $pipeline->commands[0];
+
+        // ERR and errexit fire only for the final pipeline of an and-or list, not when it's negated or tested
+        // (if/while/until conditions, or anything running for one); a compound command fails only through a
+        // command inside it, which has already had its turn
+        if ($exitCode === 0 || $last !== $final || $pipeline->negated || $this->conditionDepth > 0
+            || (count($pipeline->commands) === 1 && ! $this->hasOwnStatus($command))) {
+            return $exitCode;
+        }
+
+        $errTrap = $this->interpreterState->traps['ERR'] ?? '';
+
+        if ($trapped && $errTrap !== '') {
             unset($this->interpreterState->traps['ERR']);
 
             try {
-                $trapResult = $this->execSubcommand($errTrap);
-                $this->writeStdout($trapResult->stdout);
-
-                if ($trapResult->stderr !== '') {
-                    $this->writeStderr($trapResult->stderr);
-                }
-            } catch (ExitException|ErrexitException) {
-                // Ignore
+                $this->runInShell($errTrap, $stdinStream, $this->interpreterState->currentLine, errorPrefix: 'bash: error trap: ');
+            } finally {
+                $this->interpreterState->traps['ERR'] = $errTrap;
             }
 
-            $this->interpreterState->traps['ERR'] = $errTrap;
+            $this->interpreterState->lastExitCode = $exitCode;
         }
 
-        // Check errexit
-        // Don't trigger errexit for conditions in if/while/until or negated pipelines
-        if (($this->interpreterState->shellOpts['errexit'] ?? false) && $exitCode !== 0 && $statementNode->operators === []) {
+        if ($this->interpreterState->shellOpts['errexit'] ?? false) {
             throw new ErrexitException($exitCode);
         }
 
         return $exitCode;
     }
 
-    public function executePipeline(PipelineNode $pipelineNode, string $stdin = ''): int
+    /** Runs pipeline $index of an and-or list; one followed by && or ||, or negated, runs as a condition. */
+    private function runListPipeline(StatementNode $statementNode, int $index, StdinStream $stdinStream): int
     {
-        $commands = $pipelineNode->commands;
+        $tested = $index < count($statementNode->operators) || $statementNode->pipelines[$index]->negated;
+        $this->conditionDepth += (int) $tested;
 
-        if ($commands === []) {
-            return 0;
+        try {
+            return $this->interpreterState->lastExitCode = $this->executePipeline($statementNode->pipelines[$index], $stdinStream);
+        } finally {
+            $this->conditionDepth -= (int) $tested;
         }
-
-        // Execute pipeline: thread stdout of each command into stdin of next
-        $currentStdin = $stdin;
-        $lastExitCode = 0;
-        $counter = count($commands);
-
-        for ($i = 0; $i < $counter; $i++) {
-            $command = $commands[$i];
-            $result = $this->executeCommand($command, $currentStdin);
-            $lastExitCode = $result->exitCode;
-
-            if ($result->stderr !== '') {
-                $this->writeStderr($result->stderr);
-            }
-
-            if ($i < count($commands) - 1) {
-                $currentStdin = $result->stdout;
-            } else {
-                $this->writeStdout($result->stdout);
-            }
-        }
-
-        if ($pipelineNode->negated) {
-            return $lastExitCode === 0 ? 1 : 0;
-        }
-
-        return $lastExitCode;
     }
 
-    public function executeCommand(Node $node, string $stdin = ''): ExecResult
+    public function executePipeline(PipelineNode $pipelineNode, StdinStream $stdinStream): int
+    {
+        $started = hrtime(true);
+        $cpuBefore = $this->cpuTimes();
+
+        // Thread each command's stdout (plus stderr for `|&`) into the next one's stdin
+        $statuses = [];
+        $lastIndex = count($pipelineNode->commands) - 1;
+
+        if ($lastIndex >= $this->interpreterState->limits->maxPipelineDepth) {
+            throw new ExecutionLimitException(sprintf('Pipeline limit exceeded (%d commands)', $this->interpreterState->limits->maxPipelineDepth));
+        }
+
+        // Each stage of a real pipeline is a subshell, the last one too unless `shopt -s lastpipe`
+        $stage = fn (int $i, CommandNode $command, StdinStream $stdinStream): ExecResult => $lastIndex > 0 && ($i < $lastIndex || ! $this->interpreterState->shopt['lastpipe'])
+            ? $this->inSubshell(fn (): ExecResult => $this->executeCommand($command, $stdinStream), counted: false)
+            : $this->executeCommand($command, $stdinStream);
+
+        foreach ($pipelineNode->commands as $i => $command) {
+            if ($i === $lastIndex) {
+                $result = $stage($i, $command, $stdinStream);
+                $statuses[] = $result->exitCode;
+                $this->appendStderr($result->stderr);
+                $this->writeStdout($result->stdout);
+
+                break;
+            }
+
+            // An earlier stage writes into the pipe, a capture level of its own
+            $result = $this->inCaptureLevel(
+                fn (): ExecResult => $this->capture(fn (): ExecResult => $stage($i, $command, $stdinStream)),
+                $pipelineNode->pipeStderr[$i] ?? false,
+            );
+            $statuses[] = $result->exitCode;
+            $this->appendStderr($result->stderr);
+            $stdinStream = new StdinStream($result->stdout);
+        }
+
+        // A lone compound command leaves PIPESTATUS as the last pipeline inside it set it
+        if ($lastIndex > 0 || $this->hasOwnStatus($pipelineNode->commands[0])) {
+            unset($this->interpreterState->env['PIPESTATUS']);
+            $this->interpreterState->arrays['PIPESTATUS'] = array_map(strval(...), $statuses);
+        }
+
+        // pipefail: the rightmost failing command decides
+        $failures = array_filter($statuses);
+        $exitCode = ($this->interpreterState->shellOpts['pipefail'] ?? false) && $failures !== [] ? end($failures) : end($statuses);
+
+        if ($pipelineNode->timed) {
+            $this->reportTime($pipelineNode->timePosix, intdiv(hrtime(true) - $started, 1000), $cpuBefore);
+        }
+
+        return $pipelineNode->negated ? (int) ($exitCode === 0) : (int) $exitCode;
+    }
+
+    /** A simple command, subshell, ((...)) or [[...]]: unlike other compound commands and definitions, its status is its own */
+    private function hasOwnStatus(CommandNode $commandNode): bool
+    {
+        return $commandNode instanceof SimpleCommandNode || $commandNode instanceof SubshellNode
+            || $commandNode instanceof ArithmeticCommandNode || $commandNode instanceof ConditionalCommandNode;
+    }
+
+    /**
+     * `time`'s report on the shell's stderr: TIMEFORMAT (bash's default when unset, the POSIX format for
+     * `time -p`) filled in with real time and the user/system CPU time this process spent on the pipeline.
+     *
+     * @param  array{int, int}  $before  cpuTimes() from when the pipeline started
+     */
+    private function reportTime(bool $posix, int $real, array $before): void
+    {
+        [$user, $sys] = $this->cpuTimes();
+        $user -= $before[0];
+        $sys -= $before[1];
+        $format = $posix ? "real %2R\nuser %2U\nsys %2S" : $this->interpreterState->getVar('TIMEFORMAT') ?? "\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS";
+        $percent = $real === 0 ? 0 : intdiv(($user + $sys) * 10000, $real);
+        $output = '';
+
+        for ($i = 0, $len = strlen($format); $i < $len; $i++) {
+            if ($format[$i] !== '%' || $i + 1 === $len) {
+                $output .= $format[$i];
+
+                continue;
+            }
+
+            $char = $format[++$i];
+
+            if ($char === '%' || $char === 'P') {
+                // bash scales %P's fraction as milliseconds but formats it as microseconds, so it always ends in .00
+                $output .= $char === '%' ? '%' : $this->formatSeconds(intdiv($percent, 100), $percent % 100 * 10, 2, false);
+
+                continue;
+            }
+
+            $precision = ctype_digit($char) ? min(6, (int) $char) : 3;
+            $char = ctype_digit($char) ? $format[++$i] ?? '' : $char;
+            $long = $char === 'l';
+            $char = $long ? $format[++$i] ?? '' : $char;
+            $micros = match ($char) {
+                'R', 'E' => $real,
+                'U' => $user,
+                'S' => $sys,
+                default => null,
+            };
+
+            if ($micros === null) {
+                $this->writeStderr(sprintf("bash: TIMEFORMAT: `%s': invalid format character\n", $char === '' ? "\0" : $char));
+
+                return;
+            }
+
+            $output .= $this->formatSeconds(intdiv($micros, 1_000_000), $micros % 1_000_000, $precision, $long);
+        }
+
+        // An empty TIMEFORMAT prints nothing at all
+        $this->writeStderr($format === '' ? '' : $output."\n");
+    }
+
+    /**
+     * The whole pipeline runs in this process, so its CPU time is this process's getrusage() delta.
+     *
+     * @return array{int, int} user and system CPU time used so far, in microseconds
+     */
+    private function cpuTimes(): array
+    {
+        $usage = getrusage() ?: [];
+        $field = fn (string $key): int => is_int($usage[$key] ?? null) ? $usage[$key] : 0;
+        $micros = fn (string $kind): int => $field(sprintf('ru_%s.tv_sec', $kind)) * 1_000_000 + $field(sprintf('ru_%s.tv_usec', $kind));
+
+        return [$micros('utime'), $micros('stime')];
+    }
+
+    /** bash's mkfmt(): [MMm]SS[.FFF][s] with the fraction rounded to $precision places, carry quirk included */
+    private function formatSeconds(int $seconds, int $micros, int $precision, bool $long): string
+    {
+        $text = $long ? intdiv($seconds, 60).'m'.($seconds % 60) : (string) $seconds;
+
+        if ($precision > 0) {
+            $unit = 10 ** (6 - $precision);
+            $micros = (intdiv($micros, $unit) + ($micros % $unit >= intdiv($unit, 2) ? 1 : 0)) * $unit;
+            $text .= '.';
+
+            for ($place = 5; $place >= 6 - $precision; $place--) {
+                $text .= chr(48 + intdiv($micros, 10 ** $place));
+                $micros %= 10 ** $place;
+            }
+        }
+
+        return $text.($long ? 's' : '');
+    }
+
+    /**
+     * Runs $run with empty output buffers and returns what was written plus the result's own output.
+     * On break/return/exit unwinding through, what was written so far is kept.
+     *
+     * @param  Closure(): ExecResult  $run
+     */
+    private function capture(Closure $run): ExecResult
+    {
+        $savedStdout = $this->stdout;
+        $savedStderr = $this->stderr;
+        $this->stdout = '';
+        $this->stderr = '';
+
+        try {
+            $result = $run();
+        } catch (Throwable $throwable) {
+            $this->stdout = $savedStdout.$this->stdout;
+            $this->stderr = $savedStderr.$this->stderr;
+
+            throw $throwable;
+        }
+
+        $execResult = new ExecResult($this->stdout.$result->stdout, $this->stderr.$result->stderr, $result->exitCode);
+        $this->stdout = $savedStdout;
+        $this->stderr = $savedStderr;
+
+        return $execResult;
+    }
+
+    /**
+     * Runs $run as a new capture level (a pipe stage, `$(...)`): fd 1 (and fd 2 for `|&`) is the capture,
+     * and fd changes don't outlive it. Output sent to an outer level's stdout through a duplicated fd
+     * (`exec 3>&1; x=$(echo hi >&3)`) is delivered once that level is current again.
+     *
+     * @template T
+     *
+     * @param  Closure(): T  $run
+     * @return T
+     */
+    private function inCaptureLevel(Closure $run, bool $stderrToo = false): mixed
+    {
+        $savedFds = $this->fds;
+        $this->fds[1] = '@1:'.++$this->captureLevel;
+
+        if ($stderrToo) {
+            $this->fds[2] = $this->fds[1];
+        }
+
+        try {
+            return $run();
+        } finally {
+            $this->fds = $savedFds;
+            $this->captureLevel--;
+            $this->writeStdout($this->passthrough[$this->captureLevel] ?? '');
+            unset($this->passthrough[$this->captureLevel]);
+        }
+    }
+
+    /**
+     * After a command, puts back the fds its redirections changed; other changes (`exec 3>f` inside it) stay.
+     *
+     * @param  array<int, string|StdinStream>  $saved
+     * @param  array<int, string|StdinStream>  $installed
+     */
+    private function restoreFds(array $saved, array $installed): void
+    {
+        foreach (array_keys($saved + $installed) as $fd) {
+            if (($saved[$fd] ?? null) === ($installed[$fd] ?? null)) {
+                continue;
+            }
+
+            if (isset($saved[$fd])) {
+                $this->fds[$fd] = $saved[$fd];
+            } else {
+                unset($this->fds[$fd]);
+            }
+        }
+    }
+
+    /** Process substitutions the command opens are closed when it finishes, after any `>(...)` reader has run. */
+    public function executeCommand(CommandNode $commandNode, StdinStream $stdinStream): ExecResult
+    {
+        $mark = count($this->processSubstitutions);
+
+        try {
+            $result = $this->runCommandNode($commandNode, $stdinStream);
+
+            foreach (array_slice($this->processSubstitutions, $mark) as ['path' => $path, 'reader' => $reader]) {
+                if ($reader !== null) {
+                    // A command may have removed or replaced the file; its reader then gets nothing
+                    $read = $this->runProcessSubstitution($reader, ($this->statPath($path)->isFile ?? false) ? $this->fileSystem->readFile($path) : '');
+                    $result = new ExecResult($result->stdout.$read->stdout, $result->stderr.$read->stderr, $result->exitCode);
+                }
+            }
+
+            return $result;
+        } finally {
+            foreach (array_splice($this->processSubstitutions, $mark) as ['path' => $path]) {
+                $this->tryFs(fn () => $this->fileSystem->rm($path, ['force' => true, 'recursive' => true]));
+            }
+        }
+    }
+
+    /**
+     * `<(cmd)` and `>(cmd)` expand to a file at /dev/fd/N (63 down, numbered as bash does) that any command can open.
+     * `<(cmd)` runs now and the file holds its output; `>(cmd)` runs once the command that expanded it is done,
+     * reading what was written to the file. Both run in a subshell; the file goes when the command finishes.
+     */
+    public function processSubstitution(string $direction, string $script): string
+    {
+        $subshellNode = new SubshellNode($this->parse($script, $this->interpreterState->currentLine, substitution: true)->statements);
+        $path = '/dev/fd/'.(63 - count($this->processSubstitutions));
+        $this->processSubstitutions[] = ['path' => $path, 'reader' => $direction === '>' ? $subshellNode : null];
+        $content = '';
+
+        if ($direction === '<') {
+            $result = $this->runProcessSubstitution($subshellNode, '');
+            $this->writeStderr($result->stderr);
+            $content = $result->stdout;
+        }
+
+        $error = $this->tryFs(function () use ($path, $content): void {
+            $this->fileSystem->mkdir('/dev/fd', ['recursive' => true]);
+            $this->fileSystem->writeFile($path, $content);
+        });
+
+        return $error === null ? $path : throw new ExpansionException('bash: cannot make pipe for process substitution: '.$error);
+    }
+
+    private function runProcessSubstitution(SubshellNode $subshellNode, string $stdin): ExecResult
+    {
+        return $this->nested(fn (): ExecResult => $this->inCaptureLevel(fn (): ExecResult => $this->capture(fn (): ExecResult => $this->executeSubshell($subshellNode, new StdinStream($stdin)))));
+    }
+
+    /**
+     * Runs nested shell text ($(...), <(...), eval, source, a trap) within maxSubstitutionDepth.
+     *
+     * @template T
+     *
+     * @param  Closure(): T  $run
+     * @return T
+     */
+    private function nested(Closure $run): mixed
+    {
+        if ($this->nesting >= $this->interpreterState->limits->maxSubstitutionDepth) {
+            throw new ExecutionLimitException(sprintf('Substitution depth limit exceeded (%d)', $this->interpreterState->limits->maxSubstitutionDepth));
+        }
+
+        $this->nesting++;
+
+        try {
+            return $run();
+        } finally {
+            $this->nesting--;
+        }
+    }
+
+    private function runCommandNode(CommandNode $commandNode, StdinStream $stdinStream): ExecResult
     {
         $this->interpreterState->incrementCommandCount();
+        $this->interpreterState->currentLine = $commandNode->line;
 
-        if ($node instanceof SimpleCommandNode) {
-            return $this->executeSimpleCommand($node, $stdin);
+        if (! $commandNode instanceof CompoundCommandNode) {
+            return $this->dispatchCommand($commandNode, $stdinStream);
         }
 
-        if ($node instanceof IfNode) {
-            return $this->executeIf($node, $stdin);
+        $opened = $this->openRedirections($commandNode->redirections, $stdinStream);
+
+        if ($opened instanceof ExecResult) {
+            return $opened;
         }
 
-        if ($node instanceof ForNode) {
-            return $this->executeFor($node, $stdin);
-        }
+        // The body runs with the compound's fds, so its commands write straight to the targets; what reaches
+        // the buffers is for the caller's stdout/stderr, captured so it can flow into a pipe after the compound.
+        $savedFds = $this->fds;
+        $this->fds = $opened['fds'];
 
-        if ($node instanceof CStyleForNode) {
-            return $this->executeCStyleFor($node, $stdin);
+        try {
+            return $this->capture(fn (): ExecResult => $this->routeOutput($this->dispatchCommand($commandNode, $opened['stdin'] ?? $stdinStream), $this->fds));
+        } finally {
+            $this->restoreFds($savedFds, $opened['fds']);
         }
+    }
 
-        if ($node instanceof WhileNode) {
-            return $this->executeWhile($node, $stdin);
+    private function dispatchCommand(Node $node, StdinStream $stdinStream): ExecResult
+    {
+        // The parser builds only these node types; anything else fails loudly with UnhandledMatchError
+        return match (true) { // @phpstan-ignore match.unhandled
+            $node instanceof SimpleCommandNode => $this->executeSimpleCommand($node, $stdinStream),
+            $node instanceof IfNode => $this->executeIf($node, $stdinStream),
+            $node instanceof ForNode => $this->inLoop(fn (): ExecResult => $this->executeFor($node, $stdinStream)),
+            $node instanceof CStyleForNode => $this->inLoop(fn (): ExecResult => $this->executeCStyleFor($node, $stdinStream)),
+            $node instanceof WhileNode => $this->inLoop(fn (): ExecResult => $this->executeWhile($node, $stdinStream)),
+            $node instanceof UntilNode => $this->inLoop(fn (): ExecResult => $this->executeUntil($node, $stdinStream)),
+            $node instanceof CaseNode => $this->executeCase($node, $stdinStream),
+            $node instanceof SubshellNode => $this->executeSubshell($node, $stdinStream),
+            $node instanceof GroupNode => $this->executeGroup($node, $stdinStream),
+            $node instanceof ArithmeticCommandNode => $this->executeArithmeticCommand($node),
+            $node instanceof ConditionalCommandNode => $this->executeConditionalCommand($node),
+            $node instanceof FunctionDefNode => $this->executeFunctionDef($node),
+        };
+    }
+
+    /**
+     * Tracks loop nesting so break/continue outside a loop can be rejected like bash does.
+     *
+     * @param  Closure(): ExecResult  $loop
+     */
+    private function inLoop(Closure $loop): ExecResult
+    {
+        $this->loopDepth++;
+
+        try {
+            return $loop();
+        } finally {
+            $this->loopDepth--;
         }
-
-        if ($node instanceof UntilNode) {
-            return $this->executeUntil($node, $stdin);
-        }
-
-        if ($node instanceof CaseNode) {
-            return $this->executeCase($node, $stdin);
-        }
-
-        if ($node instanceof SubshellNode) {
-            return $this->executeSubshell($node, $stdin);
-        }
-
-        if ($node instanceof GroupNode) {
-            return $this->executeGroup($node, $stdin);
-        }
-
-        if ($node instanceof ArithmeticCommandNode) {
-            return $this->executeArithmeticCommand($node);
-        }
-
-        if ($node instanceof ConditionalCommandNode) {
-            return $this->executeConditionalCommand($node);
-        }
-
-        if ($node instanceof FunctionDefNode) {
-            return $this->executeFunctionDef($node);
-        }
-
-        return new ExecResult(exitCode: 1);
     }
 
     // =========================================================================
     // SIMPLE COMMAND
     // =========================================================================
 
-    private function executeSimpleCommand(SimpleCommandNode $simpleCommandNode, string $stdin = ''): ExecResult
+    private function executeSimpleCommand(SimpleCommandNode $simpleCommandNode, StdinStream $stdinStream): ExecResult
     {
+        if (($aliased = $this->expandAlias($simpleCommandNode, $stdinStream)) instanceof ExecResult) {
+            return $aliased;
+        }
+
+        if ($this->interpreterState->shellOpts['keyword']) {
+            $simpleCommandNode = $this->keywordAssignments($simpleCommandNode);
+        }
+
+        $prefixAssignments = [];
+        $this->interpreterState->substitutionStatus = null;
+
+        foreach ($simpleCommandNode->assignments as $assignment) {
+            $prefixAssignments[] = $this->resolveAssignment($assignment);
+        }
+
+        if (($this->interpreterState->shellOpts['xtrace'] ?? false) && ($simpleCommandNode->assignments !== [] || $simpleCommandNode->name instanceof \BashBox\Ast\WordNode)) {
+            $this->writeStderr('+ '.$this->formatTraceCommand($simpleCommandNode, $prefixAssignments)."\n");
+        }
+
+        // Command name and args both go through field splitting, so `$CMD arg` with CMD="ls -l" runs ls.
+        $words = [];
+
+        if ($simpleCommandNode->name instanceof \BashBox\Ast\WordNode) {
+            $words = $this->expandWordList($simpleCommandNode->name);
+        }
+
+        foreach ($simpleCommandNode->args as $arg) {
+            array_push($words, ...$this->expandWordList($arg));
+        }
+
+        $opened = $this->openRedirections($simpleCommandNode->redirections, $stdinStream);
+
+        if ($opened instanceof ExecResult) {
+            return $opened;
+        }
+
+        $fds = $opened['fds'];
+        $redirectedStdin = $opened['stdin'] ?? $stdinStream;
+
+        // `exec` without a command applies its redirections to the shell itself
+        if ($words === ['exec'] && ! isset($this->interpreterState->disabledBuiltins['exec'])) {
+            $this->fds = $fds;
+
+            if ($opened['stdin'] instanceof StdinStream) {
+                $stdinStream->redirect($opened['stdin']);
+            }
+
+            return new ExecResult(exitCode: 0);
+        }
+
+        // No command name - just assignments
+        if ($words === []) {
+            foreach ($prefixAssignments as $prefixAssignment) {
+                $this->applyAssignment($prefixAssignment);
+            }
+
+            return new ExecResult(exitCode: $this->interpreterState->substitutionStatus ?? 0);
+        }
+
+        $commandName = array_shift($words);
+
+        // Prefix assignments (`IFS=: read`, `x=1 f`) hold, exported, only for this one command
+        $savedVars = [];
+
+        foreach ($prefixAssignments as $prefixAssignment) {
+            $name = $prefixAssignment['name'];
+
+            // like bash: report it on the shell's stderr (not the command's) and run the command anyway
+            if ($this->interpreterState->isReadonly($name)) {
+                $this->writeStderr("bash: {$name}: readonly variable\n");
+
+                continue;
+            }
+
+            $savedVars[$name] ??= [$this->interpreterState->getVar($name), isset($this->interpreterState->exported[$name])];
+            // bash's temporary variable for the command has none of the -i, -l and -u attributes
+            $this->interpreterState->setVar($name, $prefixAssignment['value'] ?? '', plain: true);
+            $this->interpreterState->exported[$name] = true;
+        }
+
+        // `declare -A m=(...)`: the builtin sees the name m, and assigns the array once it has the attributes
+        $arrayOperands = [];
+
+        foreach (in_array($commandName, ['declare', 'typeset', 'local', 'readonly', 'export'], true) ? $simpleCommandNode->arrayArgs : [] as $arrayArg) {
+            $arrayOperands[$arrayArg->name] = $this->resolveAssignment($arrayArg);
+        }
+
+        // The command (and anything it runs) writes through its own fds; its output arrives already routed
+        $savedFds = $this->fds;
+        $this->fds = $fds;
+        $this->arrayOperands = $arrayOperands;
+
         try {
-            $prefixAssignments = [];
+            return $this->tryBuiltin($commandName, $words, $redirectedStdin)
+                ?? (isset($this->interpreterState->functions[$commandName])
+                    ? $this->callFunction($commandName, $words, $redirectedStdin)
+                    : $this->runCommand($commandName, $words, $redirectedStdin));
+        } finally {
+            $this->arrayOperands = [];
+            $this->restoreVars($savedVars);
+            $this->restoreFds($savedFds, $fds);
+        }
+    }
 
-            foreach ($simpleCommandNode->assignments as $assignment) {
-                $prefixAssignments[] = $this->resolveAssignment($assignment);
+    /** set -k: assignments among the arguments, not just before the command name, go into the command's environment */
+    private function keywordAssignments(SimpleCommandNode $simpleCommandNode): SimpleCommandNode
+    {
+        $args = [];
+        $assignments = $simpleCommandNode->assignments;
+
+        foreach ($simpleCommandNode->args as $arg) {
+            $first = $arg->parts[0] ?? null;
+
+            if ($first instanceof \BashBox\Ast\Parts\LiteralPart && preg_match('/^([a-zA-Z_]\w*)(\+?)=(.*)$/s', $first->value, $m) === 1) {
+                $assignments[] = new \BashBox\Ast\AssignmentNode($m[1], new WordNode([new \BashBox\Ast\Parts\LiteralPart($m[3]), ...array_slice($arg->parts, 1)]), $m[2] === '+');
+            } else {
+                $args[] = $arg;
+            }
+        }
+
+        return new SimpleCommandNode($simpleCommandNode->name, $args, $assignments, $simpleCommandNode->redirections, $simpleCommandNode->line, $simpleCommandNode->arrayArgs);
+    }
+
+    /**
+     * With `shopt -s expand_aliases`, a command named by an unquoted alias runs as the alias text followed by
+     * the rest of the command; an alias isn't expanded again inside its own expansion.
+     */
+    private function expandAlias(SimpleCommandNode $simpleCommandNode, StdinStream $stdinStream): ?ExecResult
+    {
+        $name = $simpleCommandNode->name instanceof WordNode ? $this->rawWordValue($simpleCommandNode->name) : '';
+        $alias = $this->lineAliases[$name] ?? null;
+
+        if ($alias === null || ! $this->interpreterState->shopt['expand_aliases'] || isset($this->expandingAliases[$name])) {
+            return null;
+        }
+
+        $this->expandingAliases[$name] = true;
+
+        try {
+            $expanded = new SimpleCommandNode(
+                new WordNode([new \BashBox\Ast\Parts\LiteralPart($alias)]),
+                $simpleCommandNode->args,
+                $simpleCommandNode->assignments,
+                $simpleCommandNode->redirections,
+                $simpleCommandNode->line,
+                $simpleCommandNode->arrayArgs,
+            );
+
+            return $this->captureInShell(FunctionPrinter::simpleCommandText($expanded), $stdinStream, $simpleCommandNode->line, $this->lineAliases);
+        } finally {
+            unset($this->expandingAliases[$name]);
+        }
+    }
+
+    /** @param list<string> $args */
+    private function callFunction(string $name, array $args, StdinStream $stdinStream): ExecResult
+    {
+        // break/continue in a function body can't reach the caller's loops
+        $loopDepth = $this->loopDepth;
+        $this->loopDepth = 0;
+
+        try {
+            return $this->executeFunction($name, $args, $stdinStream);
+        } finally {
+            $this->loopDepth = $loopDepth;
+        }
+    }
+
+    /** @param array<string, array{?string, bool}> $savedVars value (null = was unset) and export attribute from before a prefix assignment */
+    private function restoreVars(array $savedVars): void
+    {
+        foreach ($savedVars as $name => [$value, $exported]) {
+            if ($value === null) {
+                unset($this->interpreterState->env[$name]);
+            } else {
+                $this->interpreterState->setVar($name, $value, plain: true);
             }
 
-            if (($this->interpreterState->shellOpts['xtrace'] ?? false) && ($simpleCommandNode->assignments !== [] || $simpleCommandNode->name instanceof \BashBox\Ast\WordNode)) {
-                $this->writeStderr('+ '.$this->formatTraceCommand($simpleCommandNode, $prefixAssignments)."\n");
+            if (! $exported) {
+                unset($this->interpreterState->exported[$name]);
             }
+        }
+    }
 
-            // No command name - just assignments
-            if (! $simpleCommandNode->name instanceof \BashBox\Ast\WordNode) {
-                foreach ($prefixAssignments as $prefixAssignment) {
-                    $result = $this->applyAssignment($prefixAssignment);
+    /**
+     * Runs a registered (external-style) command, skipping builtins and functions.
+     *
+     * @param  list<string>  $args
+     */
+    private function runCommand(string $name, array $args, StdinStream $stdinStream): ExecResult
+    {
+        if (str_contains($name, '/')) {
+            return $this->routeOutput($this->runScriptFile($name, $args, $stdinStream), $this->fds);
+        }
 
-                    if ($result instanceof ExecResult) {
-                        return $result;
-                    }
-                }
+        $cmd = $this->commandRegistry->get($name);
 
-                return new ExecResult(exitCode: 0);
-            }
+        if (! $cmd instanceof \BashBox\Commands\CommandInterface) {
+            return $this->routeOutput(new ExecResult(stderr: "bash: {$name}: command not found\n", exitCode: 127), $this->fds);
+        }
 
-            $commandName = $this->expandWord($simpleCommandNode->name);
-            $args = [];
+        return $this->routeOutput($cmd->execute($args, $this->commandContext($stdinStream)), $this->fds, in_array($name, self::REGISTRY_BUILTINS, true) ? 'bash: '.$name : $name);
+    }
 
-            foreach ($simpleCommandNode->args as $arg) {
-                array_push($args, ...$this->expandWordList($arg));
-            }
+    private function commandContext(StdinStream $stdinStream): CommandContext
+    {
+        return new CommandContext(
+            fs: $this->fileSystem,
+            cwd: $this->interpreterState->cwd,
+            env: $this->interpreterState->getExportedEnv(),
+            stdin: $stdinStream,
+            limits: $this->interpreterState->limits,
+            exec: $this->runForCommand(...),
+            fetch: $this->secureHttpClient,
+            registry: $this->commandRegistry,
+            umask: (int) octdec($this->interpreterState->umask),
+        );
+    }
 
-            // Handle redirections for stdin
-            $redirectedStdin = $stdin;
-            $redirectedStdout = null;
-            $appendMode = false;
-            $allowClobber = false;
+    /**
+     * `printf -v name format [arguments]`: the printf command's output, newlines and all, assigned to the variable
+     * (or element); without -v it's left to the printf command.
+     *
+     * @param  list<string>  $args
+     */
+    private function builtinPrintf(array $args, StdinStream $stdinStream): ?ExecResult
+    {
+        if (preg_match('/^-v(.*)$/s', $args[0] ?? '', $m) !== 1) {
+            return null;
+        }
 
-            foreach ($simpleCommandNode->redirections as $redir) {
-                $result = $this->processRedirection($redir);
+        $usage = "printf: usage: printf [-v var] format [arguments]\n";
+        $name = $m[1] === '' ? $args[1] ?? null : $m[1];
+        $args = array_slice($args, $m[1] === '' ? 2 : 1);
 
-                if ($result['stdin'] !== null) {
-                    $redirectedStdin = $result['stdin'];
-                }
+        if ($name === null) {
+            return new ExecResult(stderr: "bash: printf: -v: option requires an argument\n".$usage, exitCode: 2);
+        }
 
-                if ($result['stdout'] !== null) {
-                    $redirectedStdout = $result['stdout'];
-                    $appendMode = $result['append'];
-                    $allowClobber = $result['allowClobber'];
-                }
-            }
+        if (preg_match('/^[a-zA-Z_]\w*(\[.+\])?$/s', $name) !== 1) {
+            return new ExecResult(stderr: "bash: printf: `{$name}': not a valid identifier\n", exitCode: 2);
+        }
 
-            // Try builtin first
-            $builtinResult = $this->tryBuiltin($commandName, $args, $redirectedStdin);
+        if (array_values(array_diff($args, ['--'])) === []) {
+            return new ExecResult(stderr: $usage, exitCode: 2);
+        }
 
-            if ($builtinResult instanceof \BashBox\ExecResult) {
-                return $this->handleOutputRedirection($builtinResult, $redirectedStdout, $appendMode, $allowClobber);
-            }
+        $result = $this->commandRegistry->get('printf')?->execute($args, $this->commandContext($stdinStream)) ?? new ExecResult;
+        $this->readAssign($name, $result->stdout);
 
-            // Try function
-            if (isset($this->interpreterState->functions[$commandName])) {
-                $result = $this->executeFunction($commandName, $args, $redirectedStdin);
+        return new ExecResult(stderr: $result->stderr, exitCode: $result->exitCode);
+    }
 
-                return $this->handleOutputRedirection($result, $redirectedStdout, $appendMode, $allowClobber);
-            }
+    /**
+     * A command named by path runs the file as a script in a child shell that sees only exported variables.
+     *
+     * @param  list<string>  $args
+     */
+    private function runScriptFile(string $name, array $args, StdinStream $stdinStream): ExecResult
+    {
+        $stat = $this->statPath($name);
+        [$error, $status] = match (true) {
+            ! $stat instanceof \BashBox\Filesystem\FsStat => ['No such file or directory', 127],
+            $stat->isDirectory => ['Is a directory', 126],
+            ($stat->mode & 0o111) === 0 => ['Permission denied', 126],
+            default => [null, 0],
+        };
+        $script = '';
 
-            // Try registered command
-            $cmd = $this->commandRegistry->get($commandName);
+        try {
+            $script = $error === null ? $this->fileSystem->readFile($this->resolveFsPath($name)) : '';
+        } catch (RuntimeException $runtimeException) {
+            [$error, $status] = [$this->strerror($runtimeException), 126];
+        }
 
-            if ($cmd instanceof \BashBox\Commands\CommandInterface) {
-                // Set prefix assignments as temporary env
-                $env = $this->interpreterState->getExportedEnv();
+        // Only a shell script can run here: no other interpreter exists in the sandbox
+        $interpreter = preg_match('/^#!\s*(\S+)(?:\s+(\S+))?/', $script, $m) === 1 ? $m[1] : null;
 
-                foreach ($prefixAssignments as $prefixAssignment) {
-                    if ($prefixAssignment['type'] === 'scalar') {
-                        $env[$prefixAssignment['name']] = $prefixAssignment['value'] ?? '';
-                    }
-                }
+        if ($interpreter !== null && ! in_array(basename($interpreter === '/usr/bin/env' ? $m[2] ?? '' : $interpreter), ['bash', 'sh'], true)) {
+            [$error, $status] = [$interpreter.': bad interpreter: No such file or directory', 126];
+        }
 
-                $commandContext = new CommandContext(
-                    fs: $this->fileSystem,
-                    cwd: $this->interpreterState->cwd,
-                    env: $env,
-                    stdin: $redirectedStdin,
-                    limits: $this->interpreterState->limits,
-                    exec: fn (string $script): ExecResult => $this->execSubcommand($script),
-                    fetch: $this->secureHttpClient,
-                    registry: $this->commandRegistry,
-                );
+        if ($error !== null) {
+            return new ExecResult(stderr: sprintf("bash: %s: %s\n", $name, $error), exitCode: $status);
+        }
 
-                $result = $cmd->execute($args, $commandContext);
+        $interpreterState = new InterpreterState($this->interpreterState->getExportedEnv(), $this->interpreterState->cwd, $this->interpreterState->limits);
+        $interpreterState->positionalParams = $args;
+        $interpreterState->scriptName = $name;
+        $interpreterState->commandCount = $this->interpreterState->commandCount;
 
-                return $this->handleOutputRedirection($result, $redirectedStdout, $appendMode, $allowClobber);
-            }
+        $child = new self($interpreterState, $this->fileSystem, $this->commandRegistry, $this->secureHttpClient);
 
-            $stderr = "bash: {$commandName}: command not found\n";
+        try {
+            return $this->nested(function () use ($child, $script, $stdinStream, $name): ExecResult {
+                // The child counts toward the same nesting and command limits, so a script running itself stops
+                $child->nesting = $this->nesting;
 
-            return new ExecResult(stderr: $stderr, exitCode: 127);
-        } catch (UnboundVariableException $unboundVariableException) {
-            return new ExecResult(stderr: $unboundVariableException->getMessage()."\n", exitCode: 1);
+                return $child->executeScript($script, $stdinStream, $name.': ');
+            });
+        } finally {
+            $this->interpreterState->commandCount = $interpreterState->commandCount;
         }
     }
 
@@ -374,59 +1051,88 @@ final class Interpreter
     // BUILTINS
     // =========================================================================
 
-    /** @param array<int, string> $args */
-    private function tryBuiltin(string $name, array $args, string $stdin): ?ExecResult
+    /** Commands BashBox implements in the registry that real bash runs as builtins */
+    private const array REGISTRY_BUILTINS = ['echo', 'printf', 'test', 'true', 'false', 'pwd'];
+
+    /** @param list<string> $args */
+    private function tryBuiltin(string $name, array $args, StdinStream $stdinStream): ?ExecResult
     {
         if (isset($this->interpreterState->disabledBuiltins[$name])) {
             return null;
         }
 
+        $assigning = $this->assigning;
+        $this->assigning = in_array($name, ['declare', 'typeset', 'local', 'export', 'readonly', 'read', 'printf'], true) ? $name.': ' : '';
+
+        try {
+            $result = $this->dispatchBuiltin($name, $args, $stdinStream);
+        } catch (AssignmentException $assignmentException) {
+            // a builtin assigning to a readonly variable (read, let, mapfile, getopts, ...) just fails, but a failed
+            // `declare a=(...)` abandons its line like a plain assignment
+            $result = $this->arrayOperands === [] ? new ExecResult(stderr: $assignmentException->getMessage()."\n", exitCode: 1) : throw $assignmentException;
+        } finally {
+            $this->assigning = $assigning;
+        }
+
+        // Builtins that run other commands return output those already routed through the fd table
+        return ! $result instanceof ExecResult || in_array($name, ['source', '.', 'eval', 'command', 'builtin', 'exec'], true)
+            ? $result
+            : $this->routeOutput($result, $this->fds, 'bash: '.$name);
+    }
+
+    /** @param list<string> $args */
+    private function dispatchBuiltin(string $name, array $args, StdinStream $stdinStream): ?ExecResult
+    {
         return match ($name) {
             'exit' => $this->builtinExit($args),
             'export' => $this->builtinExport($args),
             'unset' => $this->builtinUnset($args),
             'local' => $this->builtinLocal($args),
             'set' => $this->builtinSet($args),
-            'shopt' => $this->builtinShopt(),
+            'shopt' => $this->builtinShopt($args),
             'cd' => $this->builtinCd($args),
-            'source', '.' => $this->builtinSource($args),
-            'eval' => $this->builtinEval($args),
+            'source', '.' => $this->builtinSource($args, $stdinStream),
+            'eval' => $this->captureInShell(implode(' ', $args), $stdinStream, $this->interpreterState->currentLine, errorPrefix: 'bash: eval: '),
             'declare', 'typeset' => $this->builtinDeclare($args),
-            'read' => $this->builtinRead($args, $stdin),
+            'printf' => $this->builtinPrintf($args, $stdinStream),
+            'read' => $this->builtinRead($args, $stdinStream),
             'break' => $this->builtinBreak($args),
             'continue' => $this->builtinContinue($args),
             'return' => $this->builtinReturn($args),
             'shift' => $this->builtinShift($args),
             'let' => $this->builtinLet($args),
-            'getopts' => $this->builtinGetopts(),
-            'mapfile', 'readarray' => $this->builtinMapfile($args, $stdin),
+            'getopts' => $this->builtinGetopts($args),
+            'mapfile', 'readarray' => $this->builtinMapfile($args, $stdinStream),
             ':' => new ExecResult(exitCode: 0),
             'type' => $this->builtinType($args),
-            'command' => $this->builtinCommand($args, $stdin),
+            'command' => $this->builtinCommand($args, $stdinStream),
             'alias' => $this->builtinAlias($args),
             'unalias' => $this->builtinUnalias($args),
-            'hash' => new ExecResult(exitCode: 0),
+            // No external programs are ever looked up on PATH, so the hash table stays empty
+            'hash' => new ExecResult(stdout: $args === [] ? "hash: hash table empty\n" : ''),
             'readonly' => $this->builtinReadonly($args),
             'trap' => $this->builtinTrap($args),
-            'builtin' => $this->builtinBuiltin($args, $stdin),
-            'exec' => $this->builtinExec($args, $stdin),
+            'builtin' => $this->builtinBuiltin($args, $stdinStream),
+            'exec' => $this->builtinExec($args, $stdinStream),
             'pushd' => $this->builtinPushd($args),
             'popd' => $this->builtinPopd(),
             'dirs' => $this->builtinDirs($args),
             'caller' => $this->builtinCaller($args),
             'help' => $this->builtinHelp($args),
             'enable' => $this->builtinEnable($args),
-            'wait', 'disown', 'complete', 'compopt' => new ExecResult(exitCode: 0),
-            'jobs' => new ExecResult(exitCode: 0),
+            // There's no job control or programmable completion: these report an empty state
+            'wait', 'jobs', 'complete' => new ExecResult(exitCode: 0),
+            'compgen' => new ExecResult(exitCode: 1), // no completions are ever generated
+            'disown' => new ExecResult(stderr: 'bash: disown: '.($args[0] ?? 'current').": no such job\n", exitCode: 1),
+            'compopt' => new ExecResult(stderr: "bash: compopt: not currently executing completion function\n", exitCode: 1),
             'fg' => new ExecResult(stderr: "bash: fg: no job control\n", exitCode: 1),
             'bg' => new ExecResult(stderr: "bash: bg: no job control\n", exitCode: 1),
             'kill' => $this->builtinKill($args),
-            'suspend' => new ExecResult(stderr: "bash: suspend: cannot suspend\n", exitCode: 1),
-            'logout' => $this->builtinExit($args),
+            'suspend' => new ExecResult(stderr: "bash: suspend: cannot suspend: no job control\n", exitCode: 1),
+            'logout' => new ExecResult(stderr: "bash: logout: not login shell: use `exit'\n", exitCode: 1),
             'times' => new ExecResult(stdout: "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n", exitCode: 0),
             'ulimit' => $this->builtinUlimit($args),
             'umask' => $this->builtinUmask($args),
-            'compgen' => new ExecResult(exitCode: 1),
             default => null,
         };
     }
@@ -434,408 +1140,883 @@ final class Interpreter
     /** @param array<int, string> $args */
     private function builtinExit(array $args): ExecResult
     {
-        $code = $args !== [] ? (int) $args[0] : $this->interpreterState->lastExitCode;
+        if (count($args) > 1) {
+            $this->writeStderr("bash: exit: too many arguments\n");
 
-        throw new ExitException($code);
+            throw new ExitException(1);
+        }
+
+        throw new ExitException($this->parseStatusArg('exit', $args));
+    }
+
+    /**
+     * The optional status operand of exit/return, truncated to 0-255 like a process status.
+     *
+     * @param  array<int, string>  $args
+     */
+    private function parseStatusArg(string $builtin, array $args): int
+    {
+        if ($args === []) {
+            return $this->interpreterState->lastExitCode;
+        }
+
+        if (preg_match('/^\s*[-+]?\d+\s*$/', $args[0]) !== 1) {
+            $this->writeStderr("bash: {$builtin}: {$args[0]}: numeric argument required\n");
+
+            return 2;
+        }
+
+        return (int) $args[0] & 255;
     }
 
     /** @param array<int, string> $args */
     private function builtinExport(array $args): ExecResult
     {
-        foreach ($args as $arg) {
-            if (str_contains((string) $arg, '=')) {
-                [$name, $value] = explode('=', (string) $arg, 2);
-                // Strip -n flag
-                $name = ltrim($name, '-');
+        [$options, , $names] = $this->declarationOptions($args);
+        $valid = strspn($options, 'fnp');
 
-                if (str_starts_with($name, 'n')) {
-                    $name = substr($name, 1);
-                    unset($this->interpreterState->exportedVars[$name]);
+        if ($valid < strlen($options)) {
+            return new ExecResult(stderr: "bash: export: -{$options[$valid]}: invalid option\nexport: usage: export [-fn] [name[=value] ...] or export -p [-f]\n", exitCode: 2);
+        }
 
-                    continue;
-                }
+        // Functions are never passed to commands, so `export -f` only checks the names
+        if (str_contains($options, 'f')) {
+            $missing = array_diff($names, array_keys($this->interpreterState->functions));
 
-                if ($this->interpreterState->isReadonly($name)) {
-                    $this->writeStderr("bash: {$name}: readonly variable\n");
+            return new ExecResult(stderr: implode('', array_map(fn (string $name): string => "bash: export: {$name}: not a function\n", $missing)), exitCode: $missing === [] ? 0 : 1);
+        }
 
-                    return new ExecResult(exitCode: 1);
-                }
+        if ($names === []) {
+            $exported = array_keys($this->interpreterState->exported);
+            sort($exported);
 
-                $this->interpreterState->setVar($name, $value);
-                $this->interpreterState->exportedVars[$name] = $value;
+            return $this->printDeclarations($exported);
+        }
+
+        $status = 0;
+
+        foreach ($names as $arg) {
+            [$name, $value] = $this->splitAssignment($arg);
+
+            if (! $this->validIdentifier('export', $arg, $name)) {
+                $status = 1;
+
+                continue;
+            }
+
+            if ($value !== null && $this->interpreterState->isReadonly($name)) {
+                return new ExecResult(stderr: "bash: {$name}: readonly variable\n", exitCode: 1);
+            }
+
+            $this->assignOperand($name, $value);
+
+            if (str_contains($options, 'n')) {
+                unset($this->interpreterState->exported[$name]);
             } else {
-                $name = ltrim((string) $arg, '-');
-                $val = $this->interpreterState->getVar($name) ?? '';
-                $this->interpreterState->exportedVars[$name] = $val;
+                $this->interpreterState->exported[$name] = true;
             }
         }
 
-        return new ExecResult(exitCode: 0);
+        return new ExecResult(exitCode: $status);
     }
 
     /** @param array<int, string> $args */
     private function builtinUnset(array $args): ExecResult
     {
-        foreach ($args as $arg) {
-            if ($arg === '-v') {
-                continue;
+        $options = '';
+
+        while (preg_match('/^-(.+)$/s', $args[0] ?? '', $m) === 1) {
+            array_shift($args);
+
+            if ($m[1] === '-') {
+                break;
             }
 
-            if ($arg === '-f') {
-                continue;
-            }
-
-            if ($this->interpreterState->isReadonly($arg)) {
-                $this->writeStderr("bash: unset: {$arg}: cannot unset: readonly variable\n");
-
-                return new ExecResult(exitCode: 1);
-            }
-
-            if (preg_match('/^([a-zA-Z_]\w*)\[(.+)\]$/', $arg, $matches) === 1) {
-                $name = $matches[1];
-                $key = $this->normalizeArrayKey($matches[2]);
-                unset($this->interpreterState->arrays[$name][$key]);
-
-                continue;
-            }
-
-            $this->interpreterState->unsetVar($arg);
-            unset($this->interpreterState->arrays[$arg]);
+            $options .= $m[1];
         }
 
-        return new ExecResult(exitCode: 0);
+        $valid = strspn($options, 'fvn');
+
+        if ($valid < strlen($options)) {
+            return new ExecResult(stderr: "bash: unset: -{$options[$valid]}: invalid option\nunset: usage: unset [-f] [-v] [-n] [name ...]\n", exitCode: 2);
+        }
+
+        $reference = str_contains($options, 'n');
+        $stderr = '';
+
+        foreach ($args as $arg) {
+            if (str_contains($options, 'f')) {
+                unset($this->interpreterState->functions[$arg]);
+            } elseif (preg_match('/^([a-zA-Z_]\w*)(\[.+\])?$/s', $arg, $m) !== 1) {
+                // bash passes over other names that can't be variables
+                $stderr .= str_starts_with($arg, '-') ? "bash: unset: `{$arg}': not a valid identifier\n" : '';
+            } elseif ($this->interpreterState->isReadonly(explode('[', $reference ? $m[1] : $this->interpreterState->resolve($m[1]) ?? '')[0])) {
+                return new ExecResult(stderr: $stderr."bash: unset: {$m[1]}: cannot unset: readonly variable\n", exitCode: 1);
+            } else {
+                $this->interpreterState->unsetVar($arg, $reference);
+            }
+        }
+
+        return new ExecResult(stderr: $stderr, exitCode: $stderr === '' ? 0 : 1);
     }
 
     /** @param array<int, string> $args */
     private function builtinLocal(array $args): ExecResult
     {
-        foreach ($args as $arg) {
-            if (str_contains((string) $arg, '=')) {
-                [$name, $value] = explode('=', (string) $arg, 2);
-
-                if ($this->interpreterState->isReadonly($name)) {
-                    $this->writeStderr("bash: local: {$name}: readonly variable\n");
-
-                    return new ExecResult(exitCode: 1);
-                }
-
-                $this->interpreterState->declareLocal($name, $value);
-            } else {
-                $this->interpreterState->declareLocal($arg, '');
-            }
+        if ($this->interpreterState->localScopes === []) {
+            return new ExecResult(stderr: "bash: local: can only be used in a function\n", exitCode: 1);
         }
 
-        return new ExecResult(exitCode: 0);
+        // local takes declare's options; with no names it lists the function's locals
+        return $this->builtinDeclare($args, 'local');
     }
 
     /** @param array<int, string> $args */
     private function builtinSet(array $args): ExecResult
     {
         if ($args === []) {
+            $env = $this->interpreterState->env;
+            ksort($env);
             $output = '';
 
-            foreach ($this->interpreterState->env as $name => $value) {
-                $output .= "{$name}='{$value}'\n";
+            foreach ($env as $name => $value) {
+                // bash quotes only values that need it
+                $output .= $name.'='.(preg_match('/^[\w\/:,+@%=.~#-]*$/', $value) === 1 ? $value : "'".str_replace("'", "'\\''", $value)."'")."\n";
             }
 
-            return new ExecResult(stdout: $output, exitCode: 0);
+            return new ExecResult(stdout: $output);
         }
 
-        $i = 0;
+        // Letters bash accepts but that change nothing here map to null
+        $letters = ['a' => 'allexport', 'e' => 'errexit', 'u' => 'nounset', 'x' => 'xtrace', 'v' => 'verbose', 'f' => 'noglob', 'C' => 'noclobber', 'E' => 'errtrace', 'T' => 'functrace', 'k' => 'keyword', 'n' => 'noexec']
+            + array_fill_keys(str_split('bhmptBHP'), null);
+        $changes = [];
+        $listing = null;
+        $counter = count($args);
 
-        while ($i < count($args)) {
+        // Every option is checked before any takes effect: one bad option changes nothing
+        for ($i = 0; $i < $counter; $i++) {
             $arg = $args[$i];
 
-            if ($arg === '--') {
-                $this->interpreterState->positionalParams = array_slice($args, $i + 1);
+            if ($arg === '--' || ! in_array($arg[0] ?? '', ['-', '+'], true)) {
+                $positional = array_slice($args, $arg === '--' ? $i + 1 : $i);
 
                 break;
             }
 
-            if (str_starts_with((string) $arg, '-o')) {
-                $opt = $args[++$i] ?? '';
-                $this->interpreterState->shellOpts[$opt] = true;
-            } elseif (str_starts_with((string) $arg, '+o')) {
-                $opt = $args[++$i] ?? '';
-                $this->interpreterState->shellOpts[$opt] = false;
-            } elseif (str_starts_with((string) $arg, '-')) {
-                $flags = substr((string) $arg, 1);
+            $enable = $arg[0] === '-';
 
-                for ($j = 0; $j < strlen($flags); $j++) {
-                    $flag = $flags[$j];
-                    match ($flag) {
-                        'e' => $this->interpreterState->shellOpts['errexit'] = true,
-                        'u' => $this->interpreterState->shellOpts['nounset'] = true,
-                        'x' => $this->interpreterState->shellOpts['xtrace'] = true,
-                        'v' => $this->interpreterState->shellOpts['verbose'] = true,
-                        'f' => $this->interpreterState->shellOpts['noglob'] = true,
-                        'C' => $this->interpreterState->shellOpts['noclobber'] = true,
-                        default => null,
-                    };
+            foreach (str_split(substr($arg, 1)) as $flag) {
+                // `o` takes the next argument as an option name, wherever it is in a cluster (`set -euo pipefail`)
+                if ($flag === 'o' && ! isset($args[$i + 1])) {
+                    $listing = $enable;
+                } elseif ($flag === 'o' && array_key_exists($args[++$i], self::SET_OPTIONS)) {
+                    $changes[$args[$i]] = $enable;
+                } elseif ($flag === 'o') {
+                    return new ExecResult(stderr: "bash: set: {$args[$i]}: invalid option name\n", exitCode: 2);
+                } elseif (! array_key_exists($flag, $letters)) {
+                    return new ExecResult(stderr: "bash: set: -{$flag}: invalid option\nset: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]\n", exitCode: 2);
+                } elseif ($letters[$flag] !== null) {
+                    $changes[$letters[$flag]] = $enable;
                 }
-            } elseif (str_starts_with((string) $arg, '+')) {
-                $flags = substr((string) $arg, 1);
-
-                for ($j = 0; $j < strlen($flags); $j++) {
-                    $flag = $flags[$j];
-                    match ($flag) {
-                        'e' => $this->interpreterState->shellOpts['errexit'] = false,
-                        'u' => $this->interpreterState->shellOpts['nounset'] = false,
-                        'x' => $this->interpreterState->shellOpts['xtrace'] = false,
-                        'v' => $this->interpreterState->shellOpts['verbose'] = false,
-                        'f' => $this->interpreterState->shellOpts['noglob'] = false,
-                        'C' => $this->interpreterState->shellOpts['noclobber'] = false,
-                        default => null,
-                    };
-                }
-            } else {
-                $this->interpreterState->positionalParams = array_slice($args, $i);
-
-                break;
             }
-
-            $i++;
         }
 
-        return new ExecResult(exitCode: 0);
+        $this->interpreterState->shellOpts = $changes + $this->interpreterState->shellOpts;
+        $this->interpreterState->positionalParams = $positional ?? $this->interpreterState->positionalParams;
+
+        // Without a name, `set -o` lists the options and `set +o` prints them as commands, like shopt -o/-po
+        return $listing === null ? new ExecResult(exitCode: 0) : $this->builtinShopt([$listing ? '-o' : '-po']);
     }
 
-    private function builtinShopt(): ExecResult
+    /** `set -o` options in bash's order, with its defaults for a non-interactive shell */
+    private const array SET_OPTIONS = [
+        'allexport' => false, 'braceexpand' => true, 'emacs' => false, 'errexit' => false, 'errtrace' => false,
+        'functrace' => false, 'hashall' => true, 'histexpand' => false, 'history' => false, 'ignoreeof' => false,
+        'interactive-comments' => true, 'keyword' => false, 'monitor' => false, 'noclobber' => false, 'noexec' => false,
+        'noglob' => false, 'nolog' => false, 'notify' => false, 'nounset' => false, 'onecmd' => false, 'physical' => false,
+        'pipefail' => false, 'posix' => false, 'privileged' => false, 'verbose' => false, 'vi' => false, 'xtrace' => false,
+    ];
+
+    /** @param array<int, string> $args */
+    private function builtinShopt(array $args): ExecResult
     {
-        return new ExecResult(exitCode: 0);
+        $flags = '';
+
+        while (str_starts_with($args[0] ?? '', '-')) {
+            $arg = array_shift($args);
+
+            if ($arg === '--') {
+                break;
+            }
+
+            $flags .= substr($arg, 1);
+        }
+
+        $valid = strspn($flags, 'pqsuo');
+
+        if ($valid !== strlen($flags)) {
+            return new ExecResult(stderr: "bash: shopt: -{$flags[$valid]}: invalid option\nshopt: usage: shopt [-pqsu] [-o] [optname ...]\n", exitCode: 2);
+        }
+
+        [$set, $unset, $setOptions] = [str_contains($flags, 's'), str_contains($flags, 'u'), str_contains($flags, 'o')];
+
+        if ($set && $unset) {
+            return new ExecResult(stderr: "bash: shopt: cannot set and unset shell options simultaneously\n", exitCode: 1);
+        }
+
+        $options = $setOptions
+            ? array_merge(self::SET_OPTIONS, array_intersect_key($this->interpreterState->shellOpts, self::SET_OPTIONS))
+            : $this->interpreterState->shopt;
+        $format = fn (string $name, bool $on, int $width): string => str_contains($flags, 'p')
+            ? ($setOptions ? 'set '.($on ? '-' : '+').'o ' : 'shopt -'.($on ? 's' : 'u').' ').$name."\n"
+            : sprintf("%-{$width}s\t%s\n", $name, $on ? 'on' : 'off');
+        $stdout = '';
+
+        if ($args === []) {
+            // Every option, or with -s/-u the ones that are on/off
+            foreach ($options as $name => $on) {
+                if (! $set && ! $unset || $on === $set) {
+                    $stdout .= $format($name, $on, $setOptions ? 15 : 20);
+                }
+            }
+
+            return new ExecResult(str_contains($flags, 'q') ? '' : $stdout);
+        }
+
+        $stderr = '';
+        $status = 0;
+
+        foreach ($args as $arg) {
+            if (! array_key_exists($arg, $options)) {
+                $stderr .= 'bash: shopt: '.$arg.($setOptions ? ': invalid option name' : ': invalid shell option name')."\n";
+                // bash quirk: a bad name for -so/-uo still succeeds
+                $status = $setOptions && ($set || $unset) ? $status : 1;
+            } elseif ($setOptions && ($set || $unset)) {
+                $this->interpreterState->shellOpts[$arg] = $set;
+            } elseif ($set || $unset) {
+                $this->interpreterState->shopt[$arg] = $set;
+            } else {
+                // Querying names fails when any of them is off
+                $stdout .= $format($arg, $options[$arg], 20);
+                $status = $options[$arg] ? $status : 1;
+            }
+        }
+
+        return new ExecResult(str_contains($flags, 'q') ? '' : $stdout, $stderr, $status);
     }
 
     /** @param array<int, string> $args */
-    private function builtinCd(array $args): ExecResult
+    private function builtinCd(array $args, string $builtin = 'cd'): ExecResult
     {
-        $target = $args[0] ?? $this->interpreterState->getVar('HOME') ?? '/';
+        $arg = $args[0] ?? null;
+        $dir = match ($arg) {
+            null => $this->interpreterState->getVar('HOME'),
+            '-' => $this->interpreterState->getVar('OLDPWD'),
+            default => $arg,
+        };
 
-        if ($target === '-') {
-            $target = $this->interpreterState->getVar('OLDPWD') ?? $this->interpreterState->cwd;
+        if ($dir === null) {
+            return new ExecResult(stderr: 'bash: cd: '.($arg === null ? 'HOME' : 'OLDPWD')." not set\n", exitCode: 1);
         }
 
-        if (! str_starts_with((string) $target, '/')) {
-            $target = $this->fileSystem->resolvePath($this->interpreterState->cwd, $target);
-        }
+        $target = $this->fileSystem->resolvePath($this->interpreterState->cwd, $dir);
 
         try {
             $stat = $this->fileSystem->stat($target);
-        } catch (RuntimeException) {
-            return new ExecResult(stderr: "bash: cd: {$target}: No such file or directory\n", exitCode: 1);
+        } catch (RuntimeException $runtimeException) {
+            return new ExecResult(stderr: sprintf("bash: %s: %s: %s\n", $builtin, $dir, $this->strerror($runtimeException)), exitCode: 1);
         }
 
         if (! $stat->isDirectory) {
-            return new ExecResult(stderr: "bash: cd: {$target}: Not a directory\n", exitCode: 1);
+            return new ExecResult(stderr: "bash: {$builtin}: {$dir}: Not a directory\n", exitCode: 1);
         }
 
         $this->interpreterState->setVar('OLDPWD', $this->interpreterState->cwd);
         $this->interpreterState->cwd = $target;
         $this->interpreterState->setVar('PWD', $target);
+        // bash exports both from startup
+        $this->interpreterState->exported += ['PWD' => true, 'OLDPWD' => true];
 
-        return new ExecResult(exitCode: 0);
+        // `cd -` reports where it landed
+        return new ExecResult(stdout: $arg === '-' ? $target."\n" : '');
     }
 
     /** @param array<int, string> $args */
-    private function builtinSource(array $args): ExecResult
+    private function builtinSource(array $args, StdinStream $stdinStream): ExecResult
     {
         if ($args === []) {
-            return new ExecResult(stderr: "bash: source: filename argument required\n", exitCode: 2);
-        }
-
-        $path = $args[0];
-
-        if (! str_starts_with((string) $path, '/')) {
-            $path = $this->fileSystem->resolvePath($this->interpreterState->cwd, $path);
+            return $this->routeOutput(new ExecResult(stderr: "bash: source: filename argument required\nsource: usage: source [-p path] filename [arguments]\n", exitCode: 2), $this->fds);
         }
 
         try {
-            $content = $this->fileSystem->readFile($path);
+            $content = $this->fileSystem->readFile($this->fileSystem->resolvePath($this->interpreterState->cwd, $args[0]));
         } catch (RuntimeException) {
-            return new ExecResult(stderr: "bash: {$args[0]}: No such file or directory\n", exitCode: 1);
+            $error = $this->isDirectory($args[0]) ? "bash: source: {$args[0]}: is a directory\n" : "bash: {$args[0]}: No such file or directory\n";
+
+            return $this->routeOutput(new ExecResult(stderr: $error, exitCode: 1), $this->fds);
         }
 
-        return $this->execSubcommand($content);
-    }
+        // Extra operands become $1.. for the duration of the file
+        $savedParams = count($args) > 1 ? $this->interpreterState->positionalParams : null;
 
-    /** @param array<int, string> $args */
-    private function builtinEval(array $args): ExecResult
-    {
-        $script = implode(' ', $args);
+        if ($savedParams !== null) {
+            $this->interpreterState->positionalParams = array_slice($args, 1);
+        }
 
-        return $this->execSubcommand($script);
-    }
+        $this->sourceDepth++;
+        $this->interpreterState->pushFrame('source', $args[0]);
 
-    /** @param array<int, string> $args */
-    private function builtinDeclare(array $args): ExecResult
-    {
-        $isArray = false;
-        $isAssoc = false;
-        $isExport = false;
-        $isReadonly = false;
+        try {
+            return $this->captureInShell($content, $stdinStream, errorPrefix: $args[0].': ');
+        } catch (ReturnException $returnException) {
+            return new ExecResult(exitCode: $returnException->exitCode);
+        } finally {
+            $this->sourceDepth--;
+            $this->interpreterState->popFrame();
 
-        $vars = [];
-
-        foreach ($args as $arg) {
-            if (str_starts_with((string) $arg, '-')) {
-                $flags = substr((string) $arg, 1);
-
-                if (str_contains($flags, 'a')) {
-                    $isArray = true;
-                }
-
-                if (str_contains($flags, 'A')) {
-                    $isAssoc = true;
-                }
-
-                if (str_contains($flags, 'x')) {
-                    $isExport = true;
-                }
-
-                if (str_contains($flags, 'r')) {
-                    $isReadonly = true;
-                }
-            } else {
-                $vars[] = $arg;
+            if ($savedParams !== null) {
+                $this->interpreterState->positionalParams = $savedParams;
             }
         }
+    }
+
+    /** @param array<int, string> $args */
+    private function builtinDeclare(array $args, string $builtin = 'declare'): ExecResult
+    {
+        [$flags, $off, $vars] = $this->declarationOptions($args);
+        $state = $this->interpreterState;
+
+        if (strpbrk($flags, 'fF') !== false) {
+            return $this->declareFunctions($vars, str_contains($flags, 'F'));
+        }
+
+        if ($vars === [] && $builtin === 'local') {
+            $locals = array_keys($state->localScopes[count($state->localScopes) - 1]);
+            sort($locals);
+
+            return $this->printDeclarations($locals);
+        }
+
+        if ($vars === []) {
+            return $this->listDeclarations($flags);
+        }
+
+        if (str_contains($flags, 'p')) {
+            return $this->printDeclarations($vars);
+        }
+
+        $global = str_contains($flags, 'g');
+        // Inside a function declare makes locals unless -g
+        $scoped = $state->localScopes !== [] && ! $global;
+        $status = 0;
 
         foreach ($vars as $var) {
-            if (str_contains((string) $var, '=')) {
-                [$name, $value] = explode('=', (string) $var, 2);
+            [$name, $value] = $this->splitAssignment($var);
 
-                if ($this->interpreterState->isReadonly($name)) {
-                    $this->writeStderr("bash: declare: {$name}: readonly variable\n");
+            if (! $this->validIdentifier($builtin, $var, $name)) {
+                $status = 1;
 
-                    return new ExecResult(exitCode: 1);
-                }
+                continue;
+            }
 
-                if ($isArray || $isAssoc) {
-                    $this->interpreterState->arrays[$name] = [];
-                }
+            // Without -n or +n, declare acts on the variable a nameref points to
+            $target = str_contains($flags.$off, 'n') ? $name : $state->resolve($name) ?? $name;
+            $base = explode('[', $target)[0];
 
-                $this->interpreterState->setVar($name, $value);
+            // Making a readonly variable local is refused even without a value
+            if (($value !== null || $scoped) && $state->isReadonly($base)) {
+                return new ExecResult(stderr: "bash: {$builtin}: {$base}: readonly variable\n", exitCode: 1);
+            }
 
-                if ($isExport) {
-                    $this->interpreterState->exportedVars[$name] = $value;
-                }
+            if ($scoped && $target === $name) {
+                $state->declareLocal($base);
+            }
 
-                if ($isReadonly) {
-                    $this->interpreterState->markReadonly($name);
-                }
-            } else {
-                if ($isArray || $isAssoc) {
-                    $this->interpreterState->arrays[$var] = [];
-                }
+            if (! $this->declareType($builtin, $base, $flags, $off) || ! $this->declareReference($builtin, $base, $flags, $off, $value, $scoped)) {
+                $status = 1;
 
-                $this->interpreterState->setVar($var, '');
+                continue;
+            }
 
-                if ($isReadonly) {
-                    $this->interpreterState->markReadonly($var);
-                }
+            if (isset($this->arrayOperands[$name])) {
+                $this->applyAssignment(['name' => $target] + $this->arrayOperands[$name]);
+            } elseif ($value !== null && ! str_contains($flags, 'n') && $global) {
+                $state->setGlobal($target, $value);
+            } elseif ($value !== null && ! str_contains($flags, 'n')) {
+                $this->readAssign($target, $value);
+            }
+
+            $this->setAttributes($base, $flags, $off);
+        }
+
+        return new ExecResult(exitCode: $status);
+    }
+
+    /** declare's -a, -A, -i, -l and -u, and +i, +l and +u; false after reporting why they can't apply */
+    private function declareType(string $builtin, string $name, string $flags, string $off): bool
+    {
+        $state = $this->interpreterState;
+        $assoc = str_contains($flags, 'A');
+
+        if (($assoc && isset($state->arrays[$name]) && ! $state->hasAttribute($name, 'A')) || (! $assoc && str_contains($flags, 'a') && $state->hasAttribute($name, 'A'))) {
+            $error = sprintf('%s: cannot convert %s', $name, $assoc ? 'indexed to associative array' : 'associative to indexed array');
+
+            // With a `name=(...)` operand it's an assignment error
+            if (isset($this->arrayOperands[$name])) {
+                throw new AssignmentException('bash: '.$error);
+            }
+
+            $this->writeStderr("bash: {$builtin}: {$error}\n");
+
+            return false;
+        }
+
+        // A scalar becomes element 0
+        if (strpbrk($flags, 'aA') !== false && isset($state->env[$name])) {
+            $state->arrays[$name] ??= [$state->env[$name]];
+            unset($state->env[$name]);
+        }
+
+        if (strpbrk($flags, 'aA') !== false) {
+            $state->setAttribute($name, $assoc ? 'A' : 'a');
+        }
+
+        foreach (str_split('ilu') as $letter) {
+            if (str_contains($off, $letter)) {
+                $state->setAttribute($name, $letter, false);
             }
         }
 
-        return new ExecResult(exitCode: 0);
+        if (str_contains($flags, 'i')) {
+            $state->setAttribute($name, 'i');
+        }
+
+        // -l and -u each turn the other off, so together they turn both off
+        if (strpbrk($flags, 'lu') !== false) {
+            $state->setAttribute($name, 'l', ! str_contains($flags, 'u'));
+            $state->setAttribute($name, 'u', ! str_contains($flags, 'l'));
+        }
+
+        return true;
+    }
+
+    /** declare -n (whose value is the name referred to) and +n; false after reporting why they can't apply */
+    private function declareReference(string $builtin, string $name, string $flags, string $off, ?string $value, bool $scoped): bool
+    {
+        $state = $this->interpreterState;
+
+        if (str_contains($off, 'n')) {
+            $state->setAttribute($name, 'n', false);
+        }
+
+        if (! str_contains($flags, 'n')) {
+            return true;
+        }
+
+        $reference = $value ?? $state->env[$name] ?? null;
+
+        // Without a value it's the variable's own value that must be a name
+        if ($reference !== null && preg_match('/^[a-zA-Z_]\w*(\[.+\])?$/s', $reference) !== 1) {
+            $this->writeStderr("bash: {$builtin}: `{$reference}': invalid variable name for name reference\n");
+
+            return false;
+        }
+
+        // In a function the name may mean the global of that name, so bash only warns
+        if ($reference === $name && ! $scoped) {
+            $this->writeStderr("bash: {$builtin}: {$name}: nameref variable self references not allowed\n");
+
+            return false;
+        }
+
+        if ($reference === $name) {
+            $this->writeStderr("bash: {$builtin}: warning: {$name}: circular name reference\nbash: warning: {$name}: circular name reference\n");
+        }
+
+        $state->setAttribute($name, 'n');
+
+        if ($value !== null) {
+            $state->setReference($name, $value);
+        }
+
+        return true;
+    }
+
+    /** declare's -r and -x/+x on a variable */
+    private function setAttributes(string $name, string $flags, string $off): void
+    {
+        if (str_contains($flags, 'r')) {
+            $this->interpreterState->markReadonly($name);
+        }
+
+        if (str_contains($flags, 'x')) {
+            $this->interpreterState->exported[$name] = true;
+        } elseif (str_contains($off, 'x')) {
+            unset($this->interpreterState->exported[$name]);
+        }
+    }
+
+    /** declare without names: the variables with every attribute named (`declare -ai`), `declare -p` all of them, plain `declare` like set */
+    private function listDeclarations(string $flags): ExecResult
+    {
+        $state = $this->interpreterState;
+        $letters = str_split((string) preg_replace('/[^aAilnrux]/', '', $flags));
+
+        if ($letters === [] && ! str_contains($flags, 'p')) {
+            return $this->builtinSet([]);
+        }
+
+        $names = array_keys($state->env + $state->arrays + $state->attributes + $state->exported + $state->readonlyVars);
+        sort($names);
+
+        return $this->printDeclarations(array_values(array_filter($names, fn (string $name): bool => array_all($letters, fn (string $letter): bool => str_contains($this->attributeLetters($name), $letter)))));
+    }
+
+    /** A variable's attributes in the order `declare -p` prints them */
+    private function attributeLetters(string $name): string
+    {
+        $state = $this->interpreterState;
+        $letters = $state->isArray($name) ? ($state->hasAttribute($name, 'A') ? 'A' : 'a') : '';
+        $letters .= ($state->hasAttribute($name, 'i') ? 'i' : '').($state->hasAttribute($name, 'n') ? 'n' : '');
+        $letters .= ($state->isReadonly($name) ? 'r' : '').(isset($state->exported[$name]) ? 'x' : '');
+
+        return $letters.($state->hasAttribute($name, 'l') ? 'l' : '').($state->hasAttribute($name, 'u') ? 'u' : '');
+    }
+
+    /**
+     * The leading option words of declare/export/readonly: letters set with -, letters cleared with +, and the operands.
+     *
+     * @param  array<int, string>  $args
+     * @return array{string, string, list<string>}
+     */
+    private function declarationOptions(array $args): array
+    {
+        $args = array_values($args);
+        $on = '';
+        $off = '';
+
+        while (preg_match('/^([-+])(.+)$/s', $args[0] ?? '', $m) === 1) {
+            array_shift($args);
+
+            if ($m[0] === '--') {
+                break;
+            }
+
+            $m[1] === '-' ? $on .= $m[2] : $off .= $m[2];
+        }
+
+        return [$on, $off, $args];
+    }
+
+    /** A declaration operand's name must be an identifier, or one with a subscript; anything else is reported. */
+    private function validIdentifier(string $builtin, string $operand, string $name): bool
+    {
+        if (preg_match('/^[a-zA-Z_]\w*(\[.+\])?$/s', $name) === 1) {
+            return true;
+        }
+
+        $this->writeStderr("bash: {$builtin}: `{$operand}': not a valid identifier\n");
+
+        return false;
+    }
+
+    /** @param list<string> $names */
+    private function printDeclarations(array $names): ExecResult
+    {
+        $state = $this->interpreterState;
+        $stdout = '';
+        $stderr = '';
+        $quote = $this->declareQuote(...);
+
+        foreach ($names as $name) {
+            $array = $state->arrays[$name] ?? null;
+            $flags = $this->attributeLetters($name);
+            $declaration = 'declare -'.($flags === '' ? '-' : $flags).' '.$name;
+            // A nameref shows the name it holds, not the value it leads to
+            $value = $state->hasAttribute($name, 'n') ? $state->env[$name] ?? null : $state->getVar($name);
+
+            if ($array !== null) {
+                // A key with shell metacharacters is quoted too
+                $key = fn (int|string $key): string => preg_match('/[\s\x00-\x1f\x7f\'"\\\\|&;()<>!{}*?\[\]^$`]|^[~#]/', (string) $key) === 1 ? $quote((string) $key) : (string) $key;
+                $items = array_map(fn (int|string $index, string $value): string => sprintf('[%s]=%s', $key($index), $quote($value)), array_keys($array), $array);
+                // bash ends a non-empty associative array's list with a space
+                $stdout .= $declaration.'=('.implode(' ', $items).($state->hasAttribute($name, 'A') && $array !== [] ? ' ' : '').")\n";
+            } elseif ($value !== null) {
+                $stdout .= $declaration.'='.$quote($value)."\n";
+            } elseif ($flags !== '' || $state->isLocal($name)) {
+                $stdout .= $declaration."\n";
+            } else {
+                $stderr .= "bash: declare: {$name}: not found\n";
+            }
+        }
+
+        return new ExecResult($stdout, $stderr, $stderr === '' ? 0 : 1);
+    }
+
+    /** A value as declare -p quotes it: in $'...' when it holds control characters or bytes that aren't UTF-8, else in "..." */
+    private function declareQuote(string $value): string
+    {
+        $utf8 = mb_check_encoding($value, 'UTF-8');
+
+        if (preg_match($utf8 ? '/[\x00-\x1f\x7f]/' : '/[\x00-\x1f\x7f-\xff]/', $value) !== 1) {
+            return '"'.addcslashes($value, '"\\$`').'"';
+        }
+
+        $escapes = ["\x07" => '\a', "\x08" => '\b', "\x1b" => '\E', "\f" => '\f', "\n" => '\n', "\r" => '\r', "\t" => '\t', "\v" => '\v', '\\' => '\\\\', "'" => "\\'"];
+
+        return "$'".(string) preg_replace_callback(
+            $utf8 ? '/[\x00-\x1f\x7f\\\\\']/' : '/[\x00-\x1f\x7f-\xff\\\\\']/',
+            fn (array $m): string => $escapes[$m[0]] ?? sprintf('\\%03o', ord($m[0])),
+            $value,
+        )."'";
     }
 
     /** @param array<int, string> $args */
-    private function builtinRead(array $args, string $stdin): ExecResult
+    private function builtinRead(array $args, StdinStream $stdinStream): ExecResult
     {
-        $prompt = '';
-        $delimiter = "\n";
-        $varNames = [];
-        $raw = false;
-        $isArray = false;
+        $usage = "read: usage: read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]\n";
+        $flags = '';
+        $values = [];
 
-        $i = 0;
+        // Options come first; letters may be grouped (-ra arr), and one taking a value uses the rest of the word or the next word
+        while ($args !== [] && strlen($args[0]) > 1 && $args[0][0] === '-') {
+            $arg = array_shift($args);
 
-        while ($i < count($args)) {
-            $arg = $args[$i];
+            for ($j = 1; $j < strlen($arg) && $arg !== '--'; $j++) {
+                $letter = $arg[$j];
 
-            if ($arg === '-r') {
-                $raw = true;
-            } elseif ($arg === '-p') {
-                $i++;
-                $prompt = $args[$i] ?? '';
-            } elseif ($arg === '-d') {
-                $i++;
-                $delimiter = $args[$i] ?? "\n";
-            } elseif ($arg === '-a') {
-                $isArray = true;
-                $i++;
-                $varNames[] = $args[$i] ?? 'REPLY';
-            } elseif (! str_starts_with((string) $arg, '-')) {
-                $varNames[] = $arg;
+                if (str_contains('Eers', $letter)) {
+                    $flags .= $letter;
+
+                    continue;
+                }
+
+                if (! str_contains('adinNptu', $letter)) {
+                    return new ExecResult(stderr: "bash: read: -{$letter}: invalid option\n".$usage, exitCode: 2);
+                }
+
+                if ($j + 1 === strlen($arg) && $args === []) {
+                    return new ExecResult(stderr: "bash: read: -{$letter}: option requires an argument\n".$usage, exitCode: 2);
+                }
+
+                $values[$letter] = $j + 1 < strlen($arg) ? substr($arg, $j + 1) : (string) array_shift($args);
+
+                break;
             }
 
-            $i++;
+            if ($arg === '--') {
+                break;
+            }
         }
 
-        if ($varNames === []) {
-            $varNames = ['REPLY'];
+        $names = $args;
+        $timeout = $values['t'] ?? '';
+        $count = $values['N'] ?? $values['n'] ?? null;
+        $fd = $values['u'] ?? '0';
+
+        if (isset($values['t']) && preg_match('/^(\d+\.?\d*|\.\d+)$/', $timeout) !== 1) {
+            return new ExecResult(stderr: "bash: read: {$timeout}: invalid timeout specification\n", exitCode: 1);
         }
 
-        // Read one line from stdin
-        $line = '';
-        $newlinePos = strpos($stdin, (string) $delimiter);
-        $line = $newlinePos !== false ? substr($stdin, 0, $newlinePos) : $stdin;
-
-        if ($isArray && count($varNames) === 1) {
-            $ifs = $this->interpreterState->getVar('IFS') ?? " \t\n";
-            $parts = $this->splitByIFS($line, $ifs);
-            $this->interpreterState->arrays[$varNames[0]] = array_combine(
-                array_keys($parts),
-                $parts,
-            );
-
-            return new ExecResult(exitCode: $stdin === '' ? 1 : 0);
+        if ($count !== null && ! ctype_digit($count)) {
+            return new ExecResult(stderr: "bash: read: {$count}: invalid number\n", exitCode: 1);
         }
 
-        // Split line by IFS into variables
+        if (! ctype_digit($fd)) {
+            return new ExecResult(stderr: "bash: read: {$fd}: invalid file descriptor specification\n", exitCode: 1);
+        }
+
+        $stream = (int) $fd === 0 ? $stdinStream : $this->fds[(int) $fd] ?? null;
+
+        if ($stream === null) {
+            return new ExecResult(stderr: sprintf("bash: read: %d: invalid file descriptor: Bad file descriptor\n", $fd), exitCode: 1);
+        }
+
+        if (! $stream instanceof StdinStream || ! $stream->isReadable()) {
+            return new ExecResult(stderr: sprintf("bash: read: %d: read error: Bad file descriptor\n", $fd), exitCode: 1);
+        }
+
+        // Input is never a terminal: -p's prompt isn't shown, -e/-i/-s/-E change nothing, and as all
+        // input is already there a timeout never expires; `-t 0` just reports input is available
+        if (isset($values['t']) && (float) $timeout === 0.0) {
+            return new ExecResult(exitCode: 0);
+        }
+
+        $raw = str_contains($flags, 'r');
+        $delimiter = $values['d'] ?? "\n";
+
+        if ($count !== null) {
+            $line = $stream->readChars((int) $count, isset($values['N']) ? null : $delimiter, $raw, $terminated);
+        } else {
+            $line = $stream->readLine($delimiter, $terminated);
+
+            // A trailing unescaped backslash continues the record onto the next one
+            while (! $raw && $terminated && $line !== null && (strlen($line) - strlen(rtrim($line, '\\'))) % 2 === 1) {
+                $line = substr($line, 0, -1).$stream->readLine($delimiter, $terminated);
+            }
+        }
+
+        // Backslash-newline inside a record (e.g. with -d ,) is dropped entirely
+        $line = $raw ? ($line ?? '') : str_replace("\\\n", '', $line ?? '');
+
+        if (isset($values['N'])) {
+            // -N takes the characters as they are: no field splitting, no trimming, all into the first name
+            $value = $raw ? $line : $this->unescape($line);
+
+            if (isset($values['a'])) {
+                return $this->readIntoArray($values['a'], [$value], $terminated);
+            }
+
+            foreach ($names === [] ? ['REPLY'] : $names as $index => $name) {
+                if (! $this->readAssign($name, $index === 0 ? $value : '')) {
+                    return new ExecResult(exitCode: 1);
+                }
+            }
+
+            return new ExecResult(exitCode: $terminated ? 0 : 1);
+        }
+
         $ifs = $this->interpreterState->getVar('IFS') ?? " \t\n";
-        $parts = $this->splitByIFS($line, $ifs);
-        $counter = count($varNames);
+        $fields = $this->readFields($line, $ifs, $raw);
 
-        for ($j = 0; $j < $counter; $j++) {
-            if ($j < count($varNames) - 1) {
-                $this->interpreterState->setVar($varNames[$j], $parts[$j] ?? '');
-            } else {
-                // Last variable gets the rest
-                $this->interpreterState->setVar($varNames[$j], implode(' ', array_slice($parts, $j)));
+        if (isset($values['a'])) {
+            return $this->readIntoArray($values['a'], array_column($fields, 0), $terminated);
+        }
+
+        if ($names === []) {
+            $this->interpreterState->setVar('REPLY', $raw ? $line : $this->unescape($line));
+        }
+
+        foreach ($names as $index => $name) {
+            $value = $fields[$index][0] ?? '';
+
+            // The last name takes the rest of the line, original separators included
+            if ($index === count($names) - 1 && isset($fields[$index])) {
+                // Only IFS whitespace is trimmed: `IFS= read x` keeps trailing blanks
+                $rest = rtrim(substr($line, $fields[$index][1]), $this->ifsWhitespace($ifs));
+                $value = $raw ? $rest : $this->unescape($rest);
+            }
+
+            // Names are checked as they're assigned: the ones before a bad name keep their fields
+            if (! $this->readAssign($name, $value)) {
+                return new ExecResult(exitCode: 1);
             }
         }
 
-        return new ExecResult(exitCode: $stdin === '' ? 1 : 0);
+        // An unterminated last record still assigns, but read reports failure
+        return new ExecResult(exitCode: $terminated ? 0 : 1);
+    }
+
+    /** A read target is a name or an array element (`a[1]`); anything else is reported. */
+    private function readAssign(string $name, string $value): bool
+    {
+        if (preg_match('/^([a-zA-Z_]\w*)(?:\[(.+)\])?$/s', $name, $m) !== 1) {
+            $this->writeStderr("bash: read: `{$name}': not a valid identifier\n");
+
+            return false;
+        }
+
+        $this->applyAssignment(isset($m[2])
+            ? ['type' => 'element', 'name' => $m[1], 'subscript' => $this->expandSubscript($m[2]), 'append' => false, 'value' => $value]
+            : ['type' => 'scalar', 'name' => $name, 'append' => false, 'value' => $value]);
+
+        return true;
+    }
+
+    /** @param list<string> $items */
+    private function readIntoArray(string $name, array $items, bool $terminated): ExecResult
+    {
+        if (preg_match('/^[a-zA-Z_]\w*$/', $name) !== 1) {
+            return new ExecResult(stderr: "bash: read: `{$name}': not a valid identifier\n", exitCode: 1);
+        }
+
+        $this->interpreterState->setArray($name, $items);
+
+        return new ExecResult(exitCode: $terminated ? 0 : 1);
+    }
+
+    private function unescape(string $text): string
+    {
+        return preg_replace('/\\\\(.)/s', '$1', $text) ?? $text;
+    }
+
+    /**
+     * Splits a record the way read does: leading IFS whitespace is skipped, runs of IFS whitespace
+     * separate, each other IFS char separates exactly once, and a backslash escapes (unless raw).
+     *
+     * @return list<array{string, int}> each field with the offset where it starts
+     */
+    private function readFields(string $line, string $ifs, bool $raw): array
+    {
+        $whitespace = $this->ifsWhitespace($ifs);
+        $len = strlen($line);
+        $fields = [];
+        $i = strspn($line, $whitespace);
+
+        while ($i < $len) {
+            $start = $i;
+            $field = '';
+
+            while ($i < $len && ! str_contains($ifs, $line[$i])) {
+                if (! $raw && $line[$i] === '\\' && $i + 1 < $len) {
+                    $i++;
+                }
+
+                $field .= $line[$i++];
+            }
+
+            $fields[] = [$field, $start];
+            $i += strspn($line, $whitespace, $i);
+
+            if ($i < $len && str_contains($ifs, $line[$i])) {
+                $i++;
+                $i += strspn($line, $whitespace, $i);
+            }
+        }
+
+        return $fields;
+    }
+
+    private function ifsWhitespace(string $ifs): string
+    {
+        return implode('', array_intersect([' ', "\t", "\n"], str_split($ifs)));
     }
 
     /** @param array<int, string> $args */
     private function builtinBreak(array $args): ExecResult
     {
-        $levels = $args !== [] ? max(1, (int) $args[0]) : 1;
+        if ($this->loopDepth === 0) {
+            return new ExecResult(stderr: "bash: break: only meaningful in a `for', `while', or `until' loop\n");
+        }
 
-        throw new BreakException($levels);
+        throw new BreakException(max(1, (int) ($args[0] ?? 1)));
     }
 
     /** @param array<int, string> $args */
     private function builtinContinue(array $args): ExecResult
     {
-        $levels = $args !== [] ? max(1, (int) $args[0]) : 1;
+        if ($this->loopDepth === 0) {
+            return new ExecResult(stderr: "bash: continue: only meaningful in a `for', `while', or `until' loop\n");
+        }
 
-        throw new ContinueException($levels);
+        throw new ContinueException(max(1, (int) ($args[0] ?? 1)));
     }
 
     /** @param array<int, string> $args */
     private function builtinReturn(array $args): ExecResult
     {
-        $code = $args !== [] ? (int) $args[0] : $this->interpreterState->lastExitCode;
+        if ($this->interpreterState->callDepth === 0 && $this->sourceDepth === 0) {
+            return new ExecResult(stderr: "bash: return: can only `return' from a function or sourced script\n", exitCode: 2);
+        }
 
-        throw new ReturnException($code);
+        throw new ReturnException($this->parseStatusArg('return', $args));
     }
 
     /** @param array<int, string> $args */
     private function builtinShift(array $args): ExecResult
     {
-        $n = $args !== [] ? (int) $args[0] : 1;
+        $n = (int) ($args[0] ?? 1);
 
         if ($n > count($this->interpreterState->positionalParams)) {
             return new ExecResult(exitCode: 1);
@@ -849,59 +2030,117 @@ final class Interpreter
     /** @param array<int, string> $args */
     private function builtinLet(array $args): ExecResult
     {
+        if ($args === []) {
+            return new ExecResult(stderr: "bash: let: expression expected\n", exitCode: 1);
+        }
+
         $lastResult = 0;
 
-        foreach ($args as $arg) {
-            $lastResult = $this->evaluateArithmeticString($arg);
+        try {
+            foreach ($args as $arg) {
+                $lastResult = $this->evaluateArithmeticString($arg);
+            }
+        } catch (ArithmeticException $arithmeticException) {
+            // Like ((...)), a failing let is just a failed command
+            return new ExecResult(stderr: sprintf("bash: let: %s\n", $arithmeticException->getMessage()), exitCode: 1);
         }
 
         return new ExecResult(exitCode: $lastResult === 0 ? 1 : 0);
     }
 
-    private function builtinGetopts(): ExecResult
+    /** @param array<int, string> $args */
+    private function builtinGetopts(array $args): ExecResult
     {
-        return new ExecResult(exitCode: 1);
+        if (count($args) < 2) {
+            return new ExecResult(stderr: "getopts: usage: getopts optstring name [arg ...]\n", exitCode: 2);
+        }
+
+        [$optstring, $name] = $args;
+        $params = count($args) > 2 ? array_slice($args, 2) : $this->interpreterState->positionalParams;
+        $optind = max(1, (int) ($this->interpreterState->getVar('OPTIND') ?? 1));
+        $arg = $params[$optind - 1] ?? '';
+        $this->interpreterState->unsetVar('OPTARG');
+
+        // A script that resets OPTIND starts over at the first letter of the word
+        if ($this->getoptsCharIndex >= strlen($arg)) {
+            $this->getoptsCharIndex = 1;
+        }
+
+        if ($arg === '--' || strlen($arg) < 2 || $arg[0] !== '-') {
+            $this->interpreterState->setVar($name, '?');
+            $this->interpreterState->setVar('OPTIND', (string) ($optind + (int) ($arg === '--')));
+
+            return new ExecResult(exitCode: 1);
+        }
+
+        $letter = $arg[$this->getoptsCharIndex++];
+        $rest = substr($arg, $this->getoptsCharIndex);
+
+        if ($rest === '') {
+            $optind++;
+            $this->getoptsCharIndex = 1;
+        }
+
+        $silent = str_starts_with($optstring, ':');
+        $pos = $letter === ':' ? false : strpos($optstring, $letter);
+        $result = $letter;
+        $error = null;
+
+        if ($pos === false) {
+            $result = '?';
+            $error = 'illegal option';
+        } elseif (($optstring[$pos + 1] ?? '') === ':') {
+            if ($rest !== '') {
+                // -bvalue: the rest of the word is the argument
+                $this->interpreterState->setVar('OPTARG', $rest);
+                $optind++;
+                $this->getoptsCharIndex = 1;
+            } elseif (isset($params[$optind - 1])) {
+                $this->interpreterState->setVar('OPTARG', $params[$optind - 1]);
+                $optind++;
+            } else {
+                $result = $silent ? ':' : '?';
+                $error = 'option requires an argument';
+            }
+        }
+
+        // A leading ':' in optstring silences errors and reports the letter in OPTARG instead
+        if ($error !== null && $silent) {
+            $this->interpreterState->setVar('OPTARG', $letter);
+        }
+
+        $this->interpreterState->setVar($name, $result);
+        $this->interpreterState->setVar('OPTIND', (string) $optind);
+
+        return new ExecResult(stderr: $error !== null && ! $silent ? sprintf("bash: %s -- %s\n", $error, $letter) : '');
     }
 
     /** @param array<int, string> $args */
-    private function builtinMapfile(array $args, string $stdin): ExecResult
+    private function builtinMapfile(array $args, StdinStream $stdinStream): ExecResult
     {
-        $varName = 'MAPFILE';
+        $names = [];
+        $strip = false;
         $delimiter = "\n";
+        $counter = count($args);
 
-        $remaining = [];
-        $i = 0;
-
-        while ($i < count($args)) {
-            if ($args[$i] !== '-t' && $args[$i] === '-d') {
-                $i++;
-                $delimiter = $args[$i] ?? "\n";
+        for ($i = 0; $i < $counter; $i++) {
+            if ($args[$i] === '-t') {
+                $strip = true;
+            } elseif ($args[$i] === '-d') {
+                $delimiter = $args[++$i] ?? "\n";
             } elseif (! str_starts_with($args[$i], '-')) {
-                $remaining[] = $args[$i];
+                $names[] = $args[$i];
             }
-
-            $i++;
         }
 
-        if ($remaining !== []) {
-            $varName = $remaining[0];
+        // Each element keeps its delimiter unless -t; `-d ''` splits on NUL
+        $lines = [];
+
+        while (($line = $stdinStream->readLine($delimiter, $terminated)) !== null) {
+            $lines[] = $strip || ! $terminated ? $line : $line.($delimiter === '' ? "\0" : $delimiter);
         }
 
-        if ($delimiter === '') {
-            $delimiter = "\n";
-        }
-
-        $lines = $stdin !== '' ? explode($delimiter, $stdin) : [];
-
-        // Remove trailing empty element from explode
-        if ($lines !== [] && end($lines) === '') {
-            array_pop($lines);
-        }
-
-        $this->interpreterState->arrays[$varName] = array_combine(
-            array_keys($lines),
-            $lines,
-        );
+        $this->interpreterState->setArray($names[0] ?? 'MAPFILE', $lines);
 
         return new ExecResult(exitCode: 0);
     }
@@ -909,325 +2148,300 @@ final class Interpreter
     /** @param array<int, string> $args */
     private function builtinType(array $args): ExecResult
     {
-        $output = '';
+        $terse = in_array('-t', $args, true);
+        $stdout = '';
+        $stderr = '';
+        $status = 0;
 
-        foreach ($args as $arg) {
-            if (isset($this->interpreterState->functions[$arg])) {
-                $output .= $arg.' is a function
-';
-            } elseif ($this->isBuiltin($arg)) {
-                $output .= $arg.' is a shell builtin
-';
-            } elseif ($this->commandRegistry->has($arg)) {
-                $output .= sprintf('%s is /usr/bin/%s%s', $arg, $arg, PHP_EOL);
-            } else {
-                $output .= "bash: type: {$arg}: not found\n";
+        foreach (array_filter($args, fn (string $arg): bool => ! str_starts_with($arg, '-')) as $name) {
+            $kind = $this->commandKind($name);
 
-                return new ExecResult(stdout: $output, exitCode: 1);
+            if ($kind === null) {
+                $stderr .= $terse ? '' : "bash: type: {$name}: not found\n";
+                $status = 1;
+
+                continue;
+            }
+
+            $stdout .= $terse ? $kind."\n" : match ($kind) {
+                'function' => $name." is a function\n".$this->functionSource($name),
+                'builtin' => $name." is a shell builtin\n",
+                'file' => sprintf("%s is /usr/bin/%s\n", $name, $name),
+            };
+        }
+
+        return new ExecResult($stdout, $stderr, $status);
+    }
+
+    /** A function's definition as bash prints it */
+    private function functionSource(string $name): string
+    {
+        return FunctionPrinter::print($name, $this->interpreterState->functions[$name]['body'])."\n";
+    }
+
+    /**
+     * declare -f prints definitions and -F just names (as `declare -f name` when listing them all);
+     * with names, a missing one fails quietly.
+     *
+     * @param  list<string>  $names
+     */
+    private function declareFunctions(array $names, bool $namesOnly): ExecResult
+    {
+        $functions = $this->interpreterState->functions;
+        ksort($functions);
+        $stdout = '';
+
+        foreach ($names === [] ? array_keys($functions) : $names as $name) {
+            if (isset($functions[$name])) {
+                $stdout .= match (true) {
+                    ! $namesOnly => $this->functionSource($name),
+                    $names === [] => sprintf("declare -f %s\n", $name),
+                    default => $name."\n",
+                };
             }
         }
 
-        return new ExecResult(stdout: $output, exitCode: 0);
+        return new ExecResult($stdout, exitCode: array_diff($names, array_keys($functions)) !== [] ? 1 : 0);
+    }
+
+    /**
+     * How bash would resolve a command name: function, then builtin, then a file on PATH.
+     *
+     * @return 'function'|'builtin'|'file'|null
+     */
+    private function commandKind(string $name): ?string
+    {
+        return match (true) {
+            isset($this->interpreterState->functions[$name]) => 'function',
+            $this->isBuiltin($name) || in_array($name, self::REGISTRY_BUILTINS, true) => 'builtin',
+            $this->commandRegistry->has($name) => 'file',
+            default => null,
+        };
     }
 
     /** @param array<int, string> $args */
-    private function builtinCommand(array $args, string $stdin): ExecResult
+    private function builtinCommand(array $args, StdinStream $stdinStream): ExecResult
     {
         if ($args === []) {
             return new ExecResult(exitCode: 0);
         }
 
         if ($args[0] === '-v') {
-            $name = $args[1] ?? '';
+            $stdout = '';
 
-            if ($this->isBuiltin($name) || $this->commandRegistry->has($name)) {
-                return new ExecResult(stdout: $name.PHP_EOL, exitCode: 0);
+            foreach (array_slice($args, 1) as $name) {
+                $kind = $this->commandKind($name);
+
+                if ($kind !== null) {
+                    $stdout .= ($kind === 'file' ? '/usr/bin/'.$name : $name)."\n";
+                }
             }
 
-            return new ExecResult(exitCode: 1);
+            // Unlike most builtins, `command -v` doesn't report a failed write
+            return $this->routeOutput(new ExecResult(stdout: $stdout, exitCode: $stdout === '' ? 1 : 0), $this->fds);
         }
 
-        // Execute command bypassing functions
-        $commandName = $args[0];
-        $commandArgs = array_slice($args, 1);
-
-        $builtinResult = $this->tryBuiltin($commandName, $commandArgs, $stdin);
-
-        if ($builtinResult instanceof \BashBox\ExecResult) {
-            return $builtinResult;
-        }
-
-        $cmd = $this->commandRegistry->get($commandName);
-
-        if ($cmd instanceof \BashBox\Commands\CommandInterface) {
-            $commandContext = new CommandContext(
-                fs: $this->fileSystem,
-                cwd: $this->interpreterState->cwd,
-                env: $this->interpreterState->getExportedEnv(),
-                stdin: $stdin,
-                limits: $this->interpreterState->limits,
-                exec: fn (string $script): ExecResult => $this->execSubcommand($script),
-                fetch: $this->secureHttpClient,
-                registry: $this->commandRegistry,
-            );
-
-            return $cmd->execute($commandArgs, $commandContext);
-        }
-
-        return new ExecResult(stderr: "bash: {$commandName}: command not found\n", exitCode: 127);
+        // Runs a builtin or command, skipping shell functions
+        return $this->tryBuiltin($args[0], array_slice($args, 1), $stdinStream) ?? $this->runCommand($args[0], array_slice($args, 1), $stdinStream);
     }
 
     /** @param array<int, string> $args */
     private function builtinAlias(array $args): ExecResult
     {
-        if ($args === []) {
-            $output = '';
+        $stdout = '';
+        $stderr = '';
 
-            foreach ($this->interpreterState->aliases as $name => $value) {
-                $output .= "alias {$name}='{$value}'\n";
-            }
+        foreach ($args === [] ? array_keys($this->interpreterState->aliases) : $args as $arg) {
+            [$name, $value] = $this->splitAssignment($arg);
 
-            return new ExecResult(stdout: $output, exitCode: 0);
-        }
-
-        foreach ($args as $arg) {
-            if (str_contains((string) $arg, '=')) {
-                [$name, $value] = explode('=', (string) $arg, 2);
+            if ($value !== null) {
                 $this->interpreterState->aliases[$name] = $value;
+            } elseif (isset($this->interpreterState->aliases[$name])) {
+                $stdout .= sprintf('alias %s=', $name).$this->singleQuote($this->interpreterState->aliases[$name])."\n";
+            } else {
+                $stderr .= "bash: alias: {$name}: not found\n";
             }
         }
 
-        return new ExecResult(exitCode: 0);
+        return new ExecResult($stdout, $stderr, $stderr === '' ? 0 : 1);
+    }
+
+    /**
+     * `name=value` operand of declare/alias/readonly; the value is null when there's no `=`.
+     *
+     * @return array{string, ?string}
+     */
+    private function splitAssignment(string $word): array
+    {
+        $parts = explode('=', $word, 2);
+
+        return [$parts[0], $parts[1] ?? null];
+    }
+
+    private function singleQuote(string $value): string
+    {
+        return "'".str_replace("'", "'\\''", $value)."'";
     }
 
     /** @param array<int, string> $args */
     private function builtinUnalias(array $args): ExecResult
     {
+        $stderr = '';
+
         foreach ($args as $arg) {
             if ($arg === '-a') {
                 $this->interpreterState->aliases = [];
-
-                return new ExecResult(exitCode: 0);
+            } elseif (isset($this->interpreterState->aliases[$arg])) {
+                unset($this->interpreterState->aliases[$arg]);
+            } else {
+                $stderr .= "bash: unalias: {$arg}: not found\n";
             }
-
-            unset($this->interpreterState->aliases[$arg]);
         }
 
-        return new ExecResult(exitCode: 0);
+        return new ExecResult(stderr: $stderr, exitCode: $stderr === '' ? 0 : 1);
     }
 
     /** @param array<int, string> $args */
     private function builtinReadonly(array $args): ExecResult
     {
-        if ($args === [] || ($args === ['-p'])) {
-            $output = '';
+        [$flags, $off, $names] = $this->declarationOptions($args);
+        $valid = strspn($flags.$off, 'aAfp');
 
-            foreach (array_keys($this->interpreterState->readonlyVars) as $name) {
-                $val = $this->interpreterState->getVar($name) ?? '';
-                $output .= "declare -r {$name}=\"{$val}\"\n";
-            }
-
-            return new ExecResult(stdout: $output, exitCode: 0);
+        if ($valid < strlen($flags.$off)) {
+            return new ExecResult(stderr: sprintf("bash: readonly: -%s: invalid option\nreadonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p\n", ($flags.$off)[$valid]), exitCode: 2);
         }
 
-        foreach ($args as $arg) {
-            if ($arg === '-p') {
+        if ($names === []) {
+            return $this->printDeclarations(array_keys($this->interpreterState->readonlyVars));
+        }
+
+        $status = 0;
+
+        foreach ($names as $arg) {
+            [$name, $value] = $this->splitAssignment($arg);
+
+            if (! $this->validIdentifier('readonly', $arg, $name)) {
+                $status = 1;
+
                 continue;
             }
 
-            if (str_contains((string) $arg, '=')) {
-                [$name, $value] = explode('=', (string) $arg, 2);
-
-                if ($this->interpreterState->isReadonly($name)) {
-                    $this->writeStderr("bash: readonly: {$name}: readonly variable\n");
-
-                    return new ExecResult(exitCode: 1);
-                }
-
-                $this->interpreterState->setVar($name, $value);
-                $this->interpreterState->markReadonly($name);
-            } else {
-                $this->interpreterState->markReadonly($arg);
+            // readonly's -A matters only for the array it assigns
+            if (str_contains($flags, 'A') && isset($this->arrayOperands[$name])) {
+                $this->interpreterState->setAttribute($name, 'A');
             }
+
+            $this->assignOperand($name, $value);
+            $this->setAttributes($name, 'r', '');
         }
 
-        return new ExecResult(exitCode: 0);
+        return new ExecResult(exitCode: $status);
+    }
+
+    /** export's and readonly's `name=value` or `name=(...)` operand */
+    private function assignOperand(string $name, ?string $value): void
+    {
+        if (isset($this->arrayOperands[$name])) {
+            $this->applyAssignment($this->arrayOperands[$name]);
+        } elseif ($value !== null) {
+            $this->interpreterState->setVar($name, $value);
+        }
     }
 
     /** @param array<int, string> $args */
     private function builtinTrap(array $args): ExecResult
     {
         if ($args === []) {
+            // bash lists EXIT first, then real signals, then DEBUG, ERR and RETURN
+            $rank = ['EXIT' => 0, 'DEBUG' => 2, 'ERR' => 3, 'RETURN' => 4];
+            $traps = $this->interpreterState->traps;
+            uksort($traps, fn (string $a, string $b): int => ($rank[$a] ?? 1) <=> ($rank[$b] ?? 1));
             $output = '';
 
-            foreach ($this->interpreterState->traps as $signal => $command) {
-                $output .= sprintf("trap -- '%s' %s%s", $command, $signal, PHP_EOL);
+            foreach ($traps as $signal => $command) {
+                $name = in_array($signal, ['EXIT', 'ERR', 'DEBUG', 'RETURN'], true) ? $signal : 'SIG'.$signal;
+                $output .= 'trap -- '.$this->singleQuote($command).sprintf(" %s\n", $name);
             }
 
-            return new ExecResult(stdout: $output, exitCode: 0);
+            return new ExecResult(stdout: $output);
         }
 
-        $command = $args[0];
-        $signals = array_slice($args, 1);
+        // A lone signal (`trap EXIT`) resets it, the same as `trap - EXIT`
+        $command = count($args) === 1 ? '-' : array_shift($args);
 
-        if ($signals === []) {
-            return new ExecResult(exitCode: 0);
-        }
-
-        foreach ($signals as $signal) {
-            $signal = strtoupper($signal);
+        foreach ($args as $arg) {
+            $arg = strtoupper((string) preg_replace('/^SIG/i', '', $arg));
+            $arg = $arg === '0' ? 'EXIT' : $arg;
 
             if ($command === '-') {
-                unset($this->interpreterState->traps[$signal]);
+                unset($this->interpreterState->traps[$arg]);
             } else {
-                $this->interpreterState->traps[$signal] = $command;
+                $this->interpreterState->traps[$arg] = $command;
             }
         }
 
         return new ExecResult(exitCode: 0);
     }
 
-    /** @param array<int, string> $args */
-    private function builtinBuiltin(array $args, string $stdin): ExecResult
+    /** @param list<string> $args */
+    private function builtinBuiltin(array $args, StdinStream $stdinStream): ExecResult
     {
         if ($args === []) {
             return new ExecResult(exitCode: 0);
         }
 
-        $name = $args[0];
-        $builtinArgs = array_slice($args, 1);
+        $name = array_shift($args);
 
-        // Temporarily remove disabled check for this call
-        $result = match ($name) {
-            'exit' => $this->builtinExit($builtinArgs),
-            'export' => $this->builtinExport($builtinArgs),
-            'unset' => $this->builtinUnset($builtinArgs),
-            'local' => $this->builtinLocal($builtinArgs),
-            'set' => $this->builtinSet($builtinArgs),
-            'shopt' => $this->builtinShopt(),
-            'cd' => $this->builtinCd($builtinArgs),
-            'source', '.' => $this->builtinSource($builtinArgs),
-            'eval' => $this->builtinEval($builtinArgs),
-            'declare', 'typeset' => $this->builtinDeclare($builtinArgs),
-            'read' => $this->builtinRead($builtinArgs, $stdin),
-            'break' => $this->builtinBreak($builtinArgs),
-            'continue' => $this->builtinContinue($builtinArgs),
-            'return' => $this->builtinReturn($builtinArgs),
-            'shift' => $this->builtinShift($builtinArgs),
-            'let' => $this->builtinLet($builtinArgs),
-            'readonly' => $this->builtinReadonly($builtinArgs),
-            'trap' => $this->builtinTrap($builtinArgs),
-            'echo' => null,
-            default => null,
-        };
-
-        if (! $result instanceof \BashBox\ExecResult) {
-            if ($this->isBuiltin($name)) {
-                return $this->tryBuiltin($name, $builtinArgs, $stdin) ?? new ExecResult(stderr: "bash: builtin: {$name}: not a shell builtin\n", exitCode: 1);
-            }
-
-            return new ExecResult(stderr: "bash: builtin: {$name}: not a shell builtin\n", exitCode: 1);
-        }
-
-        return $result;
+        return $this->tryBuiltin($name, $args, $stdinStream)
+            ?? (in_array($name, self::REGISTRY_BUILTINS, true) && ! isset($this->interpreterState->disabledBuiltins[$name])
+                ? $this->runCommand($name, $args, $stdinStream)
+                : $this->routeOutput(new ExecResult(stderr: "bash: builtin: {$name}: not a shell builtin\n", exitCode: 1), $this->fds));
     }
 
-    /** @param array<int, string> $args */
-    private function builtinExec(array $args, string $stdin): ExecResult
+    /**
+     * exec replaces the shell with a command (never a function or builtin), so the script ends with its status.
+     * The command runs with exec's redirections; `exec` with only redirections is handled by executeSimpleCommand().
+     *
+     * @param  list<string>  $args
+     */
+    private function builtinExec(array $args, StdinStream $stdinStream): ExecResult
     {
         if ($args === []) {
             return new ExecResult(exitCode: 0);
         }
 
-        $commandName = $args[0];
-        $commandArgs = array_slice($args, 1);
+        $name = array_shift($args);
+        $result = $this->commandRegistry->has($name)
+            ? $this->runCommand($name, $args, $stdinStream)
+            : $this->routeOutput(new ExecResult(stderr: "bash: exec: {$name}: not found\n", exitCode: 127), $this->fds);
 
-        $builtinResult = $this->tryBuiltin($commandName, $commandArgs, $stdin);
+        $this->writeStdout($result->stdout);
+        $this->appendStderr($result->stderr);
 
-        if ($builtinResult instanceof \BashBox\ExecResult) {
-            $this->writeStdout($builtinResult->stdout);
-
-            if ($builtinResult->stderr !== '') {
-                $this->writeStderr($builtinResult->stderr);
-            }
-
-            throw new ExitException($builtinResult->exitCode);
-        }
-
-        if (isset($this->interpreterState->functions[$commandName])) {
-            $result = $this->executeFunction($commandName, $commandArgs, $stdin);
-            $this->writeStdout($result->stdout);
-
-            if ($result->stderr !== '') {
-                $this->writeStderr($result->stderr);
-            }
-
-            throw new ExitException($result->exitCode);
-        }
-
-        $cmd = $this->commandRegistry->get($commandName);
-
-        if ($cmd instanceof \BashBox\Commands\CommandInterface) {
-            $commandContext = new CommandContext(
-                fs: $this->fileSystem,
-                cwd: $this->interpreterState->cwd,
-                env: $this->interpreterState->getExportedEnv(),
-                stdin: $stdin,
-                limits: $this->interpreterState->limits,
-                exec: fn (string $script): ExecResult => $this->execSubcommand($script),
-                fetch: $this->secureHttpClient,
-                registry: $this->commandRegistry,
-            );
-            $result = $cmd->execute($commandArgs, $commandContext);
-            $this->writeStdout($result->stdout);
-
-            if ($result->stderr !== '') {
-                $this->writeStderr($result->stderr);
-            }
-
-            throw new ExitException($result->exitCode);
-        }
-
-        $this->writeStderr("bash: exec: {$commandName}: not found\n");
-
-        throw new ExitException(127);
+        throw new ExitException($result->exitCode);
     }
 
     /** @param array<int, string> $args */
     private function builtinPushd(array $args): ExecResult
     {
-        $hasArg = isset($args[0]);
+        $stack = &$this->interpreterState->directoryStack;
 
-        if (! $hasArg) {
-            if ($this->interpreterState->directoryStack === []) {
+        if ($args === []) {
+            // No operand swaps the top two directories
+            if ($stack === []) {
                 return new ExecResult(stderr: "bash: pushd: no other directory\n", exitCode: 1);
             }
 
-            $lastIdx = count($this->interpreterState->directoryStack) - 1;
-            $dir = $this->interpreterState->directoryStack[$lastIdx];
-            $this->interpreterState->directoryStack[$lastIdx] = $this->interpreterState->cwd;
+            $result = $this->builtinCd([array_pop($stack)], 'pushd');
         } else {
-            $dir = $args[0];
-            $this->interpreterState->directoryStack = [...$this->interpreterState->directoryStack, $this->interpreterState->cwd];
+            $result = $this->builtinCd([$args[0]], 'pushd');
         }
 
-        $execResult = $this->builtinCd([$dir]);
-
-        if ($execResult->exitCode !== 0) {
-            if ($hasArg) {
-                array_pop($this->interpreterState->directoryStack);
-            }
-
-            return $execResult;
+        if ($result->exitCode === 0) {
+            $stack[] = (string) $this->interpreterState->getVar('OLDPWD');
         }
 
-        $stack = $this->interpreterState->cwd;
-
-        foreach (array_reverse($this->interpreterState->directoryStack) as $d) {
-            $stack .= ' '.$d;
-        }
-
-        return new ExecResult(stdout: $stack."\n", exitCode: 0);
+        return $result->exitCode === 0 ? $this->formatDirStack() : $result;
     }
 
     private function builtinPopd(): ExecResult
@@ -1236,15 +2450,19 @@ final class Interpreter
             return new ExecResult(stderr: "bash: popd: directory stack empty\n", exitCode: 1);
         }
 
-        $dir = array_pop($this->interpreterState->directoryStack);
-        $this->builtinCd([$dir]);
-        $stack = $this->interpreterState->cwd;
+        $this->builtinCd([array_pop($this->interpreterState->directoryStack)], 'popd');
 
-        foreach (array_reverse($this->interpreterState->directoryStack) as $d) {
-            $stack .= ' '.$d;
-        }
+        return $this->formatDirStack();
+    }
 
-        return new ExecResult(stdout: $stack."\n", exitCode: 0);
+    /** The stack as pushd/popd print it: current directory first, $HOME shown as ~ */
+    private function formatDirStack(): ExecResult
+    {
+        $home = $this->interpreterState->getVar('HOME') ?? '';
+        $dirs = [$this->interpreterState->cwd, ...array_reverse($this->interpreterState->directoryStack)];
+        $dirs = array_map(fn (string $dir): string => $home !== '' && ($dir === $home || str_starts_with($dir, $home.'/')) ? '~'.substr($dir, strlen($home)) : $dir, $dirs);
+
+        return new ExecResult(stdout: implode(' ', $dirs)."\n");
     }
 
     /** @param array<int, string> $args */
@@ -1276,123 +2494,124 @@ final class Interpreter
     /** @param array<int, string> $args */
     private function builtinCaller(array $args): ExecResult
     {
-        $depth = $args !== [] ? (int) $args[0] : 0;
+        $arg = $args[0] ?? null;
 
-        if ($depth >= count($this->interpreterState->callStack)) {
+        if ($arg !== null && preg_match('/^\+?\d+$/', $arg) !== 1) {
+            $problem = str_starts_with($arg, '-') ? 'invalid option' : 'invalid number';
+
+            return new ExecResult(stderr: "bash: caller: {$arg}: {$problem}\ncaller: usage: caller [expr]\n", exitCode: 2);
+        }
+
+        // Frame N's call line, with the name and file of whatever made that call (frame N+1); like bash -c,
+        // the main script isn't a frame of its own, so a call made from it has no caller name
+        $frames = array_reverse($this->interpreterState->callStack);
+        $n = (int) $arg;
+        $line = $frames[$n]['line'] ?? null;
+
+        if ($line === null || ($arg !== null && ! isset($frames[$n + 1]))) {
             return new ExecResult(exitCode: 1);
         }
 
-        $index = count($this->interpreterState->callStack) - 1 - $depth;
-        $frame = $this->interpreterState->callStack[$index];
-
-        return new ExecResult(stdout: sprintf('%s %s %s%s', $frame['line'], $frame['function'], $frame['file'], PHP_EOL), exitCode: 0);
+        return new ExecResult(stdout: $arg === null
+            ? $line.' '.($frames[1]['file'] ?? 'NULL')."\n"
+            : sprintf("%d %s %s\n", $line, $frames[$n + 1]['function'], $frames[$n + 1]['file']));
     }
 
     /** @param array<int, string> $args */
     private function builtinHelp(array $args): ExecResult
     {
-        $builtins = [
-            ':' => 'Null command.',
-            '.' => 'Execute commands from a file in the current shell.',
-            'alias' => 'Define or display aliases.',
-            'bg' => 'Move jobs to the background.',
-            'break' => 'Exit for, while, or until loops.',
-            'builtin' => 'Execute shell builtins.',
-            'caller' => 'Return the context of the current subroutine call.',
-            'cd' => 'Change the shell working directory.',
-            'command' => 'Execute a simple command or display information about commands.',
-            'compgen' => 'Display possible completions depending on the options.',
-            'complete' => 'Specify how arguments are to be completed.',
-            'compopt' => 'Modify or display completion options.',
-            'continue' => 'Resume for, while, or until loops.',
-            'declare' => 'Set variable values and attributes.',
-            'dirs' => 'Display directory stack.',
-            'disown' => 'Remove jobs from current shell.',
-            'echo' => 'Write arguments to the standard output.',
-            'enable' => 'Enable and disable shell builtins.',
-            'eval' => 'Execute arguments as a shell command.',
-            'exec' => 'Replace the shell with the given command.',
-            'exit' => 'Exit the shell.',
-            'export' => 'Set export attribute for shell variables.',
-            'fg' => 'Move job to the foreground.',
-            'getopts' => 'Parse option arguments.',
-            'hash' => 'Remember or display program locations.',
-            'help' => 'Display information about builtin commands.',
-            'jobs' => 'Display status of jobs.',
-            'kill' => 'Send a signal to a job.',
-            'let' => 'Evaluate arithmetic expressions.',
-            'local' => 'Define local variables.',
-            'logout' => 'Exit a login shell.',
-            'mapfile' => 'Read lines from the standard input into an indexed array variable.',
-            'popd' => 'Remove directories from stack.',
-            'pushd' => 'Add directories to stack.',
-            'read' => 'Read a line from the standard input.',
-            'readarray' => 'Read lines from a file into an array variable.',
-            'readonly' => 'Mark shell variables as unchangeable.',
-            'return' => 'Return from a shell function.',
-            'set' => 'Set or unset values of shell options and positional parameters.',
-            'shift' => 'Shift positional parameters.',
-            'shopt' => 'Set and unset shell options.',
-            'source' => 'Execute commands from a file in the current shell.',
-            'suspend' => 'Suspend shell execution.',
-            'times' => 'Display process times.',
-            'trap' => 'Trap signals and other events.',
-            'type' => 'Display information about command type.',
-            'typeset' => 'Set variable values and attributes.',
-            'ulimit' => 'Modify shell resource limits.',
-            'umask' => 'Display or set file mode mask.',
-            'unalias' => 'Remove alias definitions.',
-            'unset' => 'Unset values and attributes of shell variables and functions.',
-            'wait' => 'Wait for job completion and return exit status.',
-        ];
+        $flags = '';
 
-        if ($args === []) {
-            $output = "Shell builtin commands:\n\n";
+        while (str_starts_with($args[0] ?? '', '-') && strlen($args[0]) > 1 && ($arg = array_shift($args)) !== '--') {
+            foreach (str_split(substr($arg, 1)) as $letter) {
+                if (! str_contains('dms', $letter)) {
+                    return new ExecResult(stderr: "bash: help: -{$letter}: invalid option\nhelp: usage: help [-dms] [pattern ...]\n", exitCode: 2);
+                }
 
-            foreach ($builtins as $name => $desc) {
-                $output .= sprintf(" %-16s %s\n", $name, $desc);
+                $flags .= $letter;
             }
-
-            return new ExecResult(stdout: $output, exitCode: 0);
         }
 
-        $pattern = $args[0];
-        $output = '';
+        // What `help name` prints in bash 5.3 for each builtin BashBox has: "name: synopsis", then the indented long text
+        preg_match_all('/^(\S+?): (.*)\n((?: .*\n)*)/m', (string) file_get_contents(__DIR__.'/builtin-help.txt'), $entries, PREG_SET_ORDER);
+        $topics = array_column(array_map(fn (array $entry): array => [$entry[1], $entry[2], $entry[3]], $entries), null, 0);
+        $version = sprintf('GNU bash, version %s (x86_64-pc-linux-gnu)', $this->interpreterState->getSpecialVar('BASH_VERSION'));
+
+        if ($args === []) {
+            return new ExecResult(stdout: $version."\n".$this->helpListing(array_column($topics, 1, 0)));
+        }
+
+        $output = preg_match('/[*?]|\[.*]/', $args[0]) === 1 ? sprintf("Shell commands matching keyword%s `%s'\n\n", count($args) > 1 ? 's' : '', implode(', ', $args)) : '';
         $found = false;
 
-        foreach ($builtins as $name => $desc) {
-            if (fnmatch($pattern, $name)) {
-                $output .= sprintf('%s: %s%s', $name, $desc, PHP_EOL);
+        foreach ($args as $pattern) {
+            // Exact or glob matches; failing those, names the pattern is a prefix of
+            $matches = array_filter($topics, fn (array $topic): bool => $topic[0] === $pattern || fnmatch($pattern, $topic[0]))
+                ?: array_filter($topics, fn (array $topic): bool => str_starts_with((string) $topic[0], $pattern));
+
+            foreach ($matches as [$name, $synopsis, $long]) {
+                $summary = substr($long, 4, (int) strpos($long, "\n") - 4);
+                $output .= match (true) {
+                    str_contains($flags, 'd') => sprintf("%s - %s\n", $name, $summary),
+                    str_contains($flags, 'm') => "NAME\n    {$name} - {$summary}\n\nSYNOPSIS\n    {$synopsis}\n\nDESCRIPTION\n{$long}\nSEE ALSO\n    bash(1)\n\n"
+                        ."IMPLEMENTATION\n    {$version}\n    Copyright (C) 2025 Free Software Foundation, Inc.\n    License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>\n\n",
+                    str_contains($flags, 's') => sprintf("%s: %s\n", $name, $synopsis),
+                    default => sprintf("%s: %s\n%s", $name, $synopsis, $long),
+                };
                 $found = true;
             }
         }
 
-        return new ExecResult(stdout: $output, exitCode: $found ? 0 : 1);
+        if (! $found) {
+            return new ExecResult(stderr: "bash: help: no help topics match `{$pattern}'.  Try `help help' or `man -k {$pattern}' or `info {$pattern}'.\n", exitCode: 1);
+        }
+
+        return new ExecResult(stdout: $output, exitCode: 0);
+    }
+
+    /**
+     * Plain `help`: the synopses in two columns of half the terminal width, cut short with `>`,
+     * and `*` marking a disabled builtin.
+     *
+     * @param  array<string, string>  $synopses
+     */
+    private function helpListing(array $synopses): string
+    {
+        $width = intdiv((int) ($this->interpreterState->getVar('COLUMNS') ?? 80), 2);
+        $width = $width <= 3 ? 40 : min($width, 128);
+
+        $names = array_keys($synopses);
+        $height = intdiv(count($names) + 1, 2);
+        $cell = fn (string $name, int $max): string => (isset($this->interpreterState->disabledBuiltins[$name]) ? '*' : ' ')
+            .(strlen($synopses[$name]) >= $max ? substr($synopses[$name], 0, $max).'>' : $synopses[$name]);
+        $listing = "These shell commands are defined internally.  Type `help' to see this list.\n"
+            ."Type `help name' to find out more about the function `name'.\n"
+            ."Use `info bash' to find out more about the shell in general.\n"
+            ."Use `man -k' or `info' to find out more about commands not in this list.\n\n"
+            ."A star (*) next to a name means that the command is disabled.\n\n";
+
+        for ($row = 0; $row < $height; $row++) {
+            $right = $names[$row + $height] ?? null;
+            $listing .= $right === null ? $cell($names[$row], $width - 3)."\n" : str_pad($cell($names[$row], $width - 3), $width).$cell($right, $width - 4)."\n";
+        }
+
+        return $listing;
     }
 
     /** @param array<int, string> $args */
     private function builtinEnable(array $args): ExecResult
     {
-        if ($args === []) {
-            return new ExecResult(exitCode: 0);
-        }
-
-        $disable = false;
-        $names = [];
+        $disable = in_array('-n', $args, true);
 
         foreach ($args as $arg) {
-            if ($arg === '-n') {
-                $disable = true;
-            } elseif (! str_starts_with((string) $arg, '-')) {
-                $names[] = $arg;
+            if (str_starts_with($arg, '-')) {
+                continue;
             }
-        }
 
-        foreach ($names as $name) {
             if ($disable) {
-                $this->interpreterState->disabledBuiltins[$name] = true;
+                $this->interpreterState->disabledBuiltins[$arg] = true;
             } else {
-                unset($this->interpreterState->disabledBuiltins[$name]);
+                unset($this->interpreterState->disabledBuiltins[$arg]);
             }
         }
 
@@ -1402,42 +2621,202 @@ final class Interpreter
     /** @param array<int, string> $args */
     private function builtinKill(array $args): ExecResult
     {
-        if ($args !== [] && $args[0] === '-l') {
-            $signals = "HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM\n";
-
-            return new ExecResult(stdout: $signals, exitCode: 0);
+        if (in_array($args[0] ?? '', ['-l', '-L'], true)) {
+            return $this->listSignals(array_slice($args, 1));
         }
 
-        return new ExecResult(stderr: "bash: kill: No such process\n", exitCode: 1);
+        // The sandbox has no other processes, so every target is missing
+        $stderr = '';
+
+        foreach ($args as $arg) {
+            if (! str_starts_with($arg, '-')) {
+                $stderr .= "bash: kill: ({$arg}) - No such process\n";
+            }
+        }
+
+        return new ExecResult(stderr: $stderr, exitCode: 1);
+    }
+
+    /**
+     * `kill -l`/`-L`: bash's signal table on Linux (glibc: 32 and 33 are reserved, real-time signals
+     * from 34 named relative to RTMIN/RTMAX), or each operand translated between number and name.
+     *
+     * @param  array<int, string>  $args
+     */
+    private function listSignals(array $args): ExecResult
+    {
+        $signals = array_combine(range(1, 31), explode(' ', 'HUP INT QUIT ILL TRAP ABRT BUS FPE KILL USR1 SEGV USR2 PIPE ALRM TERM STKFLT CHLD CONT STOP TSTP TTIN TTOU URG XCPU XFSZ VTALRM PROF WINCH IO PWR SYS'));
+
+        foreach (range(34, 64) as $number) {
+            $signals[$number] = match (true) {
+                $number === 34 => 'RTMIN',
+                $number < 50 => 'RTMIN+'.($number - 34),
+                $number < 64 => 'RTMAX-'.(64 - $number),
+                default => 'RTMAX',
+            };
+        }
+
+        // Options after -l (a signal like `-9`, or `--`) are skipped, as bash's option loop consumes them
+        while (str_starts_with($args[0] ?? '', '-') && strlen($args[0]) > 1 && array_shift($args) !== '--') {
+        }
+
+        if ($args === []) {
+            $table = '';
+
+            foreach (array_keys($signals) as $column => $number) {
+                $table .= sprintf('%2d) SIG%s', $number, $signals[$number]).($column % 5 === 4 ? "\n" : "\t");
+            }
+
+            return new ExecResult(stdout: $table."\n");
+        }
+
+        $stdout = '';
+        $stderr = '';
+        $numbers = array_flip($signals) + ['EXIT' => 0, 'DEBUG' => 65, 'ERR' => 66, 'RETURN' => 67];
+
+        foreach ($args as $arg) {
+            if (preg_match('/^\s*[-+]?\d+\s*$/', $arg) === 1) {
+                // An exit status above 128 names the signal that caused it
+                $number = (int) $arg > 128 ? (int) $arg - 128 : (int) $arg;
+                $name = $number === 0 ? 'EXIT' : $signals[$number] ?? null;
+            } else {
+                // Any case, and a SIG prefix is optional for real signals only (not EXIT, DEBUG, ERR, RETURN)
+                $upper = strtoupper($arg);
+                $unprefixed = str_starts_with($upper, 'SIG') ? substr($upper, 3) : '';
+                $number = $numbers[$upper] ?? (in_array($unprefixed, $signals, true) ? $numbers[$unprefixed] : null);
+                $name = $number === null ? null : (string) $number;
+            }
+
+            if ($name === null) {
+                $stderr .= "bash: kill: {$arg}: invalid signal specification\n";
+            } else {
+                $stdout .= $name."\n";
+            }
+        }
+
+        return new ExecResult($stdout, $stderr, $stderr === '' ? 0 : 1);
     }
 
     /** @param array<int, string> $args */
     private function builtinUlimit(array $args): ExecResult
     {
-        if ($args === [] || in_array('-a', $args, true)) {
-            return new ExecResult(stdout: "unlimited\n", exitCode: 0);
-        }
-
-        // Any query flag returns unlimited
+        // Queries report no limit; setting one is accepted and ignored
         foreach ($args as $arg) {
-            if (str_starts_with($arg, '-')) {
-                return new ExecResult(stdout: "unlimited\n", exitCode: 0);
+            if (! str_starts_with($arg, '-')) {
+                return new ExecResult(exitCode: 0);
             }
         }
 
-        return new ExecResult(exitCode: 0);
+        return new ExecResult(stdout: "unlimited\n", exitCode: 0);
     }
 
     /** @param array<int, string> $args */
     private function builtinUmask(array $args): ExecResult
     {
-        if ($args === []) {
-            return new ExecResult(stdout: $this->interpreterState->umask."\n", exitCode: 0);
+        $symbolic = false;
+        $reusable = false;
+
+        while ($args !== [] && strlen($args[0]) > 1 && $args[0][0] === '-' && ($arg = array_shift($args)) !== '--') {
+            foreach (str_split(substr($arg, 1)) as $letter) {
+                if ($letter !== 'S' && $letter !== 'p') {
+                    return new ExecResult(stderr: "bash: umask: -{$letter}: invalid option\numask: usage: umask [-p] [-S] [mode]\n", exitCode: 2);
+                }
+
+                $symbolic = $symbolic || $letter === 'S';
+                $reusable = $reusable || $letter === 'p';
+            }
         }
 
-        $this->interpreterState->umask = $args[0];
+        $mask = (int) octdec($this->interpreterState->umask);
+        $show = fn (int $mask): string => $symbolic
+            ? vsprintf("u=%s,g=%s,o=%s\n", array_map(fn (int $shift): string => implode('', array_filter(['r', 'w', 'x'], fn (int $bit): bool => ($mask >> $shift & 4 >> $bit) === 0, ARRAY_FILTER_USE_KEY)), [6, 3, 0]))
+            : sprintf("%04o\n", $mask);
 
-        return new ExecResult(exitCode: 0);
+        if ($args === []) {
+            return new ExecResult(stdout: ($reusable ? 'umask '.($symbolic ? '-S ' : '') : '').$show($mask));
+        }
+
+        $mode = $args[0];
+
+        if (ctype_digit(substr($mode, 0, 1))) {
+            if (preg_match('/^[0-7]+$/', $mode) !== 1 || octdec($mode) > 07777) {
+                return new ExecResult(stderr: "bash: umask: {$mode}: octal number out of range\n", exitCode: 1);
+            }
+
+            $mask = (int) octdec($mode);
+        } else {
+            // Symbolic modes work on the permissions the mask leaves, like chmod
+            $bits = $this->applySymbolicMode($mode, ~$mask & 0777);
+
+            if (is_string($bits)) {
+                return new ExecResult(stderr: sprintf("bash: umask: %s\n", $bits), exitCode: 1);
+            }
+
+            $mask = ~$bits & 0777;
+        }
+
+        $this->interpreterState->umask = sprintf('%04o', $mask);
+
+        // With a mode, -S still shows the new mask but -p doesn't
+        return new ExecResult(stdout: $symbolic ? $show($mask) : '');
+    }
+
+    /**
+     * bash's parse_symbolic_mode(): comma-separated [ugoa]*([-+=]([rwxXst]*|[ugo]))+ clauses applied to $initial.
+     *
+     * @return int|string the resulting permission bits, or the error message
+     */
+    private function applySymbolicMode(string $mode, int $initial): int|string
+    {
+        $bits = $initial;
+        $char = fn (int $at): string => $mode[$at] ?? "\0";
+
+        for ($i = 0; ; $i++) {
+            $who = 0;
+
+            for (; str_contains('agou', $char($i)); $i++) {
+                $who |= ['a' => 0777, 'u' => 0700, 'g' => 070, 'o' => 07][$char($i)];
+            }
+
+            $who = $who === 0 ? 0777 : $who;
+
+            do {
+                $op = $char($i++);
+
+                if (! str_contains('+-=', $op)) {
+                    return sprintf("`%s': invalid symbolic mode operator", $op);
+                }
+
+                $perm = 0;
+
+                for (; str_contains('rwxXstugo', $char($i)); $i++) {
+                    $perm = match ($char($i)) {
+                        // u, g and o copy that class's permissions; s and t mean nothing in a mask
+                        'u', 'g', 'o' => ($initial >> ['u' => 6, 'g' => 3, 'o' => 0][$char($i)] & 7) * 0111,
+                        'r' => $perm | 0444,
+                        'w' => $perm | 0222,
+                        'x' => $perm | 0111,
+                        'X' => ($initial & 0111) === 0 ? $perm : $perm | 0111,
+                        default => $perm,
+                    };
+                }
+
+                $perm &= $who;
+                $bits = match ($op) {
+                    '+' => $bits | $perm,
+                    '-' => $bits & ~$perm,
+                    default => $bits & ~$who | $perm,
+                };
+            } while (str_contains('+-=', $char($i)));
+
+            if ($i >= strlen($mode)) {
+                return $bits;
+            }
+
+            if ($char($i) !== ',') {
+                return sprintf("`%s': invalid symbolic mode character", $char($i));
+            }
+        }
     }
 
     private function isBuiltin(string $name): bool
@@ -1457,24 +2836,24 @@ final class Interpreter
     // COMPOUND COMMANDS
     // =========================================================================
 
-    private function executeIf(IfNode $ifNode, string $stdin): ExecResult
+    private function executeIf(IfNode $ifNode, StdinStream $stdinStream): ExecResult
     {
         foreach ($ifNode->clauses as $clause) {
-            $condResult = $this->executeStatementList($clause->condition, $stdin);
+            $condResult = $this->executeCondition($clause->condition, $stdinStream);
 
             if ($condResult === 0) {
-                return $this->executeStatementListResult($clause->body, $stdin);
+                return $this->executeStatementListResult($clause->body, $stdinStream);
             }
         }
 
         if ($ifNode->elseBody !== null) {
-            return $this->executeStatementListResult($ifNode->elseBody, $stdin);
+            return $this->executeStatementListResult($ifNode->elseBody, $stdinStream);
         }
 
         return new ExecResult(exitCode: 0);
     }
 
-    private function executeFor(ForNode $forNode, string $stdin): ExecResult
+    private function executeFor(ForNode $forNode, StdinStream $stdinStream): ExecResult
     {
         if ($forNode->words !== null) {
             $words = [];
@@ -1491,31 +2870,24 @@ final class Interpreter
         $iterations = 0;
 
         foreach ($words as $word) {
-            if (++$iterations > $this->interpreterState->limits->maxLoopIterations) {
-                throw new ExecutionLimitException('Loop iteration limit exceeded');
+            try {
+                // A nameref loop variable is pointed at each word in turn
+                $this->interpreterState->hasAttribute($forNode->variable, 'n')
+                    ? $this->interpreterState->setReference($forNode->variable, $word)
+                    : $this->interpreterState->setVar($forNode->variable, $word);
+            } catch (AssignmentException $assignmentException) {
+                return new ExecResult(stderr: $assignmentException->getMessage()."\n", exitCode: 1);
             }
 
-            $this->interpreterState->setVar($forNode->variable, $word);
-
-            try {
-                $exitCode = $this->executeStatementList($forNode->body, $stdin);
-            } catch (BreakException $e) {
-                if ($e->levels > 1) {
-                    throw new BreakException($e->levels - 1);
-                }
-
+            if (! $this->runLoopBody($forNode->body, $stdinStream, $exitCode, $iterations)) {
                 break;
-            } catch (ContinueException $e) {
-                if ($e->levels > 1) {
-                    throw new ContinueException($e->levels - 1);
-                }
             }
         }
 
         return new ExecResult(exitCode: $exitCode);
     }
 
-    private function executeCStyleFor(CStyleForNode $cStyleForNode, string $stdin): ExecResult
+    private function executeCStyleFor(CStyleForNode $cStyleForNode, StdinStream $stdinStream): ExecResult
     {
         if ($cStyleForNode->init instanceof \BashBox\Ast\ArithmeticExpressionNode) {
             $this->evaluateArithmeticExpression($cStyleForNode->init);
@@ -1524,31 +2896,9 @@ final class Interpreter
         $exitCode = 0;
         $iterations = 0;
 
-        while (true) {
-            if (++$iterations > $this->interpreterState->limits->maxLoopIterations) {
-                throw new ExecutionLimitException('Loop iteration limit exceeded');
-            }
-
-            if ($cStyleForNode->condition instanceof \BashBox\Ast\ArithmeticExpressionNode) {
-                $condResult = $this->evaluateArithmeticExpression($cStyleForNode->condition);
-
-                if ($condResult === 0) {
-                    break;
-                }
-            }
-
-            try {
-                $exitCode = $this->executeStatementList($cStyleForNode->body, $stdin);
-            } catch (BreakException $e) {
-                if ($e->levels > 1) {
-                    throw new BreakException($e->levels - 1);
-                }
-
+        while (! $cStyleForNode->condition instanceof \BashBox\Ast\ArithmeticExpressionNode || $this->evaluateArithmeticExpression($cStyleForNode->condition) !== 0) {
+            if (! $this->runLoopBody($cStyleForNode->body, $stdinStream, $exitCode, $iterations)) {
                 break;
-            } catch (ContinueException $e) {
-                if ($e->levels > 1) {
-                    throw new ContinueException($e->levels - 1);
-                }
             }
 
             if ($cStyleForNode->update instanceof \BashBox\Ast\ArithmeticExpressionNode) {
@@ -1559,195 +2909,221 @@ final class Interpreter
         return new ExecResult(exitCode: $exitCode);
     }
 
-    private function executeWhile(WhileNode $whileNode, string $stdin): ExecResult
+    private function executeWhile(WhileNode $whileNode, StdinStream $stdinStream): ExecResult
+    {
+        return $this->runConditionLoop($whileNode->condition, $whileNode->body, $stdinStream, until: false);
+    }
+
+    private function executeUntil(UntilNode $untilNode, StdinStream $stdinStream): ExecResult
+    {
+        return $this->runConditionLoop($untilNode->condition, $untilNode->body, $stdinStream, until: true);
+    }
+
+    /**
+     * @param  list<StatementNode>  $condition
+     * @param  list<StatementNode>  $body
+     */
+    private function runConditionLoop(array $condition, array $body, StdinStream $stdinStream, bool $until): ExecResult
     {
         $exitCode = 0;
         $iterations = 0;
 
-        while (true) {
-            if (++$iterations > $this->interpreterState->limits->maxLoopIterations) {
-                throw new ExecutionLimitException('Loop iteration limit exceeded');
-            }
-
-            $condResult = $this->executeStatementList($whileNode->condition, $stdin);
-
-            if ($condResult !== 0) {
+        while (($this->executeCondition($condition, $stdinStream) === 0) !== $until) {
+            if (! $this->runLoopBody($body, $stdinStream, $exitCode, $iterations)) {
                 break;
-            }
-
-            try {
-                $exitCode = $this->executeStatementList($whileNode->body, $stdin);
-            } catch (BreakException $e) {
-                if ($e->levels > 1) {
-                    throw new BreakException($e->levels - 1);
-                }
-
-                break;
-            } catch (ContinueException $e) {
-                if ($e->levels > 1) {
-                    throw new ContinueException($e->levels - 1);
-                }
             }
         }
 
         return new ExecResult(exitCode: $exitCode);
     }
 
-    private function executeUntil(UntilNode $untilNode, string $stdin): ExecResult
+    /**
+     * Runs one iteration of a loop body, returning false when the loop must stop because of `break`.
+     *
+     * @param  list<StatementNode>  $body
+     */
+    private function runLoopBody(array $body, StdinStream $stdinStream, int &$exitCode, int &$iterations): bool
     {
-        $exitCode = 0;
-        $iterations = 0;
+        if (++$iterations > $this->interpreterState->limits->maxLoopIterations) {
+            throw new ExecutionLimitException('Loop iteration limit exceeded');
+        }
 
-        while (true) {
-            if (++$iterations > $this->interpreterState->limits->maxLoopIterations) {
-                throw new ExecutionLimitException('Loop iteration limit exceeded');
+        try {
+            $exitCode = $this->executeStatementList($body, $stdinStream);
+        } catch (BreakException $e) {
+            if ($e->levels > 1) {
+                throw new BreakException($e->levels - 1);
             }
 
-            $condResult = $this->executeStatementList($untilNode->condition, $stdin);
-
-            if ($condResult === 0) {
-                break;
-            }
-
-            try {
-                $exitCode = $this->executeStatementList($untilNode->body, $stdin);
-            } catch (BreakException $e) {
-                if ($e->levels > 1) {
-                    throw new BreakException($e->levels - 1);
-                }
-
-                break;
-            } catch (ContinueException $e) {
-                if ($e->levels > 1) {
-                    throw new ContinueException($e->levels - 1);
-                }
+            return false;
+        } catch (ContinueException $e) {
+            if ($e->levels > 1) {
+                throw new ContinueException($e->levels - 1);
             }
         }
 
-        return new ExecResult(exitCode: $exitCode);
+        return true;
     }
 
-    private function executeCase(CaseNode $caseNode, string $stdin): ExecResult
+    private function executeCase(CaseNode $caseNode, StdinStream $stdinStream): ExecResult
     {
         $word = $this->expandWord($caseNode->word);
+        $exitCode = 0;
+        $fallThrough = false;
 
         foreach ($caseNode->items as $item) {
-            foreach ($item->patterns as $pattern) {
-                $patternStr = $this->expandWord($pattern);
-
-                if ($this->matchPattern($word, $patternStr)) {
-                    $result = $this->executeStatementListResult($item->body, $stdin);
-
-                    if ($item->terminator === ';;') {
-                        return $result;
-                    }
-
-                    if ($item->terminator === ';&') {
-                        // Fall through to next
-                        break;
-                    }
-
-                    if ($item->terminator === ';;&') {
-                        // Continue testing patterns
-                        break;
-                    }
-                }
+            if (! $fallThrough && ! array_any($item->patterns, fn (WordNode $wordNode): bool => $this->matchPattern($word, $wordNode))) {
+                continue;
             }
+
+            $exitCode = $this->executeStatementList($item->body, $stdinStream);
+
+            if ($item->terminator === ';;') {
+                break;
+            }
+
+            // `;&` runs the next body unconditionally, `;;&` goes back to testing patterns
+            $fallThrough = $item->terminator === ';&';
         }
 
-        return new ExecResult(exitCode: 0);
+        return new ExecResult(exitCode: $exitCode);
     }
 
-    private function executeSubshell(SubshellNode $subshellNode, string $stdin): ExecResult
+    private function executeSubshell(SubshellNode $subshellNode, StdinStream $stdinStream): ExecResult
     {
-        // Subshell: execute in a copy of the state
-        $savedEnv = $this->interpreterState->env;
-        $savedCwd = $this->interpreterState->cwd;
-
-        $execResult = $this->executeStatementListResult($subshellNode->body, $stdin);
-
-        // Restore state (subshell changes don't persist)
-        $this->interpreterState->env = $savedEnv;
-        $this->interpreterState->cwd = $savedCwd;
-
-        return $execResult;
+        return $this->inSubshell(fn (): ExecResult => $this->executeStatementListResult($subshellNode->body, $stdinStream));
     }
 
-    private function executeGroup(GroupNode $groupNode, string $stdin): ExecResult
+    /**
+     * Runs $run in a subshell: its state changes, exit and shell errors stay inside it.
+     * A pipeline stage is one too, but bash doesn't count it in BASH_SUBSHELL.
+     *
+     * @param  Closure(): ExecResult  $run
+     */
+    private function inSubshell(Closure $run, bool $counted = true): ExecResult
     {
-        return $this->executeStatementListResult($groupNode->body, $stdin);
+        $snapshot = clone $this->interpreterState;
+        $savedFds = $this->fds;
+        $this->enterSubshell();
+        $this->interpreterState->subshellDepth -= (int) ! $counted;
+
+        try {
+            return $run();
+        } catch (ExitException|ErrexitException|ReturnException $e) {
+            // These end the subshell, not the shell
+            return new ExecResult(exitCode: $e->exitCode);
+        } catch (ExpansionException|ArithmeticException|UnboundVariableException|AssignmentException $e) {
+            // So do shell errors, fatal or not, with status 1
+            $this->writeStderr('bash: '.preg_replace('/^bash: /', '', $e->getMessage())."\n");
+
+            return new ExecResult(exitCode: 1);
+        } finally {
+            $this->interpreterState->restore($snapshot);
+            $this->fds = $savedFds;
+        }
+    }
+
+    /** A subshell keeps the ERR trap only under `set -E`; the caller restores the state afterwards. */
+    private function enterSubshell(): void
+    {
+        $this->interpreterState->subshellDepth++;
+
+        if (! $this->interpreterState->shellOpts['errtrace']) {
+            unset($this->interpreterState->traps['ERR']);
+        }
+    }
+
+    private function executeGroup(GroupNode $groupNode, StdinStream $stdinStream): ExecResult
+    {
+        return $this->executeStatementListResult($groupNode->body, $stdinStream);
     }
 
     private function executeArithmeticCommand(ArithmeticCommandNode $arithmeticCommandNode): ExecResult
     {
-        $result = $this->evaluateArithmeticExpression($arithmeticCommandNode->expression);
+        try {
+            $result = $this->evaluateArithmeticExpression($arithmeticCommandNode->expression);
+        } catch (AssignmentException $assignmentException) {
+            return new ExecResult(stderr: $assignmentException->getMessage()."\n", exitCode: 1);
+        } catch (ArithmeticException $arithmeticException) {
+            // Unlike $((...)), a failing ((...)) is just a failed command
+            return new ExecResult(stderr: sprintf("bash: ((: %s\n", $arithmeticException->getMessage()), exitCode: 1);
+        }
 
         return new ExecResult(exitCode: $result !== 0 ? 0 : 1);
     }
 
     private function executeConditionalCommand(ConditionalCommandNode $conditionalCommandNode): ExecResult
     {
-        $result = $this->evaluateConditional($conditionalCommandNode->expression);
-
-        return new ExecResult(exitCode: $result ? 0 : 1);
+        try {
+            return new ExecResult(exitCode: $this->evaluateConditional($conditionalCommandNode->expression) ? 0 : 1);
+        } catch (RegexException $regexException) {
+            return new ExecResult(stderr: 'bash: [[: '.$regexException->getMessage()."\n", exitCode: 2);
+        } catch (ArithmeticException $arithmeticException) {
+            return new ExecResult(stderr: 'bash: [[: '.$arithmeticException->getMessage()."\n", exitCode: 1);
+        }
     }
 
     private function executeFunctionDef(FunctionDefNode $functionDefNode): ExecResult
     {
         $this->interpreterState->functions[$functionDefNode->name] = [
             'body' => $functionDefNode->body,
-            'sourceFile' => $functionDefNode->sourceFile,
+            'sourceFile' => $this->interpreterState->currentSource(),
         ];
 
         return new ExecResult(exitCode: 0);
     }
 
     /** @param list<string> $args */
-    private function executeFunction(string $name, array $args, string $stdin): ExecResult
+    private function executeFunction(string $name, array $args, StdinStream $stdinStream): ExecResult
     {
+        if ($this->interpreterState->callDepth >= $this->interpreterState->limits->maxCallDepth) {
+            throw new ExecutionLimitException('Call depth limit exceeded');
+        }
+
         $func = $this->interpreterState->functions[$name];
         $savedParams = $this->interpreterState->positionalParams;
         $this->interpreterState->positionalParams = $args;
         $this->interpreterState->pushLocalScope();
         $this->interpreterState->callDepth++;
-        $this->interpreterState->callStack[] = ['line' => 0, 'function' => $name, 'file' => $func['sourceFile'] ?? 'main'];
+        $this->interpreterState->pushFrame($name, $func['sourceFile']);
+        // Functions inherit the RETURN trap only under `set -T` and the ERR trap only under `set -E`; otherwise
+        // only one set by this body fires, and it then stays set
+        $outerTraps = [];
 
-        if ($this->interpreterState->callDepth > $this->interpreterState->limits->maxCallDepth) {
-            $this->interpreterState->callDepth--;
-            $this->interpreterState->popLocalScope();
-            $this->interpreterState->positionalParams = $savedParams;
-            array_pop($this->interpreterState->callStack);
-
-            throw new ExecutionLimitException('Call depth limit exceeded');
+        foreach (['RETURN' => 'functrace', 'ERR' => 'errtrace'] as $trap => $option) {
+            if (isset($this->interpreterState->traps[$trap]) && ! $this->interpreterState->shellOpts[$option]) {
+                $outerTraps[$trap] = $this->interpreterState->traps[$trap];
+                unset($this->interpreterState->traps[$trap]);
+            }
         }
 
         try {
-            $result = $this->executeCommand($func['body'], $stdin);
-        } catch (ReturnException $returnException) {
-            $result = new ExecResult(exitCode: $returnException->exitCode);
-        } finally {
-            if (isset($this->interpreterState->traps['RETURN']) && $this->interpreterState->traps['RETURN'] !== '') {
-                $returnTrap = $this->interpreterState->traps['RETURN'];
-                unset($this->interpreterState->traps['RETURN']);
-
-                try {
-                    $trapResult = $this->execSubcommand($returnTrap);
-                    $this->writeStdout($trapResult->stdout);
-
-                    if ($trapResult->stderr !== '') {
-                        $this->writeStderr($trapResult->stderr);
-                    }
-                } catch (ExitException|ErrexitException) {
-                    // Ignore
-                }
-
-                $this->interpreterState->traps['RETURN'] = $returnTrap;
+            try {
+                $result = $this->executeCommand($func['body'], $stdinStream);
+            } catch (ReturnException $returnException) {
+                $result = new ExecResult(exitCode: $returnException->exitCode);
             }
 
+            $returnTrap = $this->interpreterState->traps['RETURN'] ?? '';
+
+            if ($returnTrap !== '') {
+                // Queue the body's output first so it still precedes the trap's if the trap exits the shell
+                $savedStdout = $this->stdout;
+                $savedStderr = $this->stderr;
+                $this->stdout .= $result->stdout;
+                $this->stderr .= $result->stderr;
+                $trapResult = $this->runText($returnTrap, subshell: false, errorPrefix: 'bash: return trap: ');
+                $this->stdout = $savedStdout;
+                $this->stderr = $savedStderr;
+                $result = new ExecResult($result->stdout.$trapResult->stdout, $result->stderr.$trapResult->stderr, $result->exitCode);
+            }
+        } finally {
             $this->interpreterState->callDepth--;
             $this->interpreterState->popLocalScope();
             $this->interpreterState->positionalParams = $savedParams;
-            array_pop($this->interpreterState->callStack);
+            $this->interpreterState->popFrame();
+
+            $this->interpreterState->traps += $outerTraps;
         }
 
         return $result;
@@ -1758,14 +3134,30 @@ final class Interpreter
     // =========================================================================
 
     /**
+     * An if/while/until condition: its failures are tested, so they fire no ERR trap and don't exit under -e.
+     *
      * @param  list<StatementNode>  $statements
      */
-    private function executeStatementList(array $statements, string $stdin): int
+    private function executeCondition(array $statements, StdinStream $stdinStream): int
+    {
+        $this->conditionDepth++;
+
+        try {
+            return $this->executeStatementList($statements, $stdinStream);
+        } finally {
+            $this->conditionDepth--;
+        }
+    }
+
+    /**
+     * @param  list<StatementNode>  $statements
+     */
+    private function executeStatementList(array $statements, StdinStream $stdinStream): int
     {
         $exitCode = 0;
 
         foreach ($statements as $statement) {
-            $exitCode = $this->executeStatement($statement, $stdin);
+            $exitCode = $this->executeStatement($statement, $stdinStream);
         }
 
         return $exitCode;
@@ -1774,27 +3166,10 @@ final class Interpreter
     /**
      * @param  list<StatementNode>  $statements
      */
-    private function executeStatementListResult(array $statements, string $stdin): ExecResult
+    private function executeStatementListResult(array $statements, StdinStream $stdinStream): ExecResult
     {
-        $exitCode = 0;
-        $stdout = '';
-        $stderr = '';
-
-        $savedStdout = $this->stdout;
-        $savedStderr = $this->stderr;
-        $this->stdout = '';
-        $this->stderr = '';
-
-        foreach ($statements as $statement) {
-            $exitCode = $this->executeStatement($statement, $stdin);
-        }
-
-        $stdout = $this->stdout;
-        $stderr = $this->stderr;
-        $this->stdout = $savedStdout;
-        $this->stderr = $savedStderr;
-
-        return new ExecResult(stdout: $stdout, stderr: $stderr, exitCode: $exitCode);
+        // Output goes straight to the shell's buffers; executeCommand() captures it for the compound's redirections
+        return new ExecResult(exitCode: $this->executeStatementList($statements, $stdinStream));
     }
 
     public function expandWord(WordNode $wordNode): string
@@ -1810,147 +3185,418 @@ final class Interpreter
         return $this->wordExpander->expandToList($wordNode);
     }
 
-    public function execSubcommand(string $script): ExecResult
+    /**
+     * Runs $script and returns its output instead of writing it.
+     * As a $subshell (`$(...)`, xargs) it works on a copy of the state, and `exit` or an expansion error ends only $script.
+     * Otherwise (a trap) it runs in this shell, and `exit` ends the shell.
+     */
+    public function execSubcommand(string $script, bool $subshell = true, bool $substitution = false, ?StdinStream $stdin = null): ExecResult
     {
-        $parser = new \BashBox\Parser\Parser;
-        $scriptNode = $parser->parse($script);
+        return $this->nested(fn (): ExecResult => $this->inCaptureLevel(fn (): ExecResult => $this->runSubcommand($script, $subshell, $substitution, $stdin)));
+    }
 
-        return $this->executeScript($scriptNode);
+    /**
+     * The `exec` callback commands get, like `sh -c`; $env replaces the child's environment.
+     *
+     * @param  array<string, string>|null  $env
+     */
+    private function runForCommand(string $script, ?array $env = null, string|StdinStream|null $stdin = null): ExecResult
+    {
+        $stdin = is_string($stdin) ? new StdinStream($stdin) : $stdin;
+
+        if ($env === null) {
+            return $this->runText($script, stdin: $stdin);
+        }
+
+        $saved = [$this->interpreterState->env, $this->interpreterState->exported];
+        $this->interpreterState->env = $env;
+        $this->interpreterState->exported = array_fill_keys(array_keys($env), true);
+
+        try {
+            return $this->runText($script, stdin: $stdin);
+        } finally {
+            [$this->interpreterState->env, $this->interpreterState->exported] = $saved;
+        }
+    }
+
+    /** execSubcommand() for text that isn't part of the script (a trap, a command's `sh -c`): a syntax error is just status 2 */
+    private function runText(string $script, bool $subshell = true, string $errorPrefix = 'bash: ', ?StdinStream $stdin = null): ExecResult
+    {
+        try {
+            return $this->execSubcommand($script, $subshell, stdin: $stdin);
+        } catch (ParseException $parseException) {
+            return new ExecResult(stderr: $errorPrefix.$parseException->getMessage()."\n", exitCode: 2);
+        }
+    }
+
+    private function runSubcommand(string $script, bool $subshell, bool $substitution, ?StdinStream $stdin = null): ExecResult
+    {
+        // $(...) counts lines on from the line it's on
+        $scriptNode = $this->parse($script, $this->interpreterState->currentLine, $substitution);
+        $snapshot = clone $this->interpreterState;
+        $savedStdout = $this->stdout;
+        $savedStderr = $this->stderr;
+        $this->stdout = '';
+        $this->stderr = '';
+
+        if ($subshell) {
+            $this->enterSubshell();
+            // $(...) runs without -e unless inherit_errexit is on
+            $this->interpreterState->shellOpts['errexit'] = $this->interpreterState->shellOpts['errexit'] && $this->interpreterState->shopt['inherit_errexit'];
+        }
+
+        try {
+            try {
+                $exitCode = $this->executeStatementList($scriptNode->statements, $stdin ?? new StdinStream);
+            } catch (ExitException|ErrexitException $e) {
+                $exitCode = $subshell ? $e->exitCode : throw $e;
+            } catch (ExpansionException|ArithmeticException|UnboundVariableException|AssignmentException $e) {
+                $exitCode = $subshell ? 1 : throw $e;
+                $this->writeStderr('bash: '.preg_replace('/^bash: /', '', $e->getMessage())."\n");
+            }
+        } catch (Throwable $throwable) {
+            // Unwinding past us (exit, return, break): keep what was written so far
+            $this->stdout = $savedStdout.$this->stdout;
+            $this->stderr = $savedStderr.$this->stderr;
+
+            throw $throwable;
+        } finally {
+            if ($subshell) {
+                $this->interpreterState->restore($snapshot);
+            }
+        }
+
+        $execResult = new ExecResult($this->stdout, $this->stderr, $exitCode);
+        $this->stdout = $savedStdout;
+        $this->stderr = $savedStderr;
+
+        return $execResult;
     }
 
     public function writeStdout(string $data): void
     {
         $this->stdout .= $data;
+        $this->limitOutput(strlen($this->stdout) + strlen($this->stderr));
+    }
 
-        if (strlen($this->stdout) > $this->interpreterState->limits->maxOutputSize) {
-            throw new ExecutionLimitException('Output size limit exceeded');
+    private function appendStderr(string $data): void
+    {
+        $this->stderr .= $data;
+        $this->limitOutput(strlen($this->stdout) + strlen($this->stderr));
+    }
+
+    private function limitOutput(int $size): void
+    {
+        if ($size > $this->interpreterState->limits->maxOutputSize) {
+            throw new ExecutionLimitException(sprintf('Output size limit exceeded (%d bytes)', $this->interpreterState->limits->maxOutputSize));
         }
     }
 
+    /** The shell's own diagnostics: they go to whatever fd 2 currently is */
     public function writeStderr(string $data): void
     {
-        $this->stderr .= $data;
+        $execResult = $this->routeOutput(new ExecResult(stderr: $data), $this->fds);
+        $this->writeStdout($execResult->stdout);
+        $this->appendStderr($execResult->stderr);
     }
 
     /**
-     * @return array{stdin: ?string, stdout: ?string, append: bool, allowClobber: bool}
+     * Opens redirections left to right on top of the current fd table, as bash does, so `>f 2>&1` and
+     * `2>&1 >f` differ. Output files are created or truncated here, so routeOutput() only ever appends.
+     * A failure is reported through the fds opened so far (`2>/dev/null >/bad/f` stays quiet).
+     * `{name}>file` opens the lowest free fd from 10 and puts its number in the variable; `{name}>&-` closes
+     * the fd the variable names. Either way the change outlives the command, as in bash.
+     *
+     * @param  list<RedirectionNode>  $redirections
+     * @return array{stdin: ?StdinStream, fds: array<int, string|StdinStream>}|ExecResult ExecResult when a target can't be opened
      */
-    private function processRedirection(RedirectionNode $redirectionNode): array
+    private function openRedirections(array $redirections, StdinStream $stdinStream): array|ExecResult
     {
-        $result = ['stdin' => null, 'stdout' => null, 'append' => false, 'allowClobber' => false];
-        $op = $redirectionNode->operator;
+        $stdin = null;
+        $fds = $this->fds;
 
-        // Here-document
-        if ($redirectionNode->target instanceof HereDocNode) {
-            $content = $this->rawWordValue($redirectionNode->target->content);
+        foreach ($redirections as $redirection) {
+            $op = $redirection->operator;
+            $fd = $this->limitFd($redirection->fd ?? 1);
+            $named = $redirection->fdVariable;
 
-            if (! $redirectionNode->target->quoted) {
-                $content = $this->expandWord($redirectionNode->target->content);
+            if ($redirection->target instanceof HereDocNode) {
+                $content = $redirection->target->quoted
+                    ? $this->rawWordValue($redirection->target->content)
+                    : $this->wordExpander->expandHeredoc($redirection->target->content);
+
+                if ($redirection->target->stripTabs) {
+                    $content = preg_replace('/^\t+/m', '', $content) ?? $content;
+                }
+
+                if (strlen($content) > $this->interpreterState->limits->maxHereDocSize) {
+                    throw new ExecutionLimitException(sprintf('Here-document size limit exceeded (%d bytes)', $this->interpreterState->limits->maxHereDocSize));
+                }
+
+                $opened = new StdinStream($content);
+            } else {
+                $target = $this->expandWord($redirection->target);
+                $duplicate = ($op === '>&' || $op === '<&') && ($target === '-' || ctype_digit($target));
+                $opened = match (true) {
+                    $op === '<<<' => new StdinStream($target."\n"),
+                    $op === '<', $op === '<>' => $this->openInputFile($target, $op === '<>'),
+                    $duplicate => $this->duplicateFd($target, $fds, $stdin ?? $stdinStream, $this->badFdLabel($redirection, $this->rawWordValue($redirection->target))),
+                    // `>&file` is the csh spelling of `&>file`
+                    $op === '<&' || ($op === '>&' && ($fd !== 1 || $named !== null)) => new ExecResult(stderr: 'bash: '.($named ?? $target).": ambiguous redirect\n", exitCode: 1),
+                    default => $this->openOutputFile($target, str_ends_with($op, '>>'), $op === '>|', $fds),
+                };
+
+                if (($op === '>&' && ! $duplicate) || $op === '&>' || $op === '&>>') {
+                    $fd = -1; // both 1 and 2
+                }
             }
 
-            if ($redirectionNode->target->stripTabs) {
-                $content = preg_replace('/^\t/m', '', $content) ?? $content;
+            if ($named !== null && ! $opened instanceof ExecResult) {
+                $namedFd = $opened === null ? $this->namedFdToClose($named) : $this->assignNamedFd($named, $fds);
+
+                if ($namedFd instanceof ExecResult) {
+                    return $this->routeOutput($namedFd, $fds);
+                }
+
+                // The shell keeps it, so restoring the fds after the command doesn't undo it
+                $fd = $namedFd;
+
+                if ($opened === null) {
+                    unset($this->fds[$fd]);
+                } else {
+                    $this->fds[$fd] = $opened;
+                }
             }
 
-            $result['stdin'] = $content;
-
-            return $result;
-        }
-
-        $target = $this->expandWord($redirectionNode->target);
-
-        // Here-string
-        if ($op === '<<<') {
-            $result['stdin'] = $target."\n";
-
-            return $result;
-        }
-
-        // Input redirect
-        if ($op === '<') {
-            $path = str_starts_with($target, '/') ? $target : $this->fileSystem->resolvePath($this->interpreterState->cwd, $target);
-
-            try {
-                $result['stdin'] = $this->fileSystem->readFile($path);
-            } catch (RuntimeException) {
-                $this->writeStderr("bash: {$target}: No such file or directory\n");
+            if ($opened instanceof ExecResult) {
+                return $this->routeOutput($opened, $fds);
             }
 
-            return $result;
-        }
-
-        // Output redirect
-        if (in_array($op, ['>', '>>', '>|'], true)) {
-            $result['stdout'] = $target;
-            $result['append'] = $op === '>>';
-            $result['allowClobber'] = $op === '>|';
-
-            return $result;
-        }
-
-        // Dup fd
-        if ($op === '>&') {
-            if ($target === '2') {
-                // Redirect stdout to stderr (just ignore for now)
-            } elseif ($target === '1' || $target === '-') {
-                // Redirect stderr to stdout or close
+            if ($fd === 0) {
+                // fd 0 travels as the StdinStream argument; a closed or write-only one can't be read
+                $stdin = $opened instanceof StdinStream ? $opened : new StdinStream(readable: false);
+            } elseif ($opened === null) {
+                unset($fds[$fd]);
+            } elseif ($fd === -1) {
+                $fds[1] = $fds[2] = $opened;
+            } else {
+                $fds[$fd] = $opened;
             }
-
-            return $result;
         }
 
-        if ($op === '2>' || ($op === '>' && $redirectionNode->fd === 2)) {
-            // Redirect stderr to file (ignore content for now)
-            return $result;
-        }
-
-        // &> and &>> redirect both
-        if ($op === '&>' || $op === '&>>') {
-            $result['stdout'] = $target;
-            $result['append'] = $op === '&>>';
-            $result['allowClobber'] = $op === '&>';
-
-            return $result;
-        }
-
-        return $result;
+        return ['stdin' => $stdin, 'fds' => $fds];
     }
 
-    private function handleOutputRedirection(ExecResult $execResult, ?string $targetPath, bool $append, bool $allowClobber = false): ExecResult
+    private function limitFd(int $fd): int
     {
-        if ($targetPath === null) {
-            return $execResult;
+        if ($fd >= $this->interpreterState->limits->maxFileDescriptors) {
+            throw new ExecutionLimitException(sprintf('File descriptor limit exceeded (%d)', $this->interpreterState->limits->maxFileDescriptors));
         }
 
-        $path = str_starts_with($targetPath, '/')
-            ? $targetPath
-            : $this->fileSystem->resolvePath($this->interpreterState->cwd, $targetPath);
+        return $fd;
+    }
 
-        if (
-            ! $append
-            && ! $allowClobber
-            && ($this->interpreterState->shellOpts['noclobber'] ?? false)
-            && $this->fileSystem->exists($path)
-        ) {
-            return new ExecResult(
-                stdout: '',
-                stderr: "bash: {$targetPath}: cannot overwrite existing file\n",
-                exitCode: 1,
-            );
+    /** The fd `{name}>&-` closes: the number in the variable */
+    private function namedFdToClose(string $name): int|ExecResult
+    {
+        $value = $this->expandWord(new WordNode([new \BashBox\Ast\Parts\LiteralPart('${'.$name.'}')]));
+
+        return ctype_digit($value) ? (int) $value : new ExecResult(stderr: "bash: {$name}: ambiguous redirect\n", exitCode: 1);
+    }
+
+    /**
+     * `{name}>file`: the lowest fd from 10 that isn't open, stored in the variable (or array element)
+     *
+     * @param  array<int, string|StdinStream>  $fds
+     */
+    private function assignNamedFd(string $name, array $fds): int|ExecResult
+    {
+        $variable = explode('[', $name)[0];
+
+        if ($this->interpreterState->isReadonly($variable)) {
+            return new ExecResult(stderr: "bash: {$variable}: readonly variable\nbash: {$name}: cannot assign fd to variable\n", exitCode: 1);
         }
 
-        if ($append) {
-            $this->fileSystem->appendFile($path, $execResult->stdout);
+        $fd = 10;
+
+        while (isset($fds[$fd])) {
+            $this->limitFd(++$fd);
+        }
+
+        $this->applyAssignment($this->resolveAssignment(new \BashBox\Ast\AssignmentNode($name, new WordNode([new \BashBox\Ast\Parts\LiteralPart((string) $fd)]))));
+
+        return $fd;
+    }
+
+    /** `<file` and `<>file` (which creates a missing file): a stream on the file that reads its current content */
+    private function openInputFile(string $target, bool $readWrite): StdinStream|ExecResult
+    {
+        if ($target === '/dev/null') {
+            return new StdinStream;
+        }
+
+        $path = $this->resolveFsPath($target);
+
+        try {
+            if ($readWrite && ! $this->fileSystem->exists($path)) {
+                $this->fileSystem->writeFile($path, '');
+            }
+
+            // `<dir` fails here, where bash opens it and fails the first read
+            return new StdinStream($this->fileSystem->readFile($path), $this->fileSystem, $path, $readWrite);
+        } catch (RuntimeException $runtimeException) {
+            return $this->openError($target, $runtimeException);
+        }
+    }
+
+    private function openError(string $target, RuntimeException $runtimeException): ExecResult
+    {
+        return new ExecResult(stderr: sprintf("bash: %s: %s\n", $target, $this->strerror($runtimeException)), exitCode: 1);
+    }
+
+    /** What strerror() says for a filesystem failure such as "ENOSPC: no space left on device, write '/f'" */
+    private function strerror(RuntimeException $runtimeException): string
+    {
+        $message = $runtimeException->getMessage();
+
+        // bash can't put a NUL in a path, so a path holding one stays an exception
+        if (str_contains($message, 'null byte')) {
+            throw $runtimeException;
+        }
+
+        return match (strstr($message, ':', true)) {
+            'EACCES' => 'Permission denied',
+            'EISDIR' => 'Is a directory',
+            'EPERM' => 'Operation not permitted',
+            default => ucfirst((string) preg_replace('/^\w+: ([^,]*).*$/s', '$1', $message)),
+        };
+    }
+
+    /**
+     * `N>&M` / `N<&M`: fd N becomes a copy of fd M, sharing its offset; `-` closes N (null).
+     *
+     * @param  array<int, string|StdinStream>  $fds
+     */
+    private function duplicateFd(string $target, array $fds, StdinStream $stdinStream, string $label): string|StdinStream|ExecResult|null
+    {
+        return match (true) {
+            $target === '-' => null,
+            $target === '0' => $stdinStream->dup(),
+            default => $fds[(int) $target] ?? new ExecResult(stderr: "bash: {$label}: Bad file descriptor\n", exitCode: 1),
+        };
+    }
+
+    /**
+     * What bash names when `>&M` finds M closed: a literal number, else the word as written (`$fd`) on the
+     * operator's own fd, the fd otherwise, and for `{name}>&M` the variable.
+     */
+    private function badFdLabel(RedirectionNode $redirectionNode, string $raw): string
+    {
+        $default = ctype_digit($raw) || $redirectionNode->fd === ($redirectionNode->operator === '>&' ? 1 : 0);
+
+        return $redirectionNode->fdVariable ?? ($default ? $raw : (string) $redirectionNode->fd);
+    }
+
+    /** @param array<int, string|StdinStream> $fds */
+    private function openOutputFile(string $target, bool $append, bool $clobber, array $fds): string|StdinStream|ExecResult
+    {
+        $special = ['/dev/null' => '@null', '/dev/stdout' => $fds[1] ?? '@null', '/dev/stderr' => $fds[2] ?? '@null'];
+
+        if (isset($special[$target])) {
+            return $special[$target];
+        }
+
+        $path = $this->resolveFsPath($target);
+
+        if (! $append && ! $clobber && $this->interpreterState->shellOpts['noclobber'] && $this->fileSystem->exists($path)) {
+            return new ExecResult(stderr: "bash: {$target}: cannot overwrite existing file\n", exitCode: 1);
+        }
+
+        try {
+            // The filesystem would create missing parents; a redirection must not
+            if (! $this->fileSystem->stat(dirname($path))->isDirectory) {
+                return new ExecResult(stderr: "bash: {$target}: Not a directory\n", exitCode: 1);
+            }
+
+            $append ? $this->fileSystem->appendFile($path, '') : $this->fileSystem->writeFile($path, '');
+        } catch (RuntimeException $runtimeException) {
+            return $this->openError($target, $runtimeException);
+        }
+
+        return $path;
+    }
+
+    /**
+     * Sends a command's stdout and stderr to their fds' targets; what is for the current capture level's
+     * stdout or the shell's stderr comes back in the result. Writing to a closed or read-only fd fails
+     * like bash: $writer ('bash: echo', 'cat') reports a write error on fd 2 and the status becomes 1.
+     * Limitation: pipelines are buffered, not streamed, so a file shared by fd 1 and 2 gets all stdout then all stderr, not interleaved.
+     *
+     * @param  array<int, string|StdinStream>  $fds
+     */
+    private function routeOutput(ExecResult $execResult, array $fds, ?string $writer = null): ExecResult
+    {
+        $stdout = '';
+        $stderr = '';
+        $errors = $execResult->stderr;
+        $exitCode = $execResult->exitCode;
+
+        $error = $this->writeFd($fds[1] ?? null, $execResult->stdout, $stdout, $stderr);
+
+        if ($error !== null && $writer !== null) {
+            $errors .= sprintf("%s: write error: %s\n", $writer, $error);
+            $exitCode = 1;
+        }
+
+        $this->writeFd($fds[2] ?? null, $errors, $stdout, $stderr);
+
+        return new ExecResult($stdout, $stderr, $exitCode);
+    }
+
+    /** @return ?string why the write failed: $target isn't open for writing, or the filesystem refused */
+    private function writeFd(string|StdinStream|null $target, string $data, string &$stdout, string &$stderr): ?string
+    {
+        if ($data === '' || $target === '@null') {
+            return null;
+        }
+
+        if ($target instanceof StdinStream && $target->writable) {
+            return $this->tryFs(fn () => $target->write($data));
+        }
+
+        if (! is_string($target)) {
+            return 'Bad file descriptor';
+        }
+
+        if ($target === '@2') {
+            $stderr .= $data;
+        } elseif (str_starts_with($target, '@1:')) {
+            $level = (int) substr($target, 3);
+
+            if ($level === $this->captureLevel) {
+                $stdout .= $data;
+            } else {
+                $this->passthrough[$level] = ($this->passthrough[$level] ?? '').$data;
+            }
         } else {
-            $this->fileSystem->writeFile($path, $execResult->stdout);
+            $this->limitOutput(strlen($data));
+
+            return $this->tryFs(fn () => $this->fileSystem->appendFile($target, $data));
         }
 
-        return new ExecResult(stdout: '', stderr: $execResult->stderr, exitCode: $execResult->exitCode);
+        return null;
     }
 
-    public function resolvePath(string $base, string $path): string
+    /** @return ?string strerror's text when the filesystem refuses */
+    private function tryFs(Closure $write): ?string
     {
-        return $this->fileSystem->resolvePath($base, $path);
+        try {
+            $write();
+        } catch (RuntimeException $runtimeException) {
+            return $this->strerror($runtimeException);
+        }
+
+        return null;
     }
 
     /**
@@ -1961,53 +3607,49 @@ final class Interpreter
         return $this->fileSystem->readdir($path);
     }
 
+    public function isDirectory(string $path, bool $followLinks = true): bool
+    {
+        return $this->statPath($path, $followLinks)->isDirectory ?? false;
+    }
+
     /**
      * @param  array<int, array{
      *     type: 'scalar'|'array'|'element',
      *     name: string,
      *     value?: string,
      *     append: bool,
-     *     elements?: list<string>,
+     *     elements?: list<array{int|string|null, string}>,
      *     subscript?: int|string,
      * } >  $assignments
      */
     private function formatTraceCommand(SimpleCommandNode $simpleCommandNode, array $assignments): string
     {
-        $parts = [];
+        // bash traces each assignment and then the command on lines of their own; the caller adds the first `+ `
+        $lines = [];
 
         foreach ($assignments as $assignment) {
-            $parts[] = match ($assignment['type']) {
-                'array' => sprintf(
-                    '%s%s(%s)',
-                    $assignment['name'],
-                    $assignment['append'] ? '+' : '',
-                    implode(' ', $assignment['elements'] ?? []),
-                ),
-                'element' => sprintf(
-                    '%s[%s]%s=%s',
-                    $assignment['name'],
-                    (string) ($assignment['subscript'] ?? ''),
-                    $assignment['append'] ? '+' : '',
-                    $assignment['value'] ?? '',
-                ),
-                default => sprintf(
-                    '%s%s=%s',
-                    $assignment['name'],
-                    $assignment['append'] ? '+' : '',
-                    $assignment['value'] ?? '',
-                ),
+            $op = $assignment['append'] ? '+=' : '=';
+            $lines[] = match ($assignment['type']) {
+                'array' => sprintf('%s%s(', $assignment['name'], $op).implode(' ', array_map(
+                    fn (array $pair): string => ($pair[0] === null ? '' : sprintf('[%s]=', $pair[0])).$pair[1],
+                    $assignment['elements'] ?? [],
+                )).')',
+                'element' => $assignment['name'].'['.($assignment['subscript'] ?? '').(']'.$op).($assignment['value'] ?? ''),
+                default => $assignment['name'].$op.($assignment['value'] ?? ''),
             };
         }
 
         if ($simpleCommandNode->name instanceof WordNode) {
-            $parts[] = $this->expandWord($simpleCommandNode->name);
+            $words = [$this->expandWord($simpleCommandNode->name)];
 
             foreach ($simpleCommandNode->args as $arg) {
-                array_push($parts, ...$this->expandWordList($arg));
+                array_push($words, ...$this->expandWordList($arg));
             }
+
+            $lines[] = implode(' ', $words);
         }
 
-        return implode(' ', $parts);
+        return implode("\n+ ", $lines);
     }
 
     /**
@@ -2016,7 +3658,7 @@ final class Interpreter
      *     name: string,
      *     value?: string,
      *     append: bool,
-     *     elements?: list<string>,
+     *     elements?: list<array{int|string|null, string}>,
      *     subscript?: int|string,
      * }
      */
@@ -2026,7 +3668,17 @@ final class Interpreter
             $elements = [];
 
             foreach ($assignmentNode->array as $element) {
-                array_push($elements, ...$this->expandWordList($element));
+                // `[key]=value` is read from the raw text, before quote removal, so a quoted value stays one word
+                if (preg_match('/^\[([^\]]+)\]=(.*)$/s', $this->rawWordValue($element), $m) === 1) {
+                    $key = $this->expandWord(new WordNode([new \BashBox\Ast\Parts\LiteralPart($m[1])]));
+                    $elements[] = [$this->normalizeArrayKey($key), $this->expandWord(new WordNode([new \BashBox\Ast\Parts\LiteralPart($m[2])]))];
+
+                    continue;
+                }
+
+                foreach ($this->expandWordList($element) as $value) {
+                    $elements[] = [null, $value];
+                }
             }
 
             return [
@@ -2041,7 +3693,7 @@ final class Interpreter
             return [
                 'type' => 'element',
                 'name' => $matches[1],
-                'subscript' => $this->normalizeArrayKey($matches[2]),
+                'subscript' => $this->expandSubscript($matches[2]),
                 'append' => $assignmentNode->append,
                 'value' => $assignmentNode->value instanceof \BashBox\Ast\WordNode ? $this->expandWord($assignmentNode->value) : '',
             ];
@@ -2061,67 +3713,48 @@ final class Interpreter
      *     name: string,
      *     value?: string,
      *     append: bool,
-     *     elements?: list<string>,
+     *     elements?: list<array{int|string|null, string}>,
      *     subscript?: int|string,
      * }  $assignment
      */
-    private function applyAssignment(array $assignment): ?ExecResult
+    private function applyAssignment(array $assignment): void
     {
-        if ($this->interpreterState->isReadonly($assignment['name'])) {
-            $this->writeStderr("bash: {$assignment['name']}: readonly variable\n");
-
-            return new ExecResult(exitCode: 1);
-        }
-
-        if ($assignment['type'] === 'array') {
-            $existing = $this->interpreterState->arrays[$assignment['name']] ?? [];
-            $elements = $assignment['elements'] ?? [];
-
-            if ($assignment['append']) {
-                $nextIndex = $this->nextArrayIndex($existing);
-
-                foreach ($elements as $element) {
-                    $existing[$nextIndex++] = $element;
-                }
-
-                $this->interpreterState->arrays[$assignment['name']] = $existing;
-            } else {
-                $this->interpreterState->arrays[$assignment['name']] = array_combine(
-                    range(0, max(count($elements) - 1, 0)),
-                    $elements,
-                ) ?: [];
-            }
-
-            return null;
-        }
+        $state = $this->interpreterState;
+        $name = $assignment['name'];
 
         if ($assignment['type'] === 'element') {
-            $name = $assignment['name'];
-            $subscript = $assignment['subscript'] ?? 0;
-            $value = $assignment['value'] ?? '';
-            $array = $this->interpreterState->arrays[$name] ?? [];
+            $state->setElement($name, $this->arrayIndex($name, $assignment['subscript'] ?? 0), $assignment['value'] ?? '', $assignment['append']);
 
-            if ($assignment['append'] && array_key_exists($subscript, $array)) {
-                $array[$subscript] .= $value;
-            } else {
-                $array[$subscript] = $value;
+            return;
+        }
+
+        if ($assignment['type'] === 'scalar') {
+            $state->setVar($name, $assignment['value'] ?? '', $assignment['append']);
+
+            return;
+        }
+
+        $array = $assignment['append'] ? $state->getArray($name) : [];
+        $nextIndex = $this->nextArrayIndex($array);
+        $elements = [];
+
+        // An unkeyed element goes one past the last numeric index, so (a [5]=b c) puts c at 6
+        foreach ($assignment['elements'] ?? [] as [$key, $value]) {
+            $key = $key === null ? $nextIndex : $this->arrayIndex($name, $key);
+            $elements[$key] = $value;
+
+            if (is_int($key)) {
+                $nextIndex = $key + 1;
             }
-
-            $this->interpreterState->arrays[$name] = $array;
-
-            return null;
         }
 
-        $name = $assignment['name'];
-        $value = $assignment['value'] ?? '';
-
-        if ($assignment['append']) {
-            $value = ($this->interpreterState->getVar($name) ?? '').$value;
+        if (! $assignment['append']) {
+            $state->setArray($name, $elements);
         }
 
-        $this->interpreterState->setVar($name, $value);
-
-        return null;
+        foreach ($assignment['append'] ? $elements : [] as $key => $value) {
+            $state->setElement($name, $key, $value);
+        }
     }
 
     /**
@@ -2143,24 +3776,34 @@ final class Interpreter
         return preg_match('/^-?\d+$/', $subscript) === 1 ? (int) $subscript : $subscript;
     }
 
-    private function rawWordValue(WordNode $wordNode): string
+    /** An assignment's `[subscript]`, expanded; whether it's arithmetic waits until the array is known to be indexed */
+    private function expandSubscript(string $subscript): int|string
     {
-        $result = '';
+        return $this->normalizeArrayKey($this->expandWord(new WordNode([new \BashBox\Ast\Parts\LiteralPart($subscript)])));
+    }
 
-        foreach ($wordNode->parts as $part) {
-            $result .= match (true) {
-                $part instanceof \BashBox\Ast\Parts\LiteralPart => $part->value,
-                $part instanceof \BashBox\Ast\Parts\SingleQuotedPart => $part->value,
-                $part instanceof \BashBox\Ast\Parts\EscapedPart => $part->value,
-                $part instanceof \BashBox\Ast\Parts\DoubleQuotedPart => implode('', array_map(
-                    fn (\BashBox\Ast\WordPart $wordPart): string => $wordPart instanceof \BashBox\Ast\Parts\LiteralPart ? $wordPart->value : '',
-                    $part->parts,
-                )),
-                default => '',
-            };
+    /** The element an assignment's expanded subscript names: an associative array's key, else an arithmetic index counting back from the end when negative. */
+    private function arrayIndex(string $name, int|string $key): int|string
+    {
+        $state = $this->interpreterState;
+
+        if ($state->hasAttribute($state->resolve($name, quiet: true) ?? $name, 'A')) {
+            return $key;
         }
 
-        return $result;
+        $index = is_int($key) ? $key : $this->fatalArithmetic($key);
+        $index += $index < 0 ? $this->nextArrayIndex($state->getArray($name)) : 0;
+
+        return $index >= 0 ? $index : throw new AssignmentException(sprintf('bash: %s[%s]: bad array subscript', $name, $key));
+    }
+
+    private function rawWordValue(WordNode $wordNode): string
+    {
+        // The parser stores heredoc bodies as literal text
+        return implode('', array_map(
+            fn (\BashBox\Ast\WordPart $wordPart): string => $wordPart instanceof \BashBox\Ast\Parts\LiteralPart ? $wordPart->value : '',
+            $wordNode->parts,
+        ));
     }
 
     // =========================================================================
@@ -2169,40 +3812,82 @@ final class Interpreter
 
     public function evaluateArithmeticExpression(\BashBox\Ast\ArithmeticExpressionNode $arithmeticExpressionNode): int
     {
-        if ($arithmeticExpressionNode->originalText !== null) {
-            return $this->evaluateArithmeticString($arithmeticExpressionNode->originalText);
-        }
-
-        return $this->evaluateArithExpr($arithmeticExpressionNode->expression);
+        // The parser always keeps the source text; it's re-evaluated so `$x` expands textually, as in bash
+        return $this->evaluateArithmeticString($arithmeticExpressionNode->originalText);
     }
 
     public function evaluateArithmeticString(string $expr): int
     {
-        // Expand variables in the expression
-        $expanded = preg_replace_callback('/\$\{([^}]+)\}|\$([a-zA-Z_]\w*)/', function (array $matches): string {
-            $name = $matches[1] !== '' ? $matches[1] : $matches[2];
+        // Like bash: parameter expansion, command substitution and quote removal first, then evaluation
+        return $this->evaluateArithmeticText($this->expandWord(new WordNode([new \BashBox\Ast\Parts\LiteralPart($expr)])));
+    }
 
-            return $this->interpreterState->getVar($name) ?? $this->interpreterState->getSpecialVar($name) ?? '0';
-        }, $expr) ?? $expr;
+    /** Evaluates text that is already expanded, such as a variable's value: a `$` or quote in it is an error, never run. */
+    public function evaluateArithmeticText(string $expr): int
+    {
+        return $this->evaluateArithExpr(new \BashBox\Parser\ArithmeticParser($expr, $this->interpreterState->limits)->parse());
+    }
 
-        $arithmeticParser = new \BashBox\Parser\ArithmeticParser($expanded);
-        $arithExpr = $arithmeticParser->parse();
+    /**
+     * An element's key: associative arrays use the subscript as it is, indexed ones its arithmetic value,
+     * counting back from the end when negative.
+     */
+    private function arithElementKey(ArithArrayElementNode $arithArrayElementNode): int|string
+    {
+        $array = $this->interpreterState->getArray($arithArrayElementNode->name);
 
-        return $this->evaluateArithExpr($arithExpr);
+        if (array_filter(array_keys($array), is_string(...)) !== []) {
+            return $arithArrayElementNode->subscript;
+        }
+
+        $index = $this->evaluateArithmeticString($arithArrayElementNode->subscript);
+
+        return $index < 0 && $array !== [] ? $index + (int) max(array_keys($array)) + 1 : $index;
+    }
+
+    private function arithRead(ArithVariableNode|ArithArrayElementNode $node): string
+    {
+        $name = $node->name;
+
+        // bash reports `a[]` twice and reads it as 0
+        if ($node instanceof ArithArrayElementNode && $node->subscript === '') {
+            $this->writeStderr(str_repeat("bash: {$name}[]: bad array subscript\n", 2));
+
+            return '0';
+        }
+
+        if ($node instanceof ArithArrayElementNode) {
+            $key = $this->arithElementKey($node);
+
+            return $this->interpreterState->getArray($name)[$key] ?? '0';
+        }
+
+        return $this->interpreterState->getVar($name) ?? $this->interpreterState->getSpecialVar($name) ?? '0';
+    }
+
+    private function arithWrite(ArithVariableNode|ArithArrayElementNode $node, int $value): int
+    {
+        if ($node instanceof ArithArrayElementNode) {
+            $this->interpreterState->setElement($node->name, $this->arithElementKey($node), (string) $value);
+        } else {
+            $this->interpreterState->setVar($node->name, (string) $value);
+        }
+
+        return $value;
     }
 
     public function evaluateArithExpr(ArithExpr $arithExpr): int
     {
         if ($arithExpr instanceof ArithNumberNode) {
-            return (int) $arithExpr->value;
+            return $arithExpr->value;
         }
 
-        if ($arithExpr instanceof ArithVariableNode) {
-            $val = $this->interpreterState->getVar($arithExpr->name) ?? $this->interpreterState->getSpecialVar($arithExpr->name) ?? '0';
+        if ($arithExpr instanceof ArithVariableNode || $arithExpr instanceof ArithArrayElementNode) {
+            $val = $this->arithRead($arithExpr);
 
-            // Recursive arithmetic evaluation of variable values
-            if ($val !== '' && ! ctype_digit(ltrim($val, '-'))) {
-                return $this->evaluateArithmeticString($val);
+            // A value that isn't a plain decimal is itself an expression, as in bash: `010` is octal, `08` an error
+            if ($val !== '' && preg_match('/^-?(?:0|[1-9]\d{0,17})$/', $val) !== 1) {
+                return $this->evaluateArithmeticText($val);
             }
 
             return (int) $val;
@@ -2210,56 +3895,31 @@ final class Interpreter
 
         if ($arithExpr instanceof ArithBinaryNode) {
             $left = $this->evaluateArithExpr($arithExpr->left);
-            $right = $this->evaluateArithExpr($arithExpr->right);
 
-            return match ($arithExpr->operator) {
-                '+' => $left + $right,
-                '-' => $left - $right,
-                '*' => $left * $right,
-                '/' => $right !== 0 ? intdiv($left, $right) : throw new \BashBox\Exceptions\ArithmeticException('division by zero'),
-                '%' => $right !== 0 ? $left % $right : throw new \BashBox\Exceptions\ArithmeticException('division by zero'),
-                '**' => (int) $left ** $right,
-                '<<' => $left << $right,
-                '>>' => $left >> $right,
-                '<' => $left < $right ? 1 : 0,
-                '<=' => $left <= $right ? 1 : 0,
-                '>' => $left > $right ? 1 : 0,
-                '>=' => $left >= $right ? 1 : 0,
-                '==' => $left === $right ? 1 : 0,
-                '!=' => $left !== $right ? 1 : 0,
-                '&' => $left & $right,
-                '|' => $left | $right,
-                '^' => $left ^ $right,
-                '&&' => ($left !== 0 && $right !== 0) ? 1 : 0,
-                '||' => ($left !== 0 || $right !== 0) ? 1 : 0,
-                ',' => $right,
-                default => 0,
-            };
+            // Short-circuit like bash: the right side's side effects only happen when it's needed
+            if ($arithExpr->operator === '&&') {
+                return (int) ($left !== 0 && $this->evaluateArithExpr($arithExpr->right) !== 0);
+            }
+
+            if ($arithExpr->operator === '||') {
+                return (int) ($left !== 0 || $this->evaluateArithExpr($arithExpr->right) !== 0);
+            }
+
+            return $this->arithOperate($arithExpr->operator, $left, $this->evaluateArithExpr($arithExpr->right), $arithExpr->error);
         }
 
         if ($arithExpr instanceof ArithUnaryNode) {
-            if (($arithExpr->operator === '++' || $arithExpr->operator === '--') && $arithExpr->operand instanceof ArithVariableNode) {
-                $varName = $arithExpr->operand->name;
-                $val = (int) ($this->interpreterState->getVar($varName) ?? '0');
+            if (($arithExpr->operator === '++' || $arithExpr->operator === '--') && ($arithExpr->operand instanceof ArithVariableNode || $arithExpr->operand instanceof ArithArrayElementNode)) {
+                $old = $this->evaluateArithExpr($arithExpr->operand);
+                $new = $this->arithWrite($arithExpr->operand, Int64::add($old, $arithExpr->operator === '++' ? 1 : -1));
 
-                if ($arithExpr->prefix) {
-                    $val = $arithExpr->operator === '++' ? $val + 1 : $val - 1;
-                    $this->interpreterState->setVar($varName, (string) $val);
-
-                    return $val;
-                }
-
-                $oldVal = $val;
-                $val = $arithExpr->operator === '++' ? $val + 1 : $val - 1;
-                $this->interpreterState->setVar($varName, (string) $val);
-
-                return $oldVal;
+                return $arithExpr->prefix ? $new : $old;
             }
 
             $operand = $this->evaluateArithExpr($arithExpr->operand);
 
             return match ($arithExpr->operator) {
-                '-' => -$operand,
+                '-' => Int64::sub(0, $operand),
                 '+' => $operand,
                 '!' => $operand === 0 ? 1 : 0,
                 '~' => ~$operand,
@@ -2277,33 +3937,48 @@ final class Interpreter
 
         if ($arithExpr instanceof ArithAssignmentNode) {
             $value = $this->evaluateArithExpr($arithExpr->value);
-            $current = (int) ($this->interpreterState->getVar($arithExpr->variable) ?? '0');
+            $current = $arithExpr->operator === '=' ? 0 : $this->evaluateArithExpr($arithExpr->target);
 
-            $newValue = match ($arithExpr->operator) {
-                '=' => $value,
-                '+=' => $current + $value,
-                '-=' => $current - $value,
-                '*=' => $current * $value,
-                '/=' => $value !== 0 ? intdiv($current, $value) : throw new \BashBox\Exceptions\ArithmeticException('division by zero'),
-                '%=' => $value !== 0 ? $current % $value : throw new \BashBox\Exceptions\ArithmeticException('division by zero'),
-                '<<=' => $current << $value,
-                '>>=' => $current >> $value,
-                '&=' => $current & $value,
-                '|=' => $current | $value,
-                '^=' => $current ^ $value,
-                default => $value,
-            };
-
-            $this->interpreterState->setVar($arithExpr->variable, (string) $newValue);
-
-            return $newValue;
+            return $this->arithWrite($arithExpr->target, $arithExpr->operator === '=' ? $value : $this->arithOperate(substr($arithExpr->operator, 0, -1), $current, $value, $arithExpr->error));
         }
 
-        if ($arithExpr instanceof ArithGroupNode) {
-            return $this->evaluateArithExpr($arithExpr->expression);
+        // ArithmeticParser builds no other node types
+        assert($arithExpr instanceof ArithGroupNode);
+
+        return $this->evaluateArithExpr($arithExpr->expression);
+    }
+
+    /**
+     * A binary operator on 64-bit integers that wrap around like bash's; shift counts are taken mod 64.
+     * $error is the message for division by 0 or a negative exponent.
+     */
+    private function arithOperate(string $operator, int $left, int $right, string $error): int
+    {
+        if (($right === 0 && ($operator === '/' || $operator === '%')) || ($right < 0 && $operator === '**')) {
+            throw new ArithmeticException($error);
         }
 
-        return 0;
+        return match ($operator) {
+            '+' => Int64::add($left, $right),
+            '-' => Int64::sub($left, $right),
+            '*' => Int64::mul($left, $right),
+            // PHP_INT_MIN / -1 doesn't fit: it wraps back to PHP_INT_MIN
+            '/' => $right === -1 ? Int64::sub(0, $left) : intdiv($left, $right),
+            '%' => $right === -1 ? 0 : $left % $right,
+            '**' => Int64::pow($left, $right),
+            '<<' => $left << ($right & 63),
+            '>>' => $left >> ($right & 63),
+            '<' => (int) ($left < $right),
+            '<=' => (int) ($left <= $right),
+            '>' => (int) ($left > $right),
+            '>=' => (int) ($left >= $right),
+            '==' => (int) ($left === $right),
+            '!=' => (int) ($left !== $right),
+            '&' => $left & $right,
+            '|' => $left | $right,
+            '^' => $left ^ $right,
+            default => $right, // ','
+        };
     }
 
     // =========================================================================
@@ -2314,22 +3989,34 @@ final class Interpreter
     {
         if ($conditionalExpressionNode instanceof CondBinaryNode) {
             $left = $this->expandWord($conditionalExpressionNode->left);
-            $right = $this->expandWord($conditionalExpressionNode->right);
+            $operator = $conditionalExpressionNode->operator;
 
-            return match ($conditionalExpressionNode->operator) {
-                '=', '==' => $this->matchPattern($left, $right),
-                '!=' => ! $this->matchPattern($left, $right),
+            if (in_array($operator, ['=', '==', '!='], true)) {
+                return $this->matchPattern($left, $conditionalExpressionNode->right, extglob: true) === ($operator !== '!=');
+            }
+
+            if ($operator === '=~') {
+                // Quoted parts of the regex match literally
+                return $this->matchRegex($left, $this->wordExpander->expandPattern($conditionalExpressionNode->right, regex: true));
+            }
+
+            $right = $this->expandWord($conditionalExpressionNode->right);
+            // [[ ]] evaluates integer operands as arithmetic: `010` is 8, `1+1` is 2
+            $int = $this->evaluateArithmeticText(...);
+
+            return match ($operator) {
                 '<' => strcmp($left, $right) < 0,
                 '>' => strcmp($left, $right) > 0,
-                '-eq' => (int) $left === (int) $right,
-                '-ne' => (int) $left !== (int) $right,
-                '-lt' => (int) $left < (int) $right,
-                '-le' => (int) $left <= (int) $right,
-                '-gt' => (int) $left > (int) $right,
-                '-ge' => (int) $left >= (int) $right,
-                '=~' => (bool) @preg_match('/'.$right.'/', $left),
-                '-nt', '-ot', '-ef' => false,
-                default => false,
+                '-eq' => $int($left) === $int($right),
+                '-ne' => $int($left) !== $int($right),
+                '-lt' => $int($left) < $int($right),
+                '-le' => $int($left) <= $int($right),
+                '-gt' => $int($left) > $int($right),
+                '-ge' => $int($left) >= $int($right),
+                // A missing file counts as older than any existing one
+                '-nt' => ($this->statPath($left)->mtime ?? PHP_INT_MIN) > ($this->statPath($right)->mtime ?? PHP_INT_MIN),
+                '-ot' => ($this->statPath($left)->mtime ?? PHP_INT_MIN) < ($this->statPath($right)->mtime ?? PHP_INT_MIN),
+                default => $this->realPath($left) !== null && $this->realPath($left) === $this->realPath($right), // -ef
             };
         }
 
@@ -2339,13 +4026,14 @@ final class Interpreter
             return match ($conditionalExpressionNode->operator) {
                 '-z' => $operand === '',
                 '-n' => $operand !== '',
-                '-e' => $this->fileSystem->exists($this->resolveFsPath($operand)),
-                '-f' => $this->checkFileStat($operand, 'isFile'),
-                '-d' => $this->checkFileStat($operand, 'isDirectory'),
-                '-s' => $this->checkFileSize($operand),
-                '-r', '-w', '-x' => $this->fileSystem->exists($this->resolveFsPath($operand)),
-                '-L', '-h' => $this->checkFileStat($operand, 'isSymbolicLink'),
                 '-v' => $this->interpreterState->getVar($operand) !== null,
+                '-a', '-e', '-r', '-w' => $this->statPath($operand) instanceof \BashBox\Filesystem\FsStat,
+                '-f' => $this->statPath($operand)->isFile ?? false,
+                '-d' => $this->statPath($operand)->isDirectory ?? false,
+                '-s' => ($this->statPath($operand)->size ?? 0) > 0,
+                '-x' => (($this->statPath($operand)->mode ?? 0) & 0o111) !== 0,
+                '-L', '-h' => $this->statPath($operand, followLinks: false)->isSymbolicLink ?? false,
+                // the sandbox has no devices, pipes, sockets, ttys or special mode bits
                 default => false,
             };
         }
@@ -2370,136 +4058,69 @@ final class Interpreter
             return $this->evaluateConditional($conditionalExpressionNode->expression);
         }
 
-        if ($conditionalExpressionNode instanceof CondWordNode) {
-            $word = $this->expandWord($conditionalExpressionNode->word);
+        // A lone word: true when non-empty
+        assert($conditionalExpressionNode instanceof CondWordNode);
 
-            return $word !== '';
-        }
-
-        return false;
+        return $this->expandWord($conditionalExpressionNode->word) !== '';
     }
 
     private function resolveFsPath(string $path): string
     {
-        if (str_starts_with($path, '/')) {
-            return $path;
-        }
-
         return $this->fileSystem->resolvePath($this->interpreterState->cwd, $path);
     }
 
-    private function checkFileStat(string $path, string $property): bool
+    private function statPath(string $path, bool $followLinks = true): ?\BashBox\Filesystem\FsStat
     {
-        $resolved = $this->resolveFsPath($path);
-
         try {
-            $stat = $this->fileSystem->stat($resolved);
+            return $followLinks ? $this->fileSystem->stat($this->resolveFsPath($path)) : $this->fileSystem->lstat($this->resolveFsPath($path));
         } catch (RuntimeException) {
-            return false;
+            return null;
         }
-
-        return match ($property) {
-            'isFile' => $stat->isFile,
-            'isDirectory' => $stat->isDirectory,
-            'isSymbolicLink' => $stat->isSymbolicLink,
-            default => false,
-        };
     }
 
-    private function checkFileSize(string $path): bool
+    private function realPath(string $path): ?string
     {
-        $resolved = $this->resolveFsPath($path);
-
         try {
-            $stat = $this->fileSystem->stat($resolved);
+            return $this->fileSystem->realpath($this->resolveFsPath($path));
         } catch (RuntimeException) {
-            return false;
+            return null;
         }
-
-        return $stat->size > 0;
-    }
-
-    public function matchPattern(string $str, string $pattern): bool
-    {
-        if ($pattern === '*') {
-            return true;
-        }
-
-        $regex = $this->patternToRegex($pattern);
-
-        return (bool) preg_match('/^'.$regex.'$/', $str);
-    }
-
-    private function patternToRegex(string $pattern): string
-    {
-        $result = '';
-        $len = strlen($pattern);
-
-        for ($i = 0; $i < $len; $i++) {
-            $ch = $pattern[$i];
-
-            $result .= match ($ch) {
-                '*' => '.*',
-                '?' => '.',
-                '[' => $this->parseCharacterClass($pattern, $i),
-                '\\' => $i + 1 < $len ? preg_quote($pattern[++$i], '/') : '\\\\',
-                default => preg_quote($ch, '/'),
-            };
-        }
-
-        return $result;
-    }
-
-    private function parseCharacterClass(string $pattern, int &$i): string
-    {
-        $i++; // Skip [
-        $class = '[';
-
-        if ($i < strlen($pattern) && $pattern[$i] === '!') {
-            $class .= '^';
-            $i++;
-        }
-
-        while ($i < strlen($pattern) && $pattern[$i] !== ']') {
-            $class .= preg_quote($pattern[$i], '/');
-            $i++;
-        }
-
-        return $class.']';
     }
 
     /**
-     * @return list<string>
+     * `[[ str =~ regex ]]`, filling BASH_REMATCH like bash.
+     *
+     * @throws RegexException for a regex that doesn't compile or a match that runs out of backtracking
      */
-    private function splitByIFS(string $str, string $ifs): array
+    private function matchRegex(string $subject, string $regex): bool
     {
-        if ($str === '') {
-            return [];
+        $pcre = "\x01{$regex}\x01".(Glob::flags($regex.$subject) === 'su' ? 'u' : '').($this->interpreterState->shopt['nocasematch'] ? 'i' : '');
+        $error = PosixRegex::error($pcre);
+
+        if ($error !== null) {
+            throw new RegexException(sprintf("invalid regular expression `%s': %s", $regex, $error));
         }
 
-        if ($ifs === '') {
-            return [$str];
+        if (! SafePcreRegex::match($pcre, $subject, $matches)) {
+            return false;
         }
 
-        $parts = [];
-        $current = '';
-        $len = strlen($str);
+        $this->interpreterState->arrays['BASH_REMATCH'] = array_filter($matches, is_string(...));
 
-        for ($i = 0; $i < $len; $i++) {
-            if (str_contains($ifs, $str[$i])) {
-                if ($current !== '' || ! ctype_space($str[$i])) {
-                    $parts[] = $current;
-                    $current = '';
-                }
-            } else {
-                $current .= $str[$i];
-            }
-        }
+        return true;
+    }
 
-        if ($current !== '') {
-            $parts[] = $current;
-        }
-
-        return $parts;
+    /**
+     * Glob match as in `case` and `[[ == ]]`, honouring nocasematch. Quoted parts of the pattern word match
+     * literally. `[[ ]]` always understands extglob patterns; `case` only with `shopt -s extglob`.
+     */
+    private function matchPattern(string $str, WordNode $wordNode, bool $extglob = false): bool
+    {
+        return Glob::matches(
+            $this->wordExpander->expandPattern($wordNode),
+            $str,
+            $extglob || $this->interpreterState->shopt['extglob'],
+            $this->interpreterState->shopt['nocasematch'],
+        );
     }
 }

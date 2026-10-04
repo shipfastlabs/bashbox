@@ -11,9 +11,4 @@ final readonly class CondWordNode implements ConditionalExpressionNode
     public function __construct(
         public WordNode $word,
     ) {}
-
-    public function getType(): string
-    {
-        return 'CondWord';
-    }
 }

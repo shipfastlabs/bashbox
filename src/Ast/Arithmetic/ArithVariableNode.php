@@ -8,11 +8,5 @@ final readonly class ArithVariableNode implements ArithExpr
 {
     public function __construct(
         public string $name,
-        public bool $hasDollarPrefix = false,
     ) {}
-
-    public function getType(): string
-    {
-        return 'ArithVariable';
-    }
 }

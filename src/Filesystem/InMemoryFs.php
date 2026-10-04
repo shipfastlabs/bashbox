@@ -6,19 +6,31 @@ namespace BashBox\Filesystem;
 
 use RuntimeException;
 
+/** Holds everything in memory; names and contents count against the quota, so a script cannot grow it without bound. */
 final class InMemoryFs implements FileSystemInterface
 {
     /**
-     * @var array<string, array{type: string, content?: string, target?: string, mode: int, mtime: int}>
+     * Directory entries: resolved path => inode number. Every ancestor of a stored path is itself stored as a directory.
+     *
+     * @var array<string, int>
      */
-    private array $data = [];
+    private array $entries = [];
+
+    /**
+     * What a name points at, shared by all its hard links; nlink counts those names.
+     *
+     * @var array<int, array{type: string, content?: string, target?: string, mode: int, mtime: int, nlink: int}>
+     */
+    private array $inodes = [];
+
+    private int $nextInode = 1;
 
     /**
      * @param  array<string, string>  $initialFiles
      */
-    public function __construct(array $initialFiles = [])
+    public function __construct(array $initialFiles = [], private readonly DiskQuota $diskQuota = new DiskQuota)
     {
-        $this->data['/'] = ['type' => 'directory', 'mode' => 0755, 'mtime' => time()];
+        $this->addEntry('/', ['type' => 'directory', 'mode' => 0755]);
 
         foreach ($initialFiles as $path => $content) {
             $this->writeFile($path, $content);
@@ -27,63 +39,62 @@ final class InMemoryFs implements FileSystemInterface
 
     public function readFile(string $path): string
     {
-        $this->validatePath($path, 'open');
-        $resolved = $this->resolvePathWithSymlinks($path);
-        $entry = $this->data[$resolved] ?? null;
+        $node = $this->node($this->resolve($path, 'open')) ?? $this->fail('ENOENT: no such file or directory', 'open', $path);
 
-        if ($entry === null) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, open '%s'", $path));
+        if ($node['type'] !== 'file') {
+            $this->fail('EISDIR: illegal operation on a directory', 'read', $path);
         }
 
-        if ($entry['type'] !== 'file') {
-            throw new RuntimeException(sprintf("EISDIR: illegal operation on a directory, read '%s'", $path));
-        }
-
-        return $entry['content'] ?? '';
+        return $node['content'] ?? '';
     }
 
     public function writeFile(string $path, string $content): void
     {
-        $this->validatePath($path, 'write');
-        $normalized = $this->normalizePath($path);
-        $this->ensureParentDirs($normalized);
+        $resolved = $this->resolve($path, 'open');
+        $node = $this->node($resolved);
 
-        $this->data[$normalized] = [
-            'type' => 'file',
-            'content' => $content,
-            'mode' => 0644,
-            'mtime' => time(),
-        ];
+        if ($node === null) {
+            $this->ensureParentDirs($resolved);
+            $this->addEntry($resolved, ['type' => 'file', 'content' => $content, 'mode' => 0644]);
+
+            return;
+        }
+
+        if ($node['type'] === 'directory') {
+            $this->fail('EISDIR: illegal operation on a directory', 'open', $path);
+        }
+
+        // Write into the inode, so every hard link sees the new content
+        $this->diskQuota->charge(strlen($content) - $this->size($node), 0, $resolved);
+        $this->inodes[$this->entries[$resolved]] = ['content' => $content, 'mtime' => time()] + $node;
+    }
+
+    public function createExclusive(string $path, bool $directory = false): void
+    {
+        $operation = $directory ? 'mkdir' : 'open';
+        $resolved = $this->resolve($path, $operation, false);
+
+        if (isset($this->entries[$resolved])) {
+            $this->fail('EEXIST: file already exists', $operation, $path);
+        }
+
+        if (! isset($this->entries[dirname($resolved)])) {
+            $this->fail('ENOENT: no such file or directory', $operation, $path);
+        }
+
+        $this->addEntry($resolved, $directory ? ['type' => 'directory', 'mode' => 0700] : ['type' => 'file', 'content' => '', 'mode' => 0600]);
     }
 
     public function appendFile(string $path, string $content): void
     {
-        $this->validatePath($path, 'append');
-        $normalized = $this->normalizePath($path);
-        $existing = $this->data[$normalized] ?? null;
-
-        if ($existing !== null && $existing['type'] === 'directory') {
-            throw new RuntimeException(sprintf("EISDIR: illegal operation on a directory, write '%s'", $path));
-        }
-
-        if ($existing !== null && $existing['type'] === 'file') {
-            $this->data[$normalized]['content'] = ($existing['content'] ?? '').$content;
-            $this->data[$normalized]['mtime'] = time();
-        } else {
-            $this->writeFile($path, $content);
-        }
+        $node = $this->node($this->resolve($path, 'open'));
+        $this->writeFile($path, ($node['content'] ?? '').$content);
     }
 
     public function exists(string $path): bool
     {
-        if (str_contains($path, "\0")) {
-            return false;
-        }
-
         try {
-            $resolved = $this->resolvePathWithSymlinks($path);
-
-            return isset($this->data[$resolved]);
+            return isset($this->entries[$this->resolve($path, 'access')]);
         } catch (RuntimeException) {
             return false;
         }
@@ -91,162 +102,61 @@ final class InMemoryFs implements FileSystemInterface
 
     public function stat(string $path): FsStat
     {
-        $this->validatePath($path, 'stat');
-        $resolved = $this->resolvePathWithSymlinks($path);
-        $entry = $this->data[$resolved] ?? null;
-
-        if ($entry === null) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, stat '%s'", $path));
-        }
-
-        $size = 0;
-
-        if ($entry['type'] === 'file' && isset($entry['content'])) {
-            $size = strlen($entry['content']);
-        }
-
-        return new FsStat(
-            isFile: $entry['type'] === 'file',
-            isDirectory: $entry['type'] === 'directory',
-            isSymbolicLink: false,
-            mode: $entry['mode'],
-            size: $size,
-            mtime: $entry['mtime'],
-        );
+        return $this->statEntry($path, 'stat', true);
     }
 
     public function lstat(string $path): FsStat
     {
-        $this->validatePath($path, 'lstat');
-        $resolved = $this->resolveIntermediateSymlinks($path);
-        $entry = $this->data[$resolved] ?? null;
-
-        if ($entry === null) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, lstat '%s'", $path));
-        }
-
-        if ($entry['type'] === 'symlink') {
-            return new FsStat(
-                isFile: false,
-                isDirectory: false,
-                isSymbolicLink: true,
-                mode: $entry['mode'],
-                size: strlen($entry['target'] ?? ''),
-                mtime: $entry['mtime'],
-            );
-        }
-
-        $size = 0;
-
-        if ($entry['type'] === 'file' && isset($entry['content'])) {
-            $size = strlen($entry['content']);
-        }
-
-        return new FsStat(
-            isFile: $entry['type'] === 'file',
-            isDirectory: $entry['type'] === 'directory',
-            isSymbolicLink: false,
-            mode: $entry['mode'],
-            size: $size,
-            mtime: $entry['mtime'],
-        );
+        return $this->statEntry($path, 'lstat', false);
     }
 
     public function mkdir(string $path, array $options = []): void
     {
-        $this->validatePath($path, 'mkdir');
-        $normalized = $this->normalizePath($path);
+        $resolved = $this->resolve($path, 'mkdir', false);
         $recursive = $options['recursive'] ?? false;
 
-        if (isset($this->data[$normalized])) {
-            $entry = $this->data[$normalized];
-
-            if ($entry['type'] === 'file') {
-                throw new RuntimeException(sprintf("EEXIST: file already exists, mkdir '%s'", $path));
+        if (isset($this->entries[$resolved])) {
+            if ($recursive && ($this->node($this->resolve($path, 'mkdir'))['type'] ?? null) === 'directory') {
+                return;
             }
 
-            if (! $recursive) {
-                throw new RuntimeException(sprintf("EEXIST: directory already exists, mkdir '%s'", $path));
-            }
-
-            return;
+            $this->fail('EEXIST: file already exists', 'mkdir', $path);
         }
 
-        $parent = $this->dirname($normalized);
-
-        if ($parent !== '/' && ! isset($this->data[$parent])) {
-            if ($recursive) {
-                $this->mkdir($parent, ['recursive' => true]);
-            } else {
-                throw new RuntimeException(sprintf("ENOENT: no such file or directory, mkdir '%s'", $path));
-            }
+        if (! $recursive && ! isset($this->entries[dirname($resolved)])) {
+            $this->fail('ENOENT: no such file or directory', 'mkdir', $path);
         }
 
-        $this->data[$normalized] = ['type' => 'directory', 'mode' => 0755, 'mtime' => time()];
+        $this->ensureParentDirs($resolved);
+        $this->addEntry($resolved, ['type' => 'directory', 'mode' => 0755]);
     }
 
     public function readdir(string $path): array
     {
-        $entries = $this->readdirWithFileTypes($path);
-
-        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $entries);
+        return array_map(fn (DirentEntry $direntEntry): string => $direntEntry->name, $this->readdirWithFileTypes($path));
     }
 
     public function readdirWithFileTypes(string $path): array
     {
-        $this->validatePath($path, 'scandir');
-        $normalized = $this->normalizePath($path);
-        $entry = $this->data[$normalized] ?? null;
+        $resolved = $this->resolve($path, 'scandir');
+        $node = $this->node($resolved) ?? $this->fail('ENOENT: no such file or directory', 'scandir', $path);
 
-        if ($entry === null) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, scandir '%s'", $path));
+        if ($node['type'] !== 'directory') {
+            $this->fail('ENOTDIR: not a directory', 'scandir', $path);
         }
 
-        $seen = [];
+        $entries = [];
 
-        while ($entry !== null && $entry['type'] === 'symlink') {
-            if (isset($seen[$normalized])) {
-                throw new RuntimeException(sprintf("ELOOP: too many levels of symbolic links, scandir '%s'", $path));
-            }
-
-            $seen[$normalized] = true;
-            $normalized = $this->resolveSymlink($normalized, $entry['target'] ?? '');
-            $entry = $this->data[$normalized] ?? null;
+        foreach ($this->children($resolved) as $childPath) {
+            $type = $this->inodes[$this->entries[$childPath]]['type'];
+            $entries[] = new DirentEntry(
+                name: basename($childPath),
+                isFile: $type === 'file',
+                isDirectory: $type === 'directory',
+                isSymbolicLink: $type === 'symlink',
+            );
         }
 
-        if ($entry === null) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, scandir '%s'", $path));
-        }
-
-        if ($entry['type'] !== 'directory') {
-            throw new RuntimeException(sprintf("ENOTDIR: not a directory, scandir '%s'", $path));
-        }
-
-        $prefix = $normalized === '/' ? '/' : $normalized.'/';
-        $entriesMap = [];
-
-        foreach ($this->data as $p => $fsEntry) {
-            if ($p === $normalized) {
-                continue;
-            }
-
-            if (str_starts_with($p, $prefix)) {
-                $rest = substr($p, strlen($prefix));
-                $slashPos = strpos($rest, '/');
-                $name = $slashPos !== false ? substr($rest, 0, $slashPos) : $rest;
-
-                if ($name !== '' && ! isset($entriesMap[$name])) {
-                    $entriesMap[$name] = new DirentEntry(
-                        name: $name,
-                        isFile: $fsEntry['type'] === 'file',
-                        isDirectory: $fsEntry['type'] === 'directory',
-                        isSymbolicLink: $fsEntry['type'] === 'symlink',
-                    );
-                }
-            }
-        }
-
-        $entries = array_values($entriesMap);
         usort($entries, fn (DirentEntry $a, DirentEntry $b): int => strcmp($a->name, $b->name));
 
         return $entries;
@@ -254,174 +164,192 @@ final class InMemoryFs implements FileSystemInterface
 
     public function rm(string $path, array $options = []): void
     {
-        $this->validatePath($path, 'rm');
-        $normalized = $this->normalizePath($path);
-        $entry = $this->data[$normalized] ?? null;
-        $recursive = $options['recursive'] ?? false;
-        $force = $options['force'] ?? false;
+        $resolved = $this->resolve($path, 'rm', false);
 
-        if ($entry === null) {
-            if ($force) {
+        if (! isset($this->entries[$resolved])) {
+            if ($options['force'] ?? false) {
                 return;
             }
 
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, rm '%s'", $path));
+            $this->fail('ENOENT: no such file or directory', 'rm', $path);
         }
 
-        if ($entry['type'] === 'directory') {
-            $children = $this->readdir($normalized);
-
-            if ($children !== []) {
-                if (! $recursive) {
-                    throw new RuntimeException(sprintf("ENOTEMPTY: directory not empty, rm '%s'", $path));
-                }
-
-                foreach ($children as $child) {
-                    $childPath = $normalized === '/' ? '/'.$child : sprintf('%s/%s', $normalized, $child);
-                    $this->rm($childPath, $options);
-                }
-            }
+        if ($resolved === '/') {
+            $this->fail('EPERM: operation not permitted', 'rm', $path);
         }
 
-        unset($this->data[$normalized]);
+        $descendants = $this->descendants($resolved);
+
+        if ($descendants !== [] && ! ($options['recursive'] ?? false)) {
+            $this->fail('ENOTEMPTY: directory not empty', 'rm', $path);
+        }
+
+        foreach ([$resolved, ...$descendants] as $p) {
+            $this->removeEntry($p);
+        }
     }
 
     public function cp(string $src, string $dest, array $options = []): void
     {
-        $this->validatePath($src, 'cp');
-        $this->validatePath($dest, 'cp');
-        $srcNorm = $this->normalizePath($src);
-        $destNorm = $this->normalizePath($dest);
-        $srcEntry = $this->data[$srcNorm] ?? null;
-        $recursive = $options['recursive'] ?? false;
+        $srcResolved = $this->resolve($src, 'cp', false);
+        $destResolved = $this->resolve($dest, 'cp');
+        $srcNode = $this->node($srcResolved) ?? $this->fail('ENOENT: no such file or directory', 'cp', $src);
+        $preserve = $options['preserve'] ?? false;
 
-        if ($srcEntry === null) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, cp '%s'", $src));
-        }
-
-        if ($srcEntry['type'] === 'file') {
-            $this->ensureParentDirs($destNorm);
-            $this->data[$destNorm] = $srcEntry;
-        } elseif ($srcEntry['type'] === 'symlink') {
-            $this->ensureParentDirs($destNorm);
-            $this->data[$destNorm] = $srcEntry;
-        } elseif ($srcEntry['type'] === 'directory') {
-            if (! $recursive) {
-                throw new RuntimeException(sprintf("EISDIR: is a directory, cp '%s'", $src));
+        if ($srcNode['type'] === 'directory') {
+            if (! ($options['recursive'] ?? false)) {
+                $this->fail('EISDIR: is a directory', 'cp', $src);
             }
 
-            $this->mkdir($destNorm, ['recursive' => true]);
-            $children = $this->readdir($srcNorm);
-
-            foreach ($children as $child) {
-                $srcChild = $srcNorm === '/' ? '/'.$child : sprintf('%s/%s', $srcNorm, $child);
-                $destChild = $destNorm === '/' ? '/'.$child : sprintf('%s/%s', $destNorm, $child);
-                $this->cp($srcChild, $destChild, $options);
+            if ($this->isWithin($destResolved, $srcResolved)) {
+                $this->fail('EINVAL: cannot copy a directory into itself', 'cp', $src);
             }
+
+            $this->mkdir($destResolved, ['recursive' => true]);
+
+            foreach ($this->children($srcResolved) as $childPath) {
+                $this->cp($childPath, $destResolved.'/'.basename($childPath), $options);
+            }
+
+            return;
         }
+
+        $destNode = $this->node($destResolved);
+
+        if ($destNode !== null && $destNode['type'] === 'directory') {
+            $this->fail('EISDIR: cannot overwrite directory with non-directory', 'cp', $dest);
+        }
+
+        if ($destNode !== null && $srcNode['type'] === 'file') {
+            // An existing file is rewritten in place, as cp does, so its hard links see the copy
+            $this->diskQuota->charge($this->size($srcNode) - $this->size($destNode), 0, $destResolved);
+            $this->inodes[$this->entries[$destResolved]] = [
+                'content' => $srcNode['content'] ?? '',
+                'mtime' => $preserve ? $srcNode['mtime'] : time(),
+                'mode' => $preserve ? $srcNode['mode'] : $destNode['mode'],
+            ] + $destNode;
+
+            return;
+        }
+
+        if ($destNode !== null) {
+            $this->removeEntry($destResolved);
+        }
+
+        $this->ensureParentDirs($destResolved);
+        $this->addEntry($destResolved, $preserve ? $srcNode : ['mtime' => time()] + $srcNode);
     }
 
+    /**
+     * rename(2): the entry, and everything below it, keeps its inode under the new name.
+     */
     public function mv(string $src, string $dest): void
     {
-        $this->cp($src, $dest, ['recursive' => true]);
-        $this->rm($src, ['recursive' => true]);
+        $srcResolved = $this->resolve($src, 'rename', false);
+        $destResolved = $this->resolve($dest, 'rename', false);
+        $inode = $this->entries[$srcResolved] ?? $this->fail('ENOENT: no such file or directory', 'rename', $src);
+
+        // Two names for the same inode (including the same name twice): rename does nothing
+        if ($inode === ($this->entries[$destResolved] ?? null)) {
+            return;
+        }
+
+        if ($this->isWithin($destResolved, $srcResolved)) {
+            $this->fail('EINVAL: invalid argument', 'rename', $src);
+        }
+
+        $srcIsDir = $this->inodes[$inode]['type'] === 'directory';
+        $destNode = $this->node($destResolved);
+        $moved = [$srcResolved, ...$this->descendants($srcResolved)];
+        $this->diskQuota->charge(count($moved) * (strlen($destResolved) - strlen($srcResolved)), 0, $destResolved);
+
+        if ($destNode === null) {
+            $this->ensureParentDirs($destResolved);
+        } else {
+            $destIsDir = $destNode['type'] === 'directory';
+            $error = match (true) {
+                $destIsDir && ! $srcIsDir => 'EISDIR: illegal operation on a directory',
+                ! $destIsDir && $srcIsDir => 'ENOTDIR: not a directory',
+                $this->descendants($destResolved) !== [] => 'ENOTEMPTY: directory not empty',
+                default => null,
+            };
+
+            if ($error !== null) {
+                $this->fail($error, 'rename', $dest);
+            }
+
+            $this->removeEntry($destResolved);
+        }
+
+        foreach ($moved as $p) {
+            $this->entries[$destResolved.substr($p, strlen($srcResolved))] = $this->entries[$p];
+            unset($this->entries[$p]);
+        }
     }
 
     public function resolvePath(string $base, string $path): string
     {
-        if (str_starts_with($path, '/')) {
-            return $this->normalizePath($path);
-        }
-
-        $combined = $base === '/' ? '/'.$path : sprintf('%s/%s', $base, $path);
-
-        return $this->normalizePath($combined);
+        return VirtualPath::resolve($base, $path);
     }
 
     public function getAllPaths(): array
     {
-        return array_keys($this->data);
+        return array_keys($this->entries);
     }
 
     public function chmod(string $path, int $mode): void
     {
-        $this->validatePath($path, 'chmod');
-        $normalized = $this->normalizePath($path);
-
-        if (! isset($this->data[$normalized])) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, chmod '%s'", $path));
-        }
-
-        $this->data[$normalized]['mode'] = $mode;
+        $this->inodes[$this->inodeOf($path, 'chmod')]['mode'] = $mode;
     }
 
     public function symlink(string $target, string $linkPath): void
     {
-        $this->validatePath($linkPath, 'symlink');
-        $normalized = $this->normalizePath($linkPath);
+        $resolved = $this->resolve($linkPath, 'symlink', false);
 
-        if (isset($this->data[$normalized])) {
-            throw new RuntimeException(sprintf("EEXIST: file already exists, symlink '%s'", $linkPath));
+        if (isset($this->entries[$resolved])) {
+            $this->fail('EEXIST: file already exists', 'symlink', $linkPath);
         }
 
-        $this->ensureParentDirs($normalized);
-        $this->data[$normalized] = [
-            'type' => 'symlink',
-            'target' => $target,
-            'mode' => 0777,
-            'mtime' => time(),
-        ];
+        $this->ensureParentDirs($resolved);
+        $this->addEntry($resolved, ['type' => 'symlink', 'target' => $target, 'mode' => 0777]);
     }
 
     public function link(string $existingPath, string $newPath): void
     {
-        $this->validatePath($existingPath, 'link');
-        $this->validatePath($newPath, 'link');
-        $existingNorm = $this->normalizePath($existingPath);
-        $newNorm = $this->normalizePath($newPath);
+        $inode = $this->entries[$this->resolve($existingPath, 'link', false)] ?? $this->fail('ENOENT: no such file or directory', 'link', $existingPath);
+        $newResolved = $this->resolve($newPath, 'link', false);
 
-        $entry = $this->data[$existingNorm] ?? null;
-
-        if ($entry === null) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, link '%s'", $existingPath));
+        if ($this->inodes[$inode]['type'] === 'directory') {
+            $this->fail('EPERM: operation not permitted', 'link', $existingPath);
         }
 
-        if ($entry['type'] !== 'file') {
-            throw new RuntimeException(sprintf("EPERM: operation not permitted, link '%s'", $existingPath));
+        if (isset($this->entries[$newResolved])) {
+            $this->fail('EEXIST: file already exists', 'link', $newPath);
         }
 
-        if (isset($this->data[$newNorm])) {
-            throw new RuntimeException(sprintf("EEXIST: file already exists, link '%s'", $newPath));
-        }
-
-        $this->ensureParentDirs($newNorm);
-        $this->data[$newNorm] = $entry;
+        $this->ensureParentDirs($newResolved);
+        $this->diskQuota->charge(strlen($newResolved), 1, $newResolved);
+        $this->entries[$newResolved] = $inode;
+        $this->inodes[$inode]['nlink']++;
     }
 
     public function readlink(string $path): string
     {
-        $this->validatePath($path, 'readlink');
-        $normalized = $this->normalizePath($path);
-        $entry = $this->data[$normalized] ?? null;
+        $node = $this->node($this->resolve($path, 'readlink', false)) ?? $this->fail('ENOENT: no such file or directory', 'readlink', $path);
 
-        if ($entry === null) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, readlink '%s'", $path));
+        if ($node['type'] !== 'symlink') {
+            $this->fail('EINVAL: invalid argument', 'readlink', $path);
         }
 
-        if ($entry['type'] !== 'symlink') {
-            throw new RuntimeException(sprintf("EINVAL: invalid argument, readlink '%s'", $path));
-        }
-
-        return $entry['target'] ?? '';
+        return $node['target'] ?? '';
     }
 
     public function realpath(string $path): string
     {
-        $this->validatePath($path, 'realpath');
-        $resolved = $this->resolvePathWithSymlinks($path);
+        $resolved = $this->resolve($path, 'realpath');
 
-        if (! isset($this->data[$resolved])) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, realpath '%s'", $path));
+        if (! isset($this->entries[$resolved])) {
+            $this->fail('ENOENT: no such file or directory', 'realpath', $path);
         }
 
         return $resolved;
@@ -429,170 +357,175 @@ final class InMemoryFs implements FileSystemInterface
 
     public function utimes(string $path, int $mtime): void
     {
-        $this->validatePath($path, 'utimes');
-        $normalized = $this->normalizePath($path);
-        $resolved = $this->resolvePathWithSymlinks($normalized);
-
-        if (! isset($this->data[$resolved])) {
-            throw new RuntimeException(sprintf("ENOENT: no such file or directory, utimes '%s'", $path));
-        }
-
-        $this->data[$resolved]['mtime'] = $mtime;
+        $this->inodes[$this->inodeOf($path, 'utimes')]['mtime'] = $mtime;
     }
 
-    private function normalizePath(string $path): string
+    private function statEntry(string $path, string $operation, bool $followLast): FsStat
     {
-        if ($path === '' || $path === '/') {
-            return '/';
+        $resolved = $this->resolve($path, $operation, $followLast);
+        $inode = $this->entries[$resolved] ?? $this->fail('ENOENT: no such file or directory', $operation, $path);
+        $node = $this->inodes[$inode];
+        $isDirectory = $node['type'] === 'directory';
+
+        return new FsStat(
+            isFile: $node['type'] === 'file',
+            isDirectory: $isDirectory,
+            isSymbolicLink: $node['type'] === 'symlink',
+            mode: $node['mode'],
+            size: $this->size($node),
+            mtime: $node['mtime'],
+            ino: $inode,
+            // A directory is linked from its parent, its own "." and each subdirectory's ".."
+            nlink: $isDirectory ? 2 + count(array_filter(
+                $this->children($resolved),
+                fn (string $child): bool => $this->inodes[$this->entries[$child]]['type'] === 'directory',
+            )) : $node['nlink'],
+        );
+    }
+
+    /**
+     * @return array{type: string, content?: string, target?: string, mode: int, mtime: int, nlink: int}|null
+     */
+    private function node(string $resolved): ?array
+    {
+        return isset($this->entries[$resolved]) ? $this->inodes[$this->entries[$resolved]] : null;
+    }
+
+    private function inodeOf(string $path, string $operation): int
+    {
+        return $this->entries[$this->resolve($path, $operation)] ?? $this->fail('ENOENT: no such file or directory', $operation, $path);
+    }
+
+    /**
+     * @param  array{type: string, content?: string, target?: string, mode: int, mtime?: int, nlink?: int}  $node
+     */
+    private function addEntry(string $resolved, array $node): void
+    {
+        $this->diskQuota->charge(strlen($resolved) + $this->size($node), 1, $resolved);
+        $this->inodes[$this->nextInode] = ['nlink' => 1] + $node + ['mtime' => time()];
+        $this->entries[$resolved] = $this->nextInode++;
+    }
+
+    private function removeEntry(string $resolved): void
+    {
+        $inode = $this->entries[$resolved];
+        unset($this->entries[$resolved]);
+
+        $node = $this->inodes[$inode];
+        $this->diskQuota->charge(-strlen($resolved) - ($node['nlink'] === 1 ? $this->size($node) : 0), -1, $resolved);
+
+        if ($node['nlink'] === 1) {
+            unset($this->inodes[$inode]);
+        } else {
+            $this->inodes[$inode] = ['nlink' => $node['nlink'] - 1] + $node;
+        }
+    }
+
+    /** @param array{content?: string, target?: string} $node */
+    private function size(array $node): int
+    {
+        return strlen($node['content'] ?? $node['target'] ?? '');
+    }
+
+    private function isWithin(string $path, string $dir): bool
+    {
+        return str_starts_with($path.'/', rtrim($dir, '/').'/');
+    }
+
+    /**
+     * Stored paths below the given (resolved) path.
+     *
+     * @return list<string>
+     */
+    private function descendants(string $resolved): array
+    {
+        return array_values(array_filter(array_keys($this->entries), fn (string $p): bool => str_starts_with($p, $resolved.'/')));
+    }
+
+    /**
+     * Stored paths directly inside the given (resolved) directory.
+     *
+     * @return list<string>
+     */
+    private function children(string $dir): array
+    {
+        $prefix = $dir === '/' ? '/' : $dir.'/';
+
+        return array_values(array_filter(
+            array_keys($this->entries),
+            fn (string $p): bool => $p !== '/' && str_starts_with($p, $prefix) && ! str_contains(substr($p, strlen($prefix)), '/'),
+        ));
+    }
+
+    /** Create missing ancestor directories of a resolved path (resolve() has made sure none is a file). */
+    private function ensureParentDirs(string $resolved): void
+    {
+        $dir = dirname($resolved);
+
+        if (! isset($this->entries[$dir])) {
+            $this->ensureParentDirs($dir);
+            $this->addEntry($dir, ['type' => 'directory', 'mode' => 0755]);
+        }
+    }
+
+    /** Resolve symlinks in every component (the last only when $followLast), physically: ".." walks up from the link's real location. */
+    private function resolve(string $path, string $operation, bool $followLast = true): string
+    {
+        if (str_contains($path, "\0")) {
+            $this->fail('ENOENT: path contains null byte', $operation, $path);
         }
 
-        $normalized = $path;
-
-        if (str_ends_with($normalized, '/') && $normalized !== '/') {
-            $normalized = rtrim($normalized, '/');
-        }
-
-        if (! str_starts_with($normalized, '/')) {
-            $normalized = '/'.$normalized;
-        }
-
-        $parts = array_filter(explode('/', $normalized), fn (string $p): bool => $p !== '' && $p !== '.');
+        $pending = explode('/', VirtualPath::normalize($path));
         $resolved = [];
+        $hops = 0;
 
-        foreach ($parts as $part) {
+        while ($pending !== []) {
+            $part = array_shift($pending);
+
+            if ($part === '') {
+                continue;
+            }
+
+            if ($part === '.') {
+                continue;
+            }
+
             if ($part === '..') {
                 array_pop($resolved);
-            } else {
-                $resolved[] = $part;
+
+                continue;
             }
+
+            $node = $this->node('/'.implode('/', [...$resolved, $part]));
+
+            if ($pending !== [] && ($node['type'] ?? null) === 'file') {
+                $this->fail('ENOTDIR: not a directory', $operation, $path);
+            }
+
+            if ($node === null || $node['type'] !== 'symlink' || (! $followLast && $pending === [])) {
+                $resolved[] = $part;
+
+                continue;
+            }
+
+            if (++$hops > VirtualPath::MAX_SYMLINKS) {
+                $this->fail('ELOOP: too many levels of symbolic links', $operation, $path);
+            }
+
+            $target = $node['target'] ?? '';
+
+            if (str_starts_with($target, '/')) {
+                $resolved = [];
+            }
+
+            $pending = [...explode('/', $target), ...$pending];
         }
 
         return '/'.implode('/', $resolved);
     }
 
-    private function dirname(string $path): string
+    private function fail(string $error, string $operation, string $path): never
     {
-        $normalized = $this->normalizePath($path);
-
-        if ($normalized === '/') {
-            return '/';
-        }
-
-        $lastSlash = strrpos($normalized, '/');
-
-        if ($lastSlash === false || $lastSlash === 0) {
-            return '/';
-        }
-
-        return substr($normalized, 0, $lastSlash);
-    }
-
-    private function ensureParentDirs(string $path): void
-    {
-        $dir = $this->dirname($path);
-
-        if ($dir === '/') {
-            return;
-        }
-
-        if (! isset($this->data[$dir])) {
-            $this->ensureParentDirs($dir);
-            $this->data[$dir] = ['type' => 'directory', 'mode' => 0755, 'mtime' => time()];
-        }
-    }
-
-    private function validatePath(string $path, string $operation): void
-    {
-        if (str_contains($path, "\0")) {
-            throw new RuntimeException(sprintf("ENOENT: path contains null byte, %s '%s'", $operation, $path));
-        }
-    }
-
-    private function resolveSymlink(string $symlinkPath, string $target): string
-    {
-        if (str_starts_with($target, '/')) {
-            return $this->normalizePath($target);
-        }
-
-        $dir = $this->dirname($symlinkPath);
-
-        return $this->normalizePath($dir === '/' ? '/'.$target : sprintf('%s/%s', $dir, $target));
-    }
-
-    private function resolveIntermediateSymlinks(string $path): string
-    {
-        $normalized = $this->normalizePath($path);
-
-        if ($normalized === '/') {
-            return '/';
-        }
-
-        $parts = explode('/', ltrim($normalized, '/'));
-
-        if (count($parts) <= 1) {
-            return $normalized;
-        }
-
-        $resolvedPath = '';
-        $seen = [];
-
-        for ($i = 0; $i < count($parts) - 1; $i++) {
-            $resolvedPath .= '/'.$parts[$i];
-            $entry = $this->data[$resolvedPath] ?? null;
-            $loopCount = 0;
-
-            while ($entry !== null && $entry['type'] === 'symlink' && $loopCount < 40) {
-                if (isset($seen[$resolvedPath])) {
-                    throw new RuntimeException(sprintf("ELOOP: too many levels of symbolic links, lstat '%s'", $path));
-                }
-
-                $seen[$resolvedPath] = true;
-                $resolvedPath = $this->resolveSymlink($resolvedPath, $entry['target'] ?? '');
-                $entry = $this->data[$resolvedPath] ?? null;
-                $loopCount++;
-            }
-
-            if ($loopCount >= 40) {
-                throw new RuntimeException(sprintf("ELOOP: too many levels of symbolic links, lstat '%s'", $path));
-            }
-        }
-
-        return $resolvedPath.'/'.$parts[count($parts) - 1];
-    }
-
-    private function resolvePathWithSymlinks(string $path): string
-    {
-        $normalized = $this->normalizePath($path);
-
-        if ($normalized === '/') {
-            return '/';
-        }
-
-        $parts = explode('/', ltrim($normalized, '/'));
-        $resolvedPath = '';
-        $seen = [];
-
-        foreach ($parts as $part) {
-            $resolvedPath .= '/'.$part;
-            $entry = $this->data[$resolvedPath] ?? null;
-            $loopCount = 0;
-
-            while ($entry !== null && $entry['type'] === 'symlink' && $loopCount < 40) {
-                if (isset($seen[$resolvedPath])) {
-                    throw new RuntimeException(sprintf("ELOOP: too many levels of symbolic links, open '%s'", $path));
-                }
-
-                $seen[$resolvedPath] = true;
-                $resolvedPath = $this->resolveSymlink($resolvedPath, $entry['target'] ?? '');
-                $entry = $this->data[$resolvedPath] ?? null;
-                $loopCount++;
-            }
-
-            if ($loopCount >= 40) {
-                throw new RuntimeException(sprintf("ELOOP: too many levels of symbolic links, open '%s'", $path));
-            }
-        }
-
-        return $resolvedPath;
+        throw new RuntimeException(sprintf("%s, %s '%s'", $error, $operation, $path));
     }
 }

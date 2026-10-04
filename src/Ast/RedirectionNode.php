@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Ast;
 
-final class RedirectionNode implements Node
+final readonly class RedirectionNode implements Node
 {
     public function __construct(
         public string $operator,
@@ -12,9 +12,4 @@ final class RedirectionNode implements Node
         public ?int $fd = null,
         public ?string $fdVariable = null,
     ) {}
-
-    public function getType(): string
-    {
-        return 'Redirection';
-    }
 }

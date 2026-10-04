@@ -104,12 +104,7 @@ test('private ranges can be accessed when denyPrivateRanges is false', function 
     );
     $allowList = new AllowList($network);
 
-    try {
-        $allowList->validateRequest('GET', 'http://192.168.1.1');
-    } catch (NetworkAccessDeniedException $networkAccessDeniedException) {
-        expect($networkAccessDeniedException->getMessage())->not->toContain('private');
-        expect($networkAccessDeniedException->getMessage())->not->toContain('SSRF');
-    }
+    expect(fn () => $allowList->validateRequest('GET', 'http://192.168.1.1'))->not->toThrow(NetworkAccessDeniedException::class);
 });
 
 test('error messages suggest using dangerouslyAllowFullInternetAccess', function (): void {

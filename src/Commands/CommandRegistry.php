@@ -24,14 +24,6 @@ final class CommandRegistry
         return isset($this->commands[$name]);
     }
 
-    /**
-     * @return list<string>
-     */
-    public function getNames(): array
-    {
-        return array_keys($this->commands);
-    }
-
     public function registerDefaults(): void
     {
         $defaults = [
@@ -45,6 +37,7 @@ final class CommandRegistry
             new Pwd,
             new Mkdir_,
             new Rm,
+            new Rmdir,
             new Cp,
             new Mv,
             new Touch,
@@ -64,6 +57,7 @@ final class CommandRegistry
             new True_,
             new False_,
             new Test_,
+            new Test_('['),
             new Rev,
             new Date_,
             new Which_,
@@ -72,6 +66,25 @@ final class CommandRegistry
             new Tree_,
             new Base64_,
             new Sed_,
+            new Yes,
+            new Realpath,
+            new Mktemp,
+            new Ln,
+            new Chmod,
+            new Sleep_,
+            new Checksum('md5'),
+            new Checksum('sha1'),
+            new Checksum('sha256'),
+            new Stat_,
+            new Du,
+            new Od,
+            new Tac,
+            new Nl,
+            new Paste,
+            new Comm,
+            new Fold,
+            new Expand,
+            new Unexpand,
         ];
 
         foreach ($defaults as $default) {

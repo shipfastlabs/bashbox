@@ -12,9 +12,4 @@ final readonly class HereDocNode implements Node
         public bool $stripTabs = false,
         public bool $quoted = false,
     ) {}
-
-    public function getType(): string
-    {
-        return 'HereDoc';
-    }
 }

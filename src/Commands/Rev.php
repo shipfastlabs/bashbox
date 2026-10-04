@@ -15,24 +15,14 @@ final class Rev extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $input = $commandContext->stdin;
+        [$contents, $stderr] = $this->readFiles($commandContext, $args, "rev: cannot open %s: %s\n", null);
 
-        if ($input === '') {
-            return $this->success();
-        }
+        $output = (string) preg_replace_callback(
+            '/[^\n]+/',
+            fn (array $m): string => implode('', array_reverse(mb_str_split($m[0]))),
+            implode('', $contents),
+        );
 
-        $lines = explode("\n", $input);
-        $output = '';
-        $lastIndex = count($lines) - 1;
-
-        foreach ($lines as $i => $line) {
-            $output .= strrev($line);
-
-            if ($i < $lastIndex) {
-                $output .= "\n";
-            }
-        }
-
-        return $this->success($output);
+        return $stderr === '' ? $this->success($output) : $this->failure($stderr, 1, $output);
     }
 }

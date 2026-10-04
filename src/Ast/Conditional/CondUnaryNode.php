@@ -12,9 +12,4 @@ final readonly class CondUnaryNode implements ConditionalExpressionNode
         public string $operator,
         public WordNode $operand,
     ) {}
-
-    public function getType(): string
-    {
-        return 'CondUnary';
-    }
 }

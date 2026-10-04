@@ -12,9 +12,4 @@ final readonly class WordNode implements Node
     public function __construct(
         public array $parts = [],
     ) {}
-
-    public function getType(): string
-    {
-        return 'Word';
-    }
 }

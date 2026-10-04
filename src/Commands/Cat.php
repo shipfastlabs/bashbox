@@ -4,12 +4,25 @@ declare(strict_types=1);
 
 namespace BashBox\Commands;
 
-use BashBox\Commands\Input\InputContent;
 use BashBox\ExecResult;
-use RuntimeException;
+use InvalidArgumentException;
 
 final class Cat extends AbstractCommand
 {
+    /** Long options in GNU's table order, which ambiguity messages list them in. */
+    private const array LONG = [
+        'number-nonblank' => ['b', false],
+        'number' => ['n', false],
+        'squeeze-blank' => ['s', false],
+        'show-nonprinting' => ['v', false],
+        'show-ends' => ['E', false],
+        'show-tabs' => ['T', false],
+        'show-all' => ['A', false],
+    ];
+
+    /** What each option turns on, as the letters of the basic options. */
+    private const array IMPLIES = ['A' => 'vET', 'e' => 'vE', 't' => 'vT', 'u' => ''];
+
     public function getName(): string
     {
         return 'cat';
@@ -17,61 +30,75 @@ final class Cat extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $numberLines = false;
-        $files = [];
-
-        foreach ($args as $arg) {
-            if ($arg === '-n') {
-                $numberLines = true;
-            } elseif ($arg === '-') {
-                $files[] = '-';
-            } elseif (! str_starts_with($arg, '-')) {
-                $files[] = $arg;
-            }
-        }
-
-        if ($files === []) {
-            $files = ['-'];
-        }
-
         try {
-            $reader = $this->createInputReader();
-            $input = $reader->read($files, $commandContext);
-        } catch (RuntimeException $runtimeException) {
-            preg_match('/No such file/', $runtimeException->getMessage(), $matches);
-            $filename = $files[0];
-
-            return $this->failure("cat: {$filename}: No such file or directory\n");
+            [$options, $files] = Getopt::parse($args, 'AbeEnstTuv', self::LONG);
+        } catch (InvalidArgumentException $invalidArgumentException) {
+            return $this->failure("cat: {$invalidArgumentException->getMessage()}\nTry 'cat --help' for more information.\n");
         }
 
-        $output = $this->formatOutput($input, $numberLines);
+        $on = implode('', array_map(fn (array $option): string => self::IMPLIES[$option[0]] ?? $option[0], $options));
+        [$contents, $stderr] = $this->readFiles($commandContext, $files, "cat: %s: %s\n");
+        $output = implode('', $contents);
 
-        return $this->success($output);
+        if ($on !== '') {
+            $output = $this->decorate($output, $on);
+        }
+
+        return $stderr === '' ? $this->success($output) : $this->failure($stderr, 1, $output);
     }
 
-    private function formatOutput(InputContent $inputContent, bool $numberLines): string
+    /** Lines numbering and squeezing carry on across files, as GNU cat treats them as one stream. */
+    private function decorate(string $output, string $on): string
     {
-        if (! $numberLines) {
-            return $inputContent->content;
-        }
+        $result = '';
+        $lineNum = 0;
+        $previousBlank = false;
+        preg_match_all('/[^\n]*(?:\n|[^\n]\z)/', $output, $lines);
 
-        $output = '';
-        $lineNum = 1;
+        foreach ($lines[0] as $line) {
+            $blank = $line === "\n";
 
-        foreach ($inputContent->files as $fileData) {
-            $content = $fileData['content'];
-            $lines = explode("\n", $content);
-            $last = array_pop($lines);
-
-            foreach ($lines as $line) {
-                $output .= sprintf("%6d\t%s\n", $lineNum++, $line);
+            if ($blank && $previousBlank && str_contains($on, 's')) {
+                continue;
             }
 
-            if ($last !== '') {
-                $output .= sprintf("%6d\t%s", $lineNum++, $last);
+            $previousBlank = $blank;
+
+            if (str_contains($on, 'b') ? ! $blank : str_contains($on, 'n')) {
+                $result .= sprintf("%6d\t", ++$lineNum);
             }
+
+            $newline = str_ends_with($line, "\n");
+            $body = $newline ? substr($line, 0, -1) : $line;
+
+            if (str_contains($on, 'v')) {
+                $body = (string) preg_replace_callback('/[^\t\x20-\x7e]/', fn (array $m): string => $this->visible(ord($m[0])), $body);
+            }
+
+            if (str_contains($on, 'T')) {
+                $body = str_replace("\t", '^I', $body);
+            }
+
+            // GNU shows the carriage return of a CRLF ending even without -v
+            if ($newline && str_contains($on, 'E')) {
+                $body = (str_ends_with($body, "\r") ? substr($body, 0, -1).'^M' : $body).'$';
+            }
+
+            $result .= $body.($newline ? "\n" : '');
         }
 
-        return $output;
+        return $result;
+    }
+
+    private function visible(int $byte): string
+    {
+        $prefix = $byte >= 128 ? 'M-' : '';
+        $byte &= 127;
+
+        return $prefix.match (true) {
+            $byte < 32 => '^'.chr($byte + 64),
+            $byte === 127 => '^?',
+            default => chr($byte),
+        };
     }
 }

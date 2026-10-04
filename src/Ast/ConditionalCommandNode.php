@@ -14,11 +14,6 @@ final readonly class ConditionalCommandNode implements CompoundCommandNode
     public function __construct(
         public ConditionalExpressionNode $expression,
         public array $redirections = [],
-        public ?int $line = null,
+        public int $line = 0,
     ) {}
-
-    public function getType(): string
-    {
-        return 'ConditionalCommand';
-    }
 }

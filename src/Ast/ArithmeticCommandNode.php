@@ -12,11 +12,6 @@ final readonly class ArithmeticCommandNode implements CompoundCommandNode
     public function __construct(
         public ArithmeticExpressionNode $expression,
         public array $redirections = [],
-        public ?int $line = null,
+        public int $line = 0,
     ) {}
-
-    public function getType(): string
-    {
-        return 'ArithmeticCommand';
-    }
 }

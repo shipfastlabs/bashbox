@@ -15,27 +15,36 @@ final class Base64_ extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        $parsed = $this->parseFlags($args, [
-            'd' => false,
-            'D' => false,
-            'decode' => false,
-        ]);
+        $parsed = $this->getopt($args, 'diw:', ['decode' => ['d', false], 'ignore-garbage' => ['i', false], 'wrap' => ['w', true]]);
 
-        $decode = $parsed['flags']['d'] || $parsed['flags']['D'] || $parsed['flags']['decode'];
-        $input = $commandContext->stdin;
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
+        }
 
-        if ($decode) {
-            $decoded = base64_decode($input, true);
+        [$flags, $operands] = $parsed;
+        $wrap = $flags['w'] ?? '76';
 
-            if ($decoded === false) {
-                return $this->failure("base64: invalid input\n");
-            }
+        if (! ctype_digit($wrap)) {
+            return $this->failure(sprintf("base64: invalid wrap size: '%s'\n", $wrap));
+        }
 
-            return $this->success($decoded);
+        [$contents, $stderr] = $this->readFiles($commandContext, $operands, "base64: %s: %s\n");
+
+        if ($stderr !== '') {
+            return $this->failure($stderr);
+        }
+
+        $input = implode('', $contents);
+
+        if (isset($flags['d'])) {
+            $decoded = base64_decode(isset($flags['i']) ? (string) preg_replace('/[^A-Za-z0-9+\/=]/', '', $input) : $input, true);
+
+            return $decoded === false ? $this->failure("base64: invalid input\n") : $this->success($decoded);
         }
 
         $encoded = base64_encode($input);
 
-        return $this->success($encoded."\n");
+        // -w 0 turns off wrapping, and the final newline with it.
+        return $this->success((int) $wrap === 0 || $encoded === '' ? $encoded : implode("\n", str_split($encoded, max(1, (int) $wrap)))."\n");
     }
 }

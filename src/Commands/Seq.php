@@ -5,10 +5,15 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
-use ValueError;
 
 final class Seq extends AbstractCommand
 {
+    private const array LONG = [
+        'format' => ['f', true],
+        'separator' => ['s', true],
+        'equal-width' => ['w', false],
+    ];
+
     public function getName(): string
     {
         return 'seq';
@@ -16,100 +21,89 @@ final class Seq extends AbstractCommand
 
     public function execute(array $args, CommandContext $commandContext): ExecResult
     {
-        if ($args === []) {
-            return $this->failure("seq: missing operand\n");
+        // Options end at the first operand, and a negative number is an operand.
+        $parsed = $this->getopt($args, '+f:s:w', self::LONG, numbers: true);
+
+        if ($parsed instanceof ExecResult) {
+            return $parsed;
         }
 
-        // Parse flags
-        $parsed = $this->parseFlags($args, [
-            'f' => '%g',
-            's' => "\n",
-        ]);
+        [$flags, $operands] = $parsed;
 
-        $flags = $parsed['flags'];
-        $remaining = $parsed['args'];
-
-        if ($remaining === []) {
-            return $this->failure("seq: missing operand\n");
+        if ($operands === []) {
+            return $this->usageError('missing operand');
         }
 
-        $format = (string) $flags['f'];
-        $separator = (string) $flags['s'];
-
-        $first = 1;
-        $increment = 1;
-        $last = 0;
-
-        switch (count($remaining)) {
-            case 1:
-                $last = (int) $remaining[0];
-
-                break;
-
-            case 2:
-                $first = (int) $remaining[0];
-                $last = (int) $remaining[1];
-
-                break;
-
-            default:
-                $first = (int) $remaining[0];
-                $increment = (int) $remaining[1];
-                $last = (int) $remaining[2];
-
-                break;
+        if (isset($operands[3])) {
+            return $this->usageError(sprintf("extra operand '%s'", $operands[3]));
         }
 
-        if ($increment === 0) {
-            return $this->failure("seq: zero increment\n");
+        foreach ($operands as $operand) {
+            if (! is_numeric($operand) && preg_match('/^[-+]?inf(inity)?$/i', $operand) !== 1) {
+                return $this->usageError(sprintf("invalid floating point argument: '%s'", $operand));
+            }
         }
 
+        [$first, $step, $last] = match (count($operands)) {
+            1 => ['1', '1', $operands[0]],
+            2 => [$operands[0], '1', $operands[1]],
+            default => $operands,
+        };
+
+        if ((float) $step === 0.0) {
+            return $this->usageError(sprintf("invalid Zero increment value: '%s'", $step));
+        }
+
+        if (isset($flags['f'], $flags['w'])) {
+            return $this->usageError('format string may not be specified when printing equal width strings');
+        }
+
+        $error = isset($flags['f']) ? $this->formatError($flags['f']) : null;
+
+        if ($error !== null) {
+            return $this->failure(sprintf("seq: format '%s' %s\n", $flags['f'], $error));
+        }
+
+        // Without -f, print as many decimals as the most precise of FIRST and INCREMENT.
+        $decimals = max(array_map(fn (string $n): int => strlen(strrchr($n, '.') ?: '.') - 1, [$first, $step]));
+        [$first, $step, $last] = array_map(fn (string $n): float => is_numeric($n) ? (float) $n : ($n[0] === '-' ? -INF : INF), [$first, $step, $last]);
+        $format = fn (float $n): string => sprintf('%.'.$decimals.'F', $n);
+        // -w pads with zeros to the width of the wider of FIRST and LAST.
+        $width = isset($flags['w']) ? max(strlen($format($first)), strlen($format($last))) : 0;
+
+        if (isset($flags['f'])) {
+            // Seq doesn't expand backslash escapes, so printf gets them escaped.
+            $printf = new Printf_;
+            $format = fn (float $n): string => $printf->execute([str_replace('\\', '\\\\', $flags['f']), sprintf('%.17g', $n)], $commandContext)->stdout;
+        }
+
+        $separator = $flags['s'] ?? "\n";
+        $direction = $step <=> 0;
         $output = '';
-        $numbers = [];
 
-        if ($increment > 0) {
-            for ($i = $first; $i <= $last; $i += $increment) {
-                $numbers[] = $i;
-            }
-        } else {
-            for ($i = $first; $i >= $last; $i += $increment) {
-                $numbers[] = $i;
-            }
+        // Rounded to the operands' precision, so float error can't drop the last value (`seq 0.1 0.1 0.3`)
+        for ($i = 0; round($value = $first + $i * $step, $decimals) * $direction <= $last * $direction; $i++) {
+            $number = $format($value);
+            $number = str_starts_with($number, '-') ? '-'.str_pad(substr($number, 1), $width - 1, '0', STR_PAD_LEFT) : str_pad($number, $width, '0', STR_PAD_LEFT);
+            $output .= ($i === 0 ? '' : $separator).$number;
+            $this->checkOutputSize($commandContext, strlen($output));
         }
 
-        // Format and join with separator
-        $formattedNumbers = [];
-
-        try {
-            foreach ($numbers as $number) {
-                $formattedNumbers[] = $this->formatNumber($number, $format);
-            }
-        } catch (ValueError) {
-            return $this->failure(sprintf('seq: invalid format string: %s%s', $format, PHP_EOL));
-        }
-
-        $output = implode($separator, $formattedNumbers);
-
-        if ($output !== '') {
-            $output .= "\n";
-        }
-
-        return $this->success($output);
+        return $this->success($output === '' ? '' : $output."\n");
     }
 
-    /**
-     * Format a number according to the format string.
-     * Supports: %g (default), %e (scientific), %f (fixed), %d (integer)
-     */
-    private function formatNumber(int $number, string $format): string
+    /** What GNU finds wrong with a -f format: it needs exactly one floating-point directive. */
+    private function formatError(string $format): ?string
     {
-        return match ($format) {
-            '%g', '%G', '%d', '%i' => (string) $number,
-            '%e' => sprintf('%.6e', $number),
-            '%E' => sprintf('%.6E', $number),
-            '%f' => sprintf('%.6f', $number),
-            '%F' => sprintf('%.6F', $number),
-            default => sprintf($format, $number),
+        if (preg_match('/^(?:[^%]|%%)*+%[-+#0 \']*\d*(?:\.\d*)?L?(.?)/s', $format, $m) !== 1) {
+            return 'has no % directive';
+        }
+
+        return match (true) {
+            $m[1] === '' => 'ends in %',
+            ! str_contains('aAeEfFgG', $m[1]) => sprintf('has unknown %%%s directive', $m[1]),
+            preg_match('/^(?:[^%]|%%)*+%/', substr($format, strlen($m[0]))) === 1 => 'has too many % directives',
+            default => null,
         };
     }
 }

@@ -14,11 +14,6 @@ final readonly class AssignmentNode implements Node
         public ?WordNode $value = null,
         public bool $append = false,
         public ?array $array = null,
-        public ?int $line = null,
+        public int $line = 0,
     ) {}
-
-    public function getType(): string
-    {
-        return 'Assignment';
-    }
 }
