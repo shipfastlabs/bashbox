@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use BashBox\Bash;
 use BashBox\BashOptions;
+use BashBox\Filesystem\FileSystemInterface;
 use BashBox\Filesystem\InMemoryFs;
 use BashBox\Filesystem\MountableFs;
 use BashBox\Filesystem\OverlayFs;
@@ -92,7 +93,7 @@ test('bash with MountableFs routes commands to mounted backend and supports cros
     expect($bash->readFile('/home/user/roundtrip.txt'))->toBe("local datamounted\n");
 });
 
-/** @return array<string, Closure(object): BashBox\Filesystem\FileSystemInterface> */
+/** @return array<string, Closure(object): FileSystemInterface> */
 function everyBackend(): array
 {
     return [

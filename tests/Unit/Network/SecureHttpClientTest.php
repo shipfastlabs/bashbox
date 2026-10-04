@@ -32,6 +32,13 @@ function hitPath(): array
     return ['/hit?file='.urlencode($file), $file];
 }
 
+test('rejects an empty method or URL', function (string $method, string $url): void {
+    localClient()->request($method, $url);
+})->with([
+    'empty method' => ['', 'http://localhost/'],
+    'empty URL' => ['GET', ''],
+])->throws(InvalidArgumentException::class, 'The method and the URL must not be empty');
+
 test('returns status, lowercased headers and body', function (): void {
     $response = localClient()->request('GET', TestHttpServer::url('/hello'));
 

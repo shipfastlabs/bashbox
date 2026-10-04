@@ -7,6 +7,7 @@ namespace BashBox\Network;
 use BashBox\Network\Exceptions\NetworkAccessDeniedException;
 use BashBox\Network\Exceptions\ResponseTooLargeException;
 use CurlHandle;
+use InvalidArgumentException;
 use RuntimeException;
 
 final readonly class SecureHttpClient
@@ -31,6 +32,11 @@ final readonly class SecureHttpClient
     public function request(string $method, string $url, array $headers = [], string $body = '', bool $followRedirects = true): array
     {
         $method = strtoupper($method);
+
+        if ($method === '' || $url === '') {
+            throw new InvalidArgumentException('The method and the URL must not be empty');
+        }
+
         $this->allowList->validateRequest($method, $url);
         $validatedRedirects = new ValidatedRedirects($this->allowList, $this->networkConfig->maxRedirects);
 
@@ -73,6 +79,8 @@ final readonly class SecureHttpClient
     }
 
     /**
+     * @param  non-empty-string  $method
+     * @param  non-empty-string  $url
      * @param  array<string, string>  $headers
      * @return array{array{statusCode: int, headers: array<string, string>, body: string}, string}
      */
@@ -134,7 +142,7 @@ final readonly class SecureHttpClient
 
         $succeeded = curl_exec($ch);
 
-        if ($denied instanceof \BashBox\Network\Exceptions\NetworkAccessDeniedException) {
+        if ($denied instanceof NetworkAccessDeniedException) {
             throw $denied;
         }
 

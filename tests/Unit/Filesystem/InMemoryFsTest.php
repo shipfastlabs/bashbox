@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use BashBox\Filesystem\DiskQuota;
+use BashBox\Filesystem\FsStat;
 use BashBox\Filesystem\InMemoryFs;
 
 beforeEach(function (): void {
@@ -171,21 +172,19 @@ test('readdirWithFileTypes returns typed entries', function (): void {
         }
     }
 
-    expect($fileEntry)->not->toBeNull();
-    expect($fileEntry->isFile)->toBeTrue();
-    expect($fileEntry->isDirectory)->toBeFalse();
+    expect($fileEntry?->isFile)->toBeTrue();
+    expect($fileEntry?->isDirectory)->toBeFalse();
 
-    expect($dirEntry)->not->toBeNull();
-    expect($dirEntry->isDirectory)->toBeTrue();
-    expect($dirEntry->isFile)->toBeFalse();
+    expect($dirEntry?->isDirectory)->toBeTrue();
+    expect($dirEntry?->isFile)->toBeFalse();
 });
 
 test('operations on a missing path fail with ENOENT naming the operation', function (Closure $operation, string $message): void {
     expect(fn () => $operation($this->fs))->toThrow(RuntimeException::class, $message);
 })->with([
     'readFile' => [fn (InMemoryFs $inMemoryFs): string => $inMemoryFs->readFile('/missing'), "ENOENT: no such file or directory, open '/missing'"],
-    'stat' => [fn (InMemoryFs $inMemoryFs): \BashBox\Filesystem\FsStat => $inMemoryFs->stat('/missing'), "ENOENT: no such file or directory, stat '/missing'"],
-    'lstat' => [fn (InMemoryFs $inMemoryFs): \BashBox\Filesystem\FsStat => $inMemoryFs->lstat('/missing'), "ENOENT: no such file or directory, lstat '/missing'"],
+    'stat' => [fn (InMemoryFs $inMemoryFs): FsStat => $inMemoryFs->stat('/missing'), "ENOENT: no such file or directory, stat '/missing'"],
+    'lstat' => [fn (InMemoryFs $inMemoryFs): FsStat => $inMemoryFs->lstat('/missing'), "ENOENT: no such file or directory, lstat '/missing'"],
     'readdir' => [fn (InMemoryFs $inMemoryFs): array => $inMemoryFs->readdir('/missing'), "ENOENT: no such file or directory, scandir '/missing'"],
     'rm' => [fn (InMemoryFs $inMemoryFs) => $inMemoryFs->rm('/missing'), "ENOENT: no such file or directory, rm '/missing'"],
     'cp' => [fn (InMemoryFs $inMemoryFs) => $inMemoryFs->cp('/missing', '/dest'), "ENOENT: no such file or directory, cp '/missing'"],
@@ -194,7 +193,7 @@ test('operations on a missing path fail with ENOENT naming the operation', funct
     'readlink' => [fn (InMemoryFs $inMemoryFs): string => $inMemoryFs->readlink('/missing'), "ENOENT: no such file or directory, readlink '/missing'"],
     'realpath' => [fn (InMemoryFs $inMemoryFs): string => $inMemoryFs->realpath('/missing'), "ENOENT: no such file or directory, realpath '/missing'"],
     'utimes' => [fn (InMemoryFs $inMemoryFs) => $inMemoryFs->utimes('/missing', 1), "ENOENT: no such file or directory, utimes '/missing'"],
-    'null byte' => [fn (InMemoryFs $inMemoryFs): \BashBox\Filesystem\FsStat => $inMemoryFs->stat("/a\0b"), 'ENOENT: path contains null byte, stat'],
+    'null byte' => [fn (InMemoryFs $inMemoryFs): FsStat => $inMemoryFs->stat("/a\0b"), 'ENOENT: path contains null byte, stat'],
 ]);
 
 test('file operations on a directory fail with EISDIR', function (Closure $operation, string $message): void {
@@ -406,7 +405,7 @@ test('symlink cycles fail with ELOOP', function (Closure $operation, string $mes
     expect($this->fs->exists('/a'))->toBeFalse();
 })->with([
     [fn (InMemoryFs $inMemoryFs): string => $inMemoryFs->readFile('/a'), "ELOOP: too many levels of symbolic links, open '/a'"],
-    [fn (InMemoryFs $inMemoryFs): \BashBox\Filesystem\FsStat => $inMemoryFs->lstat('/a/x'), "ELOOP: too many levels of symbolic links, lstat '/a/x'"],
+    [fn (InMemoryFs $inMemoryFs): FsStat => $inMemoryFs->lstat('/a/x'), "ELOOP: too many levels of symbolic links, lstat '/a/x'"],
 ]);
 
 test('symlink chains resolve up to 40 hops', function (int $links, bool $resolves): void {
@@ -703,5 +702,5 @@ test('every name counts against the entry quota', function (): void {
 });
 
 test('initial files count against the quota too', function (): void {
-    expect(fn (): \BashBox\Filesystem\InMemoryFs => new InMemoryFs(['/f' => str_repeat('x', 100)], new DiskQuota(maxBytes: 50)))->toThrow(RuntimeException::class, "ENOSPC: no space left on device, write '/f'");
+    expect(fn (): InMemoryFs => new InMemoryFs(['/f' => str_repeat('x', 100)], new DiskQuota(maxBytes: 50)))->toThrow(RuntimeException::class, "ENOSPC: no space left on device, write '/f'");
 });

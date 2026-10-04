@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use BashBox\Bash;
 use BashBox\BashOptions;
+use BashBox\Filesystem\ReadWriteFs;
 
 beforeEach(function (): void {
     $this->bash = new Bash(new BashOptions(cwd: '/home/user'));
@@ -118,7 +119,7 @@ test('cp and mv report host errors such as a read-only directory', function (): 
     chmod($root.'/ro', 0555);
 
     try {
-        $result = new Bash(new BashOptions(fs: new BashBox\Filesystem\ReadWriteFs($root), cwd: '/'))->exec('cp f ro/; mv f ro/');
+        $result = new Bash(new BashOptions(fs: new ReadWriteFs($root), cwd: '/'))->exec('cp f ro/; mv f ro/');
 
         expect($result->stderr)->toBe("cp: cannot create regular file 'ro/f': Permission denied\nmv: cannot move 'f' to 'ro/f': Permission denied\n")
             ->and($result->exitCode)->toBe(1)
@@ -144,7 +145,7 @@ test('commands report host errors instead of throwing', function (string $script
     chmod($root.'/ro', 0555);
 
     try {
-        $result = new Bash(new BashOptions(fs: new BashBox\Filesystem\ReadWriteFs($root), cwd: '/'))->exec($script);
+        $result = new Bash(new BashOptions(fs: new ReadWriteFs($root), cwd: '/'))->exec($script);
 
         expect([$result->stderr, $result->exitCode])->toBe([$stderr, $exitCode]);
     } finally {

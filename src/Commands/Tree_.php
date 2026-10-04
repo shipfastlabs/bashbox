@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
+use BashBox\Filesystem\DirentEntry;
 use RuntimeException;
 
 /** Mirrors tree 2.x with ASCII line drawing (the non-UTF-8 locale default); only -a is supported. */
@@ -77,7 +78,7 @@ final class Tree_ extends AbstractCommand
     {
         $entries = array_values(array_filter(
             $commandContext->fs->readdirWithFileTypes($path),
-            fn (\BashBox\Filesystem\DirentEntry $direntEntry): bool => $showHidden || ! str_starts_with($direntEntry->name, '.'),
+            fn (DirentEntry $direntEntry): bool => $showHidden || ! str_starts_with($direntEntry->name, '.'),
         ));
 
         $output = '';

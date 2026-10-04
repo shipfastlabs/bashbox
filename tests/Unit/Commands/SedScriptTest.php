@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use BashBox\Bash;
+use BashBox\BashExecResult;
 use BashBox\BashOptions;
 use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\Limits;
@@ -108,6 +109,7 @@ test('sed idioms, blocks, branches and file commands', $sed)->with([
     ["sed 'p}' b.txt", '', "sed: -e expression #1, char 2: unexpected `}'\n", 1],
     ["sed '1}' b.txt", '', "sed: -e expression #1, char 2: unexpected `}'\n", 1],
     ["sed '{p};}' b.txt", '', "sed: -e expression #1, char 5: unexpected `}'\n", 1],
+    ["sed '{p;1}' b.txt", '', "sed: -e expression #1, char 5: `}' doesn't want any addresses\n", 1],
     ["sed -n '{p}#x' b.txt", "one\ntwo\nthree\n"],
     ["sed -n '/x/{p' b.txt", '', "sed: -e expression #1, char 0: unmatched `{'\n", 1],
     ["sed -n '1{2{p}}' b.txt", ''],
@@ -816,7 +818,7 @@ test('e runs its command in the sandboxed shell', function (): void {
 test('sed stops scripts that loop without reading input', function (string $script, string $message): void {
     $bash = new Bash(new BashOptions(limits: new Limits(maxOutputSize: 1000, maxStringLength: 1000, maxSedIterations: 50)));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec($script))->toThrow(ExecutionLimitException::class, $message);
+    expect(fn (): BashExecResult => $bash->exec($script))->toThrow(ExecutionLimitException::class, $message);
 })->with([
     'branch loop' => ["echo x | sed ':a;ba'", 'sed: iteration limit exceeded'],
     't loop' => ["echo x | sed ':a;s/x/x/;ta'", 'sed: iteration limit exceeded'],

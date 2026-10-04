@@ -58,13 +58,13 @@ test('validator stops after maxRedirects hops', function (): void {
 });
 
 test('max redirects limit is enforced', function (): void {
-    expect(fn (): \BashBox\Network\ValidatedRedirects => new ValidatedRedirects(
+    expect(fn (): ValidatedRedirects => new ValidatedRedirects(
         new AllowList(new NetworkConfig),
         0
-    ))->toThrow(\Error::class, 'Invalid redirection limit: 0');
+    ))->toThrow(Error::class, 'Invalid redirection limit: 0');
 
-    expect(fn (): \BashBox\Network\ValidatedRedirects => new ValidatedRedirects(
+    expect(fn (): ValidatedRedirects => new ValidatedRedirects(
         new AllowList(new NetworkConfig),
         -1
-    ))->toThrow(\Error::class, 'Invalid redirection limit: -1');
+    ))->toThrow(Error::class, 'Invalid redirection limit: -1');
 });

@@ -6,6 +6,7 @@ namespace BashBox\Commands;
 
 use BashBox\ExecResult;
 use InvalidArgumentException;
+use LogicException;
 use RuntimeException;
 
 /** GNU sort in the C locale: bytewise collation, blanks are space, tab and newline. */
@@ -289,7 +290,7 @@ final class Sort_ extends AbstractCommand
             if ($types > 1) {
                 // -d wins over -i, so only one of them is named.
                 $letters = array_filter(str_split(self::MODIFIERS), fn (string $m): bool => ! in_array($m, ['b', 'r'], true) && str_contains($key['modifiers'], $m)
-                    && ! ($m === 'i' && str_contains($key['modifiers'], 'd')));
+                    && ($m !== 'i' || ! str_contains($key['modifiers'], 'd')));
 
                 throw new RuntimeException(sprintf("options '-%s' are incompatible", implode('', $letters)));
             }
@@ -447,7 +448,7 @@ final class Sort_ extends AbstractCommand
         for ($n = $count; $pos < $length && $n > 0; $n--) {
             if ($this->tab !== '') {
                 $pos += strcspn($line, $this->tab, $pos);
-                $pos += $pos < $length && ! ($stopAtTab && $n === 1) ? 1 : 0;
+                $pos += $pos < $length && (! $stopAtTab || $n !== 1) ? 1 : 0;
             } else {
                 $pos += strspn($line, self::BLANKS, $pos);
                 $pos += strcspn($line, self::BLANKS, $pos);
@@ -490,7 +491,7 @@ final class Sort_ extends AbstractCommand
      */
     private function parseNumber(string $text): array
     {
-        preg_match('/^[ \t\n]*(-?)(\d*)(?:\.(\d*))?/', $text, $m);
+        preg_match('/^[ \t\n]*(-?)(\d*)(?:\.(\d*))?/', $text, $m) ?: throw new LogicException('pattern matches any text');
         $integer = ltrim($m[2], '0');
         $fraction = rtrim($m[3] ?? '', '0');
 
@@ -504,7 +505,7 @@ final class Sort_ extends AbstractCommand
     /** -h: the SI suffix decides first, for numbers that are not zero. */
     private function unitOrder(string $text): int
     {
-        preg_match('/^[ \t\n]*(-?)([\d.]*)(.?)/', $text, $m);
+        preg_match('/^[ \t\n]*(-?)([\d.]*)(.?)/', $text, $m) ?: throw new LogicException('pattern matches any text');
         $order = (int) strpos(' KMGTPEZYRQ', $m[3] === 'k' ? 'K' : $m[3]);
 
         return $order === 0 || strpbrk($m[2], '123456789') === false ? 0 : ($m[1] === '-' ? -$order : $order);
@@ -585,8 +586,8 @@ final class Sort_ extends AbstractCommand
                 }
             }
 
-            preg_match('/\G0*(\d*)/', $a, $x, 0, $i);
-            preg_match('/\G0*(\d*)/', $b, $y, 0, $j);
+            preg_match('/\G0*(\d*)/', $a, $x, 0, $i) ?: throw new LogicException('pattern matches at any offset');
+            preg_match('/\G0*(\d*)/', $b, $y, 0, $j) ?: throw new LogicException('pattern matches at any offset');
             $i += strlen($x[0]);
             $j += strlen($y[0]);
             $diff = (strlen($x[1]) <=> strlen($y[1])) ?: strcmp($x[1], $y[1]) <=> 0;

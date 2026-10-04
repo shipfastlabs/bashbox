@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use BashBox\Bash;
+use BashBox\BashExecResult;
 use BashBox\BashOptions;
 use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\Filesystem\InMemoryFs;
@@ -92,7 +93,7 @@ test('loop', function (string $script, string $stdout): void {
 test('loops stop at the iteration limit', function (string $script): void {
     $bash = new Bash(new BashOptions(limits: new Limits(maxLoopIterations: 3)));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec($script))->toThrow(ExecutionLimitException::class, 'Loop iteration limit exceeded');
+    expect(fn (): BashExecResult => $bash->exec($script))->toThrow(ExecutionLimitException::class, 'Loop iteration limit exceeded');
 })->with([
     'for' => ['for i in 1 2 3 4; do :; done'],
     'c-style for' => ['for ((;;)); do :; done'],
@@ -103,13 +104,13 @@ test('loops stop at the iteration limit', function (string $script): void {
 test('recursion stops at the call depth limit', function (): void {
     $bash = new Bash(new BashOptions(limits: new Limits(maxCallDepth: 5)));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec('f(){ f; }; f'))->toThrow(ExecutionLimitException::class, 'Call depth limit exceeded');
+    expect(fn (): BashExecResult => $bash->exec('f(){ f; }; f'))->toThrow(ExecutionLimitException::class, 'Call depth limit exceeded');
 });
 
 test('output stops at the size limit', function (): void {
     $bash = new Bash(new BashOptions(limits: new Limits(maxOutputSize: 5)));
 
-    expect(fn (): \BashBox\BashExecResult => $bash->exec('echo 123456'))->toThrow(ExecutionLimitException::class, 'Output size limit exceeded');
+    expect(fn (): BashExecResult => $bash->exec('echo 123456'))->toThrow(ExecutionLimitException::class, 'Output size limit exceeded');
 });
 
 test('case', function (string $script, string $stdout): void {

@@ -9,6 +9,7 @@ use BashBox\ExecResult;
 use BashBox\Regex\PosixRegex;
 use BashBox\Regex\RegexException;
 use BashBox\Regex\SafePcreRegex;
+use LogicException;
 use RuntimeException;
 use UnexpectedValueException;
 
@@ -319,7 +320,7 @@ final class Sed_ extends AbstractCommand
                 }
 
                 $long = (string) array_key_first($matches);
-                [$short, $hasArgument] = $matches[$long];
+                [$short, $hasArgument] = reset($matches);
 
                 if ($hasArgument === 0 && $value !== null) {
                     throw $this->usage(sprintf("sed: option '--%s' doesn't allow an argument\n", $long));
@@ -1044,7 +1045,7 @@ final class Sed_ extends AbstractCommand
 
             if (! $escaped && $ch === '[') {
                 // A bracket expression is copied as it is.
-                preg_match('/\[\^?\]?(?:\[([:.=]).*?\1\]|[^]])*]?/As', $re, $m, 0, $i);
+                preg_match('/\[\^?\]?(?:\[([:.=]).*?\1\]|[^]])*]?/As', $re, $m, 0, $i) ?: throw new LogicException('an opening bracket starts the expression');
                 $out .= $m[0];
                 $i += strlen($m[0]) - 1;
             } elseif ($escaped && str_contains("wWsSbB<>`'".($this->extended ? '' : '+?|'), $ch)) {

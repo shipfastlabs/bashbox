@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BashBox\Commands;
 
 use BashBox\ExecResult;
+use BashBox\Filesystem\FsStat;
 use RuntimeException;
 
 /** POSIX test: the argument count decides the parse up to four arguments, longer expressions use test.c's -o -a ! ( ) grammar. */
@@ -135,9 +136,11 @@ final class Test_ extends AbstractCommand
         if ($arg === '(') {
             $result = $this->orExpr();
 
-            if (($this->args[$this->pos++] ?? null) !== ')') {
+            if (($this->args[$this->pos] ?? null) !== ')') {
                 throw new RuntimeException("`)' expected");
             }
+
+            $this->pos++;
 
             return $result;
         }
@@ -214,7 +217,7 @@ final class Test_ extends AbstractCommand
         };
     }
 
-    private function stat(string $file): ?\BashBox\Filesystem\FsStat
+    private function stat(string $file): ?FsStat
     {
         try {
             return $this->commandContext->fs->stat($this->resolvePath($this->commandContext, $file));

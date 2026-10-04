@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use BashBox\Filesystem\DiskQuota;
+use BashBox\Filesystem\FsStat;
 use BashBox\Filesystem\ReadWriteFs;
 
 beforeEach(function (): void {
@@ -360,7 +361,7 @@ test('with symlinks disallowed links are hidden and never followed', function ()
     expect($fs->exists('/link.txt'))->toBeFalse();
     expect($fs->readdir('/'))->toBe(['dir', 'target.txt']);
     expect($fs->getAllPaths())->toBe(['/', '/dir', '/target.txt']);
-    expect(fn (): \BashBox\Filesystem\FsStat => $fs->lstat('/link.txt'))->toThrow(RuntimeException::class, 'symlinks are denied');
+    expect(fn (): FsStat => $fs->lstat('/link.txt'))->toThrow(RuntimeException::class, 'symlinks are denied');
     expect(fn () => $fs->writeFile('/dirlink/x', 'x'))->toThrow(RuntimeException::class, 'symlinks are denied');
     expect(fn () => $fs->symlink('/target.txt', '/new'))->toThrow(RuntimeException::class, 'symlinks are denied');
 });
