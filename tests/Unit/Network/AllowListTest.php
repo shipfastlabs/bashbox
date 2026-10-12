@@ -35,6 +35,25 @@ test('origin-only prefixes do not match other hosts sharing the prefix', functio
     'longer port' => ['https://api.example.com:8443/'],
 ]);
 
+test('path prefixes match only at a path boundary', function (string $prefix, string $url, bool $allowed): void {
+    $request = fn () => prefixAllowList($prefix)->validateRequest('GET', $url);
+
+    if ($allowed) {
+        expect($request)->not->toThrow(NetworkAccessDeniedException::class);
+    } else {
+        expect($request)->toThrow(NetworkAccessDeniedException::class);
+    }
+})->with([
+    'exact path' => ['https://api.example.com/v1', 'https://api.example.com/v1', true],
+    'child path' => ['https://api.example.com/v1', 'https://api.example.com/v1/users', true],
+    'query' => ['https://api.example.com/v1', 'https://api.example.com/v1?q=1', true],
+    'fragment' => ['https://api.example.com/v1', 'https://api.example.com/v1#top', true],
+    'trailing slash' => ['https://api.example.com/v1/', 'https://api.example.com/v1/users', true],
+    'longer segment' => ['https://api.example.com/v1', 'https://api.example.com/v10/private', false],
+    'segment suffix' => ['https://api.example.com/v1', 'https://api.example.com/v1-admin', false],
+    'encoded suffix' => ['https://api.example.com/v1', 'https://api.example.com/v1%30/private', false],
+]);
+
 test('path prefixes cannot be escaped with dot segments', function (string $url): void {
     expect(fn () => prefixAllowList('https://api.example.com/v1/')->validateRequest('GET', $url))
         ->toThrow(NetworkAccessDeniedException::class, 'is not in the allowed URL prefixes');

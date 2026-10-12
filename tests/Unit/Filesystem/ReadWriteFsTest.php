@@ -294,6 +294,31 @@ test('hard links share file content', function (): void {
     expect($this->fs->readFile('/linked.txt'))->toBe('changed');
 });
 
+test('mutations through a shared hard link cannot change an outside file', function (string $method, array $args): void {
+    chmod($this->outside.'/secret', 0640);
+    touch($this->outside.'/secret', 1_000_000);
+    link($this->outside.'/secret', $this->tmpDir.'/linked');
+    $fs = new ReadWriteFs($this->tmpDir, allowSymlinks: false);
+    $fs->writeFile('/source', 'changed');
+
+    expect(fn () => $fs->{$method}(...$args))->toThrow(RuntimeException::class, 'shared hard links are read-only');
+
+    clearstatcache();
+    expect(file_get_contents($this->outside.'/secret'))->toBe('host secret')
+        ->and(fileperms($this->outside.'/secret') & 0777)->toBe(0640)
+        ->and(filemtime($this->outside.'/secret'))->toBe(1_000_000)
+        ->and($fs->readFile('/linked'))->toBe('host secret');
+
+    $fs->rm('/linked');
+    expect(file_get_contents($this->outside.'/secret'))->toBe('host secret');
+})->with([
+    'overwrite' => ['writeFile', ['/linked', 'changed']],
+    'append' => ['appendFile', ['/linked', 'changed']],
+    'copy destination' => ['cp', ['/source', '/linked']],
+    'permissions' => ['chmod', ['/linked', 0777]],
+    'timestamps' => ['utimes', ['/linked', 2_000_000]],
+]);
+
 test('stat reports the host inode and link count', function (): void {
     $this->fs->writeFile('/source.txt', 'shared');
     $this->fs->link('/source.txt', '/linked.txt');

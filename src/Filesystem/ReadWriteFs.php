@@ -256,7 +256,7 @@ final readonly class ReadWriteFs implements FileSystemInterface
 
     public function chmod(string $path, int $mode): void
     {
-        $real = $this->resolve($path, 'chmod');
+        $real = $this->resolveForMutation($path, 'chmod');
 
         if (! file_exists($real)) {
             $this->fail('ENOENT: no such file or directory', 'chmod', $path);
@@ -331,7 +331,7 @@ final readonly class ReadWriteFs implements FileSystemInterface
 
     public function utimes(string $path, int $mtime): void
     {
-        $real = $this->resolve($path, 'utimes');
+        $real = $this->resolveForMutation($path, 'utimes');
 
         if (! file_exists($real)) {
             $this->fail('ENOENT: no such file or directory', 'utimes', $path);
@@ -342,7 +342,7 @@ final readonly class ReadWriteFs implements FileSystemInterface
 
     private function put(string $path, string $content, int $flags): void
     {
-        $real = $this->resolve($path, 'open');
+        $real = $this->resolveForMutation($path, 'open');
 
         if (is_dir($real)) {
             $this->fail('EISDIR: illegal operation on a directory', 'open', $path);
@@ -353,6 +353,20 @@ final readonly class ReadWriteFs implements FileSystemInterface
         $this->diskQuota->charge(strlen($content) - $replaced, $this->missing($real), $path);
         $this->ensureParent($real, 'open', $path);
         $this->host(fn (): int|false => file_put_contents($real, $content, $flags), 'open', $path);
+    }
+
+    /** PHP cannot establish that every hard link to an inode is inside the root, so shared files are read-only. */
+    private function resolveForMutation(string $path, string $operation): string
+    {
+        $real = $this->resolve($path, $operation);
+        clearstatcache(true, $real);
+        $stat = is_file($real) ? $this->host(fn (): array|false => lstat($real), $operation, $path) : false;
+
+        if ($stat !== false && $stat['nlink'] > 1) {
+            $this->fail('EPERM: shared hard links are read-only', $operation, $path);
+        }
+
+        return $real;
     }
 
     /** Entries a write to this host path would create: the path itself and any missing parent directories. */

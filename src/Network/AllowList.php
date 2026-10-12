@@ -93,10 +93,10 @@ final readonly class AllowList
             return false;
         }
 
-        // An origin-only prefix must not match "https://api.example.com.evil.net" or "https://api.example.com@evil.net".
+        // Match complete origins and path segments, never host suffixes or a longer segment such as /v10 for /v1.
         $rest = substr($url, strlen($prefix));
 
-        return preg_match('~^[^:/?#]+://[^/?#]*$~', $prefix) !== 1
+        return str_ends_with($prefix, '/')
             || $rest === ''
             || str_contains('/?#', $rest[0]);
     }

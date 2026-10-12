@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace BashBox\Commands;
 
+use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\ExecResult;
 use InvalidArgumentException;
 
@@ -52,7 +53,7 @@ class Expand extends AbstractCommand
             }
         }
 
-        return $this->run($commandContext, $files, fn (string $input): string => $this->expand($input, $all));
+        return $this->run($commandContext, $files, fn (string $input): string => $this->expand($input, $all, $commandContext));
     }
 
     /**
@@ -171,7 +172,7 @@ class Expand extends AbstractCommand
     protected function nextStop(int $column, int &$index): array
     {
         if ($this->size !== 0) {
-            return [$column + $this->size - $column % $this->size, false];
+            return [$column + ($this->size - $column % $this->size), false];
         }
 
         $counter = count($this->stops);
@@ -183,23 +184,30 @@ class Expand extends AbstractCommand
         }
 
         return match (true) {
-            $this->extend !== 0 => [$column + $this->extend - $column % $this->extend, false],
-            $this->increment !== 0 => [$column + $this->increment - ($column - end($this->stops)) % $this->increment, false],
+            $this->extend !== 0 => [$column + ($this->extend - $column % $this->extend), false],
+            $this->increment !== 0 => [$column + ($this->increment - ($column - end($this->stops)) % $this->increment), false],
             default => [$column + 1, true],
         };
     }
 
-    private function expand(string $input, bool $all): string
+    private function expand(string $input, bool $all, CommandContext $commandContext): string
     {
         $output = '';
         $column = 0;
         $index = 0;
         $convert = true;
 
-        foreach (str_split($input) as $char) {
+        for ($i = 0, $length = strlen($input); $i < $length; $i++) {
+            $char = $input[$i];
+
             if ($convert) {
                 if ($char === "\t") {
                     [$next] = $this->nextStop($column, $index);
+
+                    if ($next - $column > $commandContext->limits->maxOutputSize - strlen($output)) {
+                        throw new ExecutionLimitException('expand: output size limit exceeded');
+                    }
+
                     $output .= str_repeat(' ', $next - $column - 1);
                     $column = $next;
                     $char = ' ';
@@ -213,6 +221,7 @@ class Expand extends AbstractCommand
                 $convert = $all || $char === ' ';
             }
 
+            $this->checkOutputSize($commandContext, strlen($output) + 1);
             $output .= $char;
 
             if ($char === "\n") {

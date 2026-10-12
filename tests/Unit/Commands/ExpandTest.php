@@ -3,7 +3,11 @@
 declare(strict_types=1);
 
 use BashBox\Bash;
+use BashBox\BashExecResult;
 use BashBox\BashOptions;
+use BashBox\Exceptions\ExecutionLimitException;
+use BashBox\ExecOptions;
+use BashBox\Limits;
 
 test('expand', function (string $script, string $stdout, string $stderr = '', int $exitCode = 0): void {
     $bash = new Bash(new BashOptions(cwd: '/home/user', env: ['USER' => 'user']));
@@ -52,3 +56,19 @@ test('expand', function (string $script, string $stdout, string $stderr = '', in
     'comma only' => ['expand -t , t', "a       b       c\n        x\n"],
     'slash then value later' => ["printf 'a\\tb\\tc\\n' | expand -t /,4", "a   b   c\n"],
 ]);
+
+test('expand checks its output budget before allocating padding', function (string $script, string $stdin): void {
+    expect(fn (): BashExecResult => new Bash(new BashOptions(limits: new Limits(maxOutputSize: 16)))->exec($script, new ExecOptions(stdin: $stdin)))
+        ->toThrow(ExecutionLimitException::class, 'expand: output size limit exceeded');
+})->with([
+    'large tab stop' => ['expand -t 1000000', "\t"],
+    'multiple tabs' => ['expand -t 16', "\t\t"],
+    'ordinary character after a full tab' => ['expand -t 16', "\tx"],
+    'padding includes preceding output' => ['expand -t 16', "x\x08\t"],
+]);
+
+test('expand accepts output exactly at the budget', function (): void {
+    $result = new Bash(new BashOptions(limits: new Limits(maxOutputSize: 16)))->exec('expand -t 16', new ExecOptions(stdin: "\t"));
+
+    expect([$result->stdout, $result->stderr, $result->exitCode])->toBe([str_repeat(' ', 16), '', 0]);
+});

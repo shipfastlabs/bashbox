@@ -268,6 +268,8 @@ Backend behavior:
 - `ReadWriteFs` reads and writes directly to disk inside the configured root
 - `MountableFs` combines multiple backends under different mount points and supports cross-mount copies
 
+`ReadWriteFs` treats regular files with multiple hard links as read-only: writes, appends, `chmod` and `utimes` fail with `Operation not permitted`. PHP cannot establish whether another link points outside the root. Reads and removing a link remain supported; this restriction also applies when all links are inside the root. The host must not modify the root concurrently, since path checks and disk operations are not atomic.
+
 `Bash` keeps `/dev` in memory on top of any backend, so nothing under it reaches the backend (a `ReadWriteFs` root never gets a `dev` directory). `/dev/null` reads empty and discards writes, and a symlink to it behaves the same. Process substitution (`<(...)`, `>(...)`) uses files under `/dev/fd` that are removed when the command finishes. A backend's own `/dev` is hidden.
 
 #### Filesystem Quota
@@ -354,6 +356,8 @@ $result = $bash->exec('curl -X POST https://any-website.com/api');
 When network is configured, the `curl` command becomes available. Without it, `curl` does not exist.
 
 `denyPrivateRanges` (on by default) refuses loopback, private, link-local, CGNAT, multicast, documentation and other non-public IPv4 and IPv6 ranges, including IPv4 addresses embedded in IPv4-mapped, NAT64 and 6to4 IPv6 addresses. It checks the URL's host and the address curl actually connects to, so DNS tricks can't get around it.
+
+URL prefixes match complete origins and path segments: `https://api.example.com/v1` allows `/v1` and `/v1/users`, but not `/v10` or `/v1-admin`. A prefix ending in `/` allows anything beneath that directory.
 
 An empty `allowedUrlPrefixes` list denies all URLs — set `dangerouslyAllowFullInternetAccess: true` to allow any URL. Like real curl, `curl` follows redirects only with `-L`; every redirect target is re-validated against the allow-list and private-IP rules before it is requested, and credential headers (`Authorization`, `Cookie`) are dropped on cross-origin redirects.
 
