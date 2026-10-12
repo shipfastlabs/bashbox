@@ -68,7 +68,7 @@ test('expand checks its output budget before allocating padding', function (stri
 ]);
 
 test('expand accepts output exactly at the budget', function (): void {
-    $result = new Bash(new BashOptions(limits: new Limits(maxOutputSize: 16)))->exec('expand -t 16', new ExecOptions(stdin: "\t"));
+    $bashExecResult = new Bash(new BashOptions(limits: new Limits(maxOutputSize: 16)))->exec('expand -t 16', new ExecOptions(stdin: "\t"));
 
-    expect([$result->stdout, $result->stderr, $result->exitCode])->toBe([str_repeat(' ', 16), '', 0]);
+    expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([str_repeat(' ', 16), '', 0]);
 });
