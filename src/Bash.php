@@ -64,7 +64,7 @@ final readonly class Bash
             limits: $limits,
         );
 
-        $interpreter = new Interpreter($interpreterState, $this->fileSystem, $this->commandRegistry, $this->secureHttpClient);
+        $interpreter = new Interpreter($interpreterState, $this->fileSystem, $this->commandRegistry, $this->secureHttpClient, $execOptions->args ?? []);
 
         $execResult = $interpreter->executeScript($script, $stdin);
 

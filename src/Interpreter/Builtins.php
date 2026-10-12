@@ -1213,7 +1213,7 @@ final class Builtins
             $stdout .= $terse ? $kind."\n" : match ($kind) {
                 'function' => $name." is a function\n".$this->functionSource($name),
                 'builtin' => $name." is a shell builtin\n",
-                'file' => sprintf("%s is /usr/bin/%s\n", $name, $name),
+                'file' => sprintf("%s is %s\n", $name, $this->interpreter->resolveCommand($name)),
             };
         }
 
@@ -1260,7 +1260,7 @@ final class Builtins
         return match (true) {
             isset($this->interpreterState->functions[$name]) => 'function',
             $this->builtin($name) instanceof Closure || in_array($name, self::REGISTRY_BUILTINS, true) => 'builtin',
-            $this->commandRegistry->has($name) => 'file',
+            $this->interpreter->resolveCommand($name) !== null => 'file',
             default => null,
         };
     }
@@ -1279,7 +1279,7 @@ final class Builtins
                 $kind = $this->commandKind($name);
 
                 if ($kind !== null) {
-                    $stdout .= ($kind === 'file' ? '/usr/bin/'.$name : $name)."\n";
+                    $stdout .= ($kind === 'file' ? $this->interpreter->resolveCommand($name) : $name)."\n";
                 }
             }
 
@@ -1456,7 +1456,7 @@ final class Builtins
         }
 
         $name = array_shift($args);
-        $result = $this->commandRegistry->has($name)
+        $result = str_contains($name, '/') || $this->interpreter->resolveCommand($name, executableOnly: false) !== null
             ? $this->interpreter->runCommand($name, $args, $stdinStream)
             : $this->redirections->route(new ExecResult(stderr: "bash: exec: {$name}: not found\n", exitCode: 127));
 

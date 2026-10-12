@@ -3,12 +3,15 @@
 declare(strict_types=1);
 
 use BashBox\Bash;
+use BashBox\BashExecResult;
 use BashBox\BashOptions;
 use BashBox\Commands\CommandContext;
 use BashBox\Commands\CommandInterface;
 use BashBox\Commands\Curl_;
+use BashBox\Exceptions\ExecutionLimitException;
 use BashBox\ExecOptions;
 use BashBox\ExecResult;
+use BashBox\Limits;
 use BashBox\Network\NetworkConfig;
 
 test('isSuccess reflects the exit code of the script', function (): void {
@@ -66,4 +69,57 @@ test('a cwd that does not exist yet is created, per exec as in the constructor',
     expect([$bashExecResult->stdout, $bashExecResult->exitCode])->toBe(["/nope/b\nb\n", 0])
         ->and($bash->getFilesystem()->exists('/nope/b/f'))->toBeTrue()
         ->and($bash->getFilesystem()->exists('/work/a'))->toBeTrue();
+});
+
+test('exec arguments are literal data and apply only once', function (): void {
+    $bash = new Bash;
+    $args = ['', 'two words', "quote'\"", '$HOME', '$(touch /tmp/injected)', '; touch /tmp/injected', '*', "line\nbreak", "nul\0byte"];
+    $bashExecResult = $bash->exec("printf '<%s>\\n'; echo after", new ExecOptions(args: $args));
+
+    expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])
+        ->toBe([implode('', array_map(fn (string $arg): string => '<'.$arg.">\n", $args))."after\n", '', 0])
+        ->and($bash->getFilesystem()->exists('/tmp/injected'))->toBeFalse();
+});
+
+test('exec arguments reach the first command rather than expansions or later commands', function (string $script, string $stdout): void {
+    $bashExecResult = (new Bash)->exec($script, new ExecOptions(args: ['literal $HOME']));
+
+    expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])->toBe([$stdout, '', 0]);
+})->with([
+    'argument substitution' => ["printf '<%s>\\n' \"\$(echo inner)\"; echo after", "<inner>\n<literal \$HOME>\nafter\n"],
+    'assignment without a command' => ['x=$(echo inner); echo "$x"; echo after', "inner literal \$HOME\nafter\n"],
+    'compound condition skips a branch' => ['if [[ x == y ]]; then echo skipped; else echo chosen; fi; echo after', "chosen literal \$HOME\nafter\n"],
+    'for word substitution' => ['for x in $(echo item); do echo "$x"; done; echo after', "item literal \$HOME\nafter\n"],
+    'compound redirection substitution' => ['{ echo chosen; } >$(echo file); cat file', "chosen literal \$HOME\n"],
+    'function invocation' => ['f(){ printf "<%s>\\n" "$@"; }; f existing; f later', "<existing>\n<literal \$HOME>\n<later>\n"],
+    'a pipeline consumes arguments once' => ['echo first | cat; echo after', "first literal \$HOME\nafter\n"],
+]);
+
+test('literal arguments can supply a nested shell command and positional data safely', function (): void {
+    $bashExecResult = (new Bash)->exec('bash', new ExecOptions(args: ['-c', 'printf "[%s]\\n" "$0" "$@"', 'agent', 'a b', '$(echo injected)', '']));
+
+    expect([$bashExecResult->stdout, $bashExecResult->stderr, $bashExecResult->exitCode])
+        ->toBe(["[agent]\n[a b]\n[\$(echo injected)]\n[]\n", '', 0]);
+});
+
+test('literal arguments respect string and count limits', function (Limits $limits, string $script, array $args, string $message): void {
+    expect(fn (): BashExecResult => (new Bash)->exec($script, new ExecOptions(limits: $limits, args: $args)))
+        ->toThrow(ExecutionLimitException::class, $message);
+})->with([
+    [new Limits(maxStringLength: 3), 'echo', ['four'], 'Argument size limit exceeded'],
+    [new Limits(maxArrayElements: 1), 'echo', ['one', 'two'], 'Argument count limit exceeded'],
+    [new Limits(maxArrayElements: 1), 'echo one', ['two'], 'Argument count limit exceeded'],
+]);
+
+test('literal arguments reject nonstrings and named keys at the API boundary', function (array $args): void {
+    expect(fn (): BashExecResult => (new Bash)->exec('echo', new ExecOptions(args: $args)))
+        ->toThrow(InvalidArgumentException::class, 'ExecOptions args must be a list of strings');
+})->with([[[null]], [['name' => 'value']]]);
+
+test('an expansion error does not consume literal arguments before a command runs', function (): void {
+    $bashExecResult = (new Bash)->exec("x=\$((1/0))\necho recovered", new ExecOptions(args: ['literal']));
+
+    expect($bashExecResult->stdout)->toBe("recovered literal\n")
+        ->and($bashExecResult->stderr)->toContain('division by 0')
+        ->and($bashExecResult->exitCode)->toBe(0);
 });

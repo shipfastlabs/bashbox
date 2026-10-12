@@ -158,6 +158,19 @@ $result = $bash->exec('grep "error"', new ExecOptions(
 $result->stdout; // "error found\n"
 ```
 
+### Safe Arguments
+
+Pass dynamic values through `ExecOptions::$args` instead of interpolating them into shell text:
+
+```php
+$result = $bash->exec('printf "%s\n"', new ExecOptions(
+    args: ['two words', '$(echo not-executed)', ''],
+));
+// Prints each literal argument on its own line, including the empty argument.
+```
+
+These arguments append once to the first executed simple command, after its written arguments. They are never expanded, split, globbed, or parsed as shell syntax, and do not populate the outer shell's `$1`/`$@`. Assignments without a command and command/process substitutions do not consume them. Normal command option parsing still applies: use `--` when passing filenames that might begin with `-`. Text deliberately passed to `bash -c` is still executable shell text.
+
 ### Execution Limits
 
 ```php
@@ -384,24 +397,34 @@ $sandbox->readFile('/home/user/app.sh'); // 'echo "running"'
 ### Shell Semantics
 
 - Only exported variables reach commands: after `A=1`, `printenv A` prints nothing until `export A` (or `A=1 printenv A`). Variables from `BashOptions::$env` and `ExecOptions::$env` are exported.
-- `env` prints the environment, or runs a command with a changed one: `env -i`, `env -u NAME`, `env NAME=value cmd args`. Only registered commands can be run; there is no `sh` or `bash` binary.
+- `env` prints the environment, or runs a command with a changed one: `env -i`, `env -u NAME`, `env NAME=value cmd args`.
+- `bash -c 'script' [name [args...]]` and `sh -c` run fresh child shells: `name` becomes `$0`, and subsequent arguments become `$1`/`$@`. Both use BashBox's bash interpreter, not a host binary or a separate POSIX implementation. They also accept a virtual script filename, stdin, `-s`, and `--`; other invocation options are rejected. Child shells inherit cwd, exported variables, stdin and umask, but not parent functions or shell options. Filesystem changes persist; variable/cwd changes and `exit` stay in the child. Execution and nesting budgets are shared with the parent.
+- An otherwise unknown command name searches the virtual filesystem's `PATH` for an executable shell script. Empty PATH components mean cwd; relative components work too. This lookup also applies to `command`, `exec`, `env`, `xargs`, `which`, and `type`. Explicit `./script` invocation requires execute bits; `bash script` does not. Bundled and custom registered commands remain available independently of PATH and take precedence over PATH scripts. No host programs are executed.
 - A script that doesn't parse runs nothing: `exec()` returns exit code 2 with bash's message on stderr (`bash: syntax error near unexpected token ...`) rather than throwing. `eval` and `source` of unparsable text return 2 the same way.
 
 ### Available Commands
 
-BashBox includes 58 built-in commands:
+BashBox includes 63 built-in commands:
 
 | Category | Commands |
 |---|---|
 | **Output** | `echo`, `printf`, `cat`, `head`, `tail`, `tee`, `yes` |
 | **Files** | `ls`, `pwd`, `mkdir`, `rmdir`, `rm`, `cp`, `mv`, `touch`, `ln`, `chmod`, `stat`, `du`, `find`, `tree`, `mktemp`, `realpath`, `basename`, `dirname` |
-| **Text** | `grep`, `sed`, `sort`, `uniq`, `wc`, `cut`, `tr`, `rev`, `tac`, `nl`, `paste`, `comm`, `fold`, `expand`, `unexpand` |
-| **Utils** | `xargs`, `env`, `printenv`, `seq`, `sleep`, `test`, `[`, `true`, `false` |
+| **Text** | `grep`, `rg`, `diff`, `sed`, `sort`, `uniq`, `wc`, `cut`, `tr`, `rev`, `tac`, `nl`, `paste`, `comm`, `fold`, `expand`, `unexpand` |
+| **Utils** | `jq`, `bash`, `sh`, `xargs`, `env`, `printenv`, `seq`, `sleep`, `test`, `[`, `true`, `false` |
 | **Info** | `date`, `which`, `whoami`, `hostname` |
 | **Encoding** | `base64`, `od`, `md5sum`, `sha1sum`, `sha256sum` |
 | **Network** | `curl` (only when network is configured) |
 
 Shell builtins: `cd`, `pushd`, `popd`, `dirs`, `export`, `unset`, `local`, `declare`, `typeset`, `readonly`, `set`, `shopt`, `source`, `.`, `eval`, `exec`, `read`, `mapfile`, `readarray`, `break`, `continue`, `return`, `exit`, `shift`, `getopts`, `let`, `:`, `type`, `command`, `builtin`, `enable`, `hash`, `alias`, `unalias`, `trap`, `umask`, `help`, and more
+
+### Agent-facing Command Subsets
+
+These commands use only the virtual filesystem and bounded PHP execution. Unsupported syntax/options fail explicitly; they are not complete replacements for upstream jq, ripgrep, or GNU diff.
+
+- **`jq`**: JSON value streams and file operands; identity, field/quoted-key/integer-index access, `.[]`, pipes/comma, parentheses, array/object construction, `map`, `select`, comparisons, `//`, `length`, `keys`, `type`, `has`, and `empty`. Options: `-r`, `-c`, `-s`, `-n`, `-e`, `--arg`, `--argjson` and long flag aliases. For example, `jq -c 'map(select(.active == true) | .name)' users.json`. Empty objects remain objects. Arithmetic, slicing, recursive descent, optional access, interpolation, assignments and user functions are not supported. Numbers use PHP's native JSON representation, not arbitrary precision. Query/input nesting is capped at 256 and existing limits bound tokens, collection sizes, evaluation work and output.
+- **`rg`**: recursive search by default, stdin and explicit files, regex/fixed patterns, case/inverted/word/line matching, line numbers, filenames, counts/listing/quiet/only-matching modes, `--files`, hidden/text modes, include/exclude globs, and `-A`/`-B`/`-C` context. For example, `rg -n -g '*.php' 'TODO' .`. Hidden entries and recursive symlinks are skipped by default; NUL-containing files are skipped unless `-a`. Regexes use bounded PCRE, not Rust's regex semantics. Ignore files are not read. Globs support literals, `*`, `?`, `**`, and `**/`, with the last matching rule winning; braces/classes/escapes are rejected. Empty piped input is indistinguishable from absent input, so use an explicit `-` for an empty stdin search. Status: 0 match, 1 no match, 2 error.
+- **`diff`**: two virtual files or `-` stdin; normal and unified (`-u`, `-U`, `--unified`) output, labels, `-q`/`-s`, and `-i`/`-w`/`-b`. Missing-final-newline markers and binary summaries are supported. For example, `diff -u old.json new.json`. Context format (`-c`), directory comparison and recursive diff are not supported. The line comparison uses linear working memory and a conservative quadratic-time budget from `maxLoopIterations`; expensive changed middles raise `ExecutionLimitException`. Status: 0 equal, 1 different, 2 error.
 
 ### Security
 

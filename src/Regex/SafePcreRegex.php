@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BashBox\Regex;
 
+use BashBox\Exceptions\ExecutionLimitException;
+
 /** Where commands run user-supplied regexes: under fixed PCRE limits, with a failed match raised instead of read as "no match". */
 final class SafePcreRegex
 {
@@ -37,14 +39,35 @@ final class SafePcreRegex
      *
      * @throws RegexException
      */
-    public static function matchAll(string $regex, string $subject): array
+    public static function matchAll(string $regex, string $subject, ?int $maxMatches = null): array
     {
         $previous = self::limit();
-        $result = preg_match_all($regex, $subject, $matches);
-        self::limit($previous);
-        self::check($result);
 
-        return $matches[0];
+        try {
+            if ($maxMatches === null) {
+                $result = preg_match_all($regex, $subject, $matches);
+                self::check($result);
+
+                return $matches[0];
+            }
+
+            $matches = [];
+            // Collect incrementally, before PCRE can allocate an unbounded match array.
+            $result = preg_replace_callback($regex, function (array $captures) use (&$matches, $maxMatches): string {
+                if (count($matches) >= $maxMatches) {
+                    throw new ExecutionLimitException('Regex match count limit exceeded');
+                }
+
+                $matches[] = $captures[0];
+
+                return '';
+            }, $subject);
+            self::check($result === null ? false : 1);
+
+            return $matches;
+        } finally {
+            self::limit($previous);
+        }
     }
 
     /**

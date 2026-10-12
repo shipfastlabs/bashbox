@@ -92,12 +92,24 @@ final class Interpreter
     /** @var list<array{path: string, reader: ?SubshellNode}> open process substitutions; reader is a `>(...)` command still to run */
     private array $processSubstitutions = [];
 
+    /** @param list<string> $args */
     public function __construct(
         private readonly InterpreterState $interpreterState,
         private readonly FileSystemInterface $fileSystem,
         private readonly CommandRegistry $commandRegistry,
         private readonly ?SecureHttpClient $secureHttpClient = null,
+        private array $args = [],
     ) {
+        if (count($args) > $interpreterState->limits->maxArrayElements) {
+            throw new ExecutionLimitException('Argument count limit exceeded');
+        }
+
+        foreach ($args as $arg) {
+            if (strlen($arg) > $interpreterState->limits->maxStringLength) {
+                throw new ExecutionLimitException('Argument size limit exceeded');
+            }
+        }
+
         $this->wordExpander = new WordExpander($interpreterState, $this);
         $this->arithmetic = new ArithmeticEvaluator($interpreterState, $this);
         $this->assignments = new Assignments($interpreterState, $this->wordExpander, $this->arithmetic);
@@ -474,7 +486,20 @@ final class Interpreter
 
     private function runProcessSubstitution(SubshellNode $subshellNode, string $stdin): ExecResult
     {
-        return $this->nested(fn (): ExecResult => $this->inCaptureLevel(fn (): ExecResult => $this->capture(fn (): ExecResult => $this->executeSubshell($subshellNode, new StdinStream($stdin)))));
+        return $this->withoutLiteralArgs(fn (): ExecResult => $this->nested(fn (): ExecResult => $this->inCaptureLevel(fn (): ExecResult => $this->capture(fn (): ExecResult => $this->executeSubshell($subshellNode, new StdinStream($stdin))))));
+    }
+
+    /** @param Closure(): ExecResult $run */
+    private function withoutLiteralArgs(Closure $run): ExecResult
+    {
+        $args = $this->args;
+        $this->args = [];
+
+        try {
+            return $run();
+        } finally {
+            $this->args = $args;
+        }
     }
 
     /**
@@ -567,36 +592,54 @@ final class Interpreter
             return $aliased;
         }
 
-        if ($this->interpreterState->shellOpts['keyword']) {
-            $simpleCommandNode = $this->keywordAssignments($simpleCommandNode);
+        // Reserve these before expanding words/redirections: $(...) must not consume the caller's argv.
+        $literalArgs = $this->args;
+        $this->args = [];
+
+        try {
+            if ($this->interpreterState->shellOpts['keyword']) {
+                $simpleCommandNode = $this->keywordAssignments($simpleCommandNode);
+            }
+
+            $prefixAssignments = [];
+            $this->interpreterState->substitutionStatus = null;
+
+            foreach ($simpleCommandNode->assignments as $assignment) {
+                $prefixAssignments[] = $this->assignments->resolve($assignment);
+            }
+
+            if (($this->interpreterState->shellOpts['xtrace'] ?? false) && ($simpleCommandNode->assignments !== [] || $simpleCommandNode->name instanceof WordNode)) {
+                $this->writeStderr('+ '.$this->formatTraceCommand($simpleCommandNode, $prefixAssignments)."\n");
+            }
+
+            // Command name and args both go through field splitting, so `$CMD arg` with CMD="ls -l" runs ls.
+            $words = [];
+
+            if ($simpleCommandNode->name instanceof WordNode) {
+                $words = $this->expandWordList($simpleCommandNode->name);
+            }
+
+            foreach ($simpleCommandNode->args as $arg) {
+                array_push($words, ...$this->expandWordList($arg));
+            }
+
+            $opened = $this->redirections->open($simpleCommandNode->redirections, $stdinStream);
+        } finally {
+            $this->args = $literalArgs;
         }
-
-        $prefixAssignments = [];
-        $this->interpreterState->substitutionStatus = null;
-
-        foreach ($simpleCommandNode->assignments as $assignment) {
-            $prefixAssignments[] = $this->assignments->resolve($assignment);
-        }
-
-        if (($this->interpreterState->shellOpts['xtrace'] ?? false) && ($simpleCommandNode->assignments !== [] || $simpleCommandNode->name instanceof WordNode)) {
-            $this->writeStderr('+ '.$this->formatTraceCommand($simpleCommandNode, $prefixAssignments)."\n");
-        }
-
-        // Command name and args both go through field splitting, so `$CMD arg` with CMD="ls -l" runs ls.
-        $words = [];
-
-        if ($simpleCommandNode->name instanceof WordNode) {
-            $words = $this->expandWordList($simpleCommandNode->name);
-        }
-
-        foreach ($simpleCommandNode->args as $arg) {
-            array_push($words, ...$this->expandWordList($arg));
-        }
-
-        $opened = $this->redirections->open($simpleCommandNode->redirections, $stdinStream);
 
         if ($opened instanceof ExecResult) {
             return $opened;
+        }
+
+        if ($words !== []) {
+            $this->args = [];
+
+            if ($literalArgs !== [] && count($words) - 1 + count($literalArgs) > $this->interpreterState->limits->maxArrayElements) {
+                throw new ExecutionLimitException('Argument count limit exceeded');
+            }
+
+            array_push($words, ...$literalArgs);
         }
 
         $fds = $opened['fds'];
@@ -757,10 +800,21 @@ final class Interpreter
         $cmd = $this->commandRegistry->get($name);
 
         if (! $cmd instanceof CommandInterface) {
+            $path = $this->resolveCommand($name, executableOnly: false);
+
+            if ($path !== null) {
+                return $this->redirections->route($this->runScriptFile($path, $args, $stdinStream));
+            }
+
             return $this->redirections->route(new ExecResult(stderr: "bash: {$name}: command not found\n", exitCode: 127));
         }
 
         return $this->redirections->route($cmd->execute($args, $this->commandContext($stdinStream)), in_array($name, Builtins::REGISTRY_BUILTINS, true) ? 'bash: '.$name : $name);
+    }
+
+    public function resolveCommand(string $name, bool $executableOnly = true): ?string
+    {
+        return $this->commandRegistry->resolve($name, $this->fileSystem, $this->interpreterState->cwd, $this->interpreterState->env, $executableOnly);
     }
 
     public function commandContext(StdinStream $stdinStream): CommandContext
@@ -775,6 +829,7 @@ final class Interpreter
             fetch: $this->secureHttpClient,
             registry: $this->commandRegistry,
             umask: (int) octdec($this->interpreterState->umask),
+            shell: fn (string $script, string $name, array $args): ExecResult => $this->runChildShell($script, $name, $args, $stdinStream),
         );
     }
 
@@ -811,10 +866,17 @@ final class Interpreter
             return new ExecResult(stderr: sprintf("bash: %s: %s\n", $name, $error), exitCode: $status);
         }
 
+        return $this->runChildShell($script, $name, $args, $stdinStream);
+    }
+
+    /** @param list<string> $args */
+    private function runChildShell(string $script, string $name, array $args, StdinStream $stdinStream): ExecResult
+    {
         $interpreterState = new InterpreterState($this->interpreterState->getExportedEnv(), $this->interpreterState->cwd, $this->interpreterState->limits);
         $interpreterState->positionalParams = $args;
         $interpreterState->scriptName = $name;
         $interpreterState->commandCount = $this->interpreterState->commandCount;
+        $interpreterState->umask = $this->interpreterState->umask;
 
         $child = new self($interpreterState, $this->fileSystem, $this->commandRegistry, $this->secureHttpClient);
 
@@ -1170,7 +1232,9 @@ final class Interpreter
     /** Runs $script and returns its output; as a $subshell (`$(...)`, xargs) its state changes, `exit` and shell errors stay inside it. */
     public function execSubcommand(string $script, bool $subshell = true, bool $substitution = false, ?StdinStream $stdinStream = null): ExecResult
     {
-        return $this->nested(fn (): ExecResult => $this->inCaptureLevel(fn (): ExecResult => $this->runSubcommand($script, $subshell, $substitution, $stdinStream)));
+        $run = fn (): ExecResult => $this->nested(fn (): ExecResult => $this->inCaptureLevel(fn (): ExecResult => $this->runSubcommand($script, $subshell, $substitution, $stdinStream)));
+
+        return $substitution ? $this->withoutLiteralArgs($run) : $run();
     }
 
     /**

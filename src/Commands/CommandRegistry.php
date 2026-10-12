@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace BashBox\Commands;
 
+use BashBox\Filesystem\FileSystemInterface;
+use RuntimeException;
+
 final class CommandRegistry
 {
     /** @var array<string, CommandInterface> */
@@ -24,11 +27,52 @@ final class CommandRegistry
         return isset($this->commands[$name]);
     }
 
+    /**
+     * Bundled tools remain available independently of PATH; other names resolve to virtual scripts.
+     * When executing, remember a non-executable file only if no later PATH entry can run.
+     *
+     * @param  array<string, string>  $env
+     */
+    public function resolve(string $name, FileSystemInterface $fileSystem, string $cwd, array $env, bool $executableOnly = true): ?string
+    {
+        if (! str_contains($name, '/') && $this->has($name)) {
+            return '/usr/bin/'.$name;
+        }
+
+        $paths = str_contains($name, '/') ? [$name] : array_map(
+            fn (string $directory): string => ($directory === '' ? '.' : rtrim($directory, '/')).'/'.$name,
+            explode(':', $env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin'),
+        );
+        $blocked = null;
+
+        foreach ($paths as $path) {
+            try {
+                $stat = $fileSystem->stat($fileSystem->resolvePath($cwd, $path));
+            } catch (RuntimeException) {
+                continue;
+            }
+
+            if ($stat->isDirectory) {
+                continue;
+            }
+
+            if (($stat->mode & 0o111) !== 0) {
+                return $path;
+            }
+
+            $blocked ??= $path;
+        }
+
+        return $executableOnly ? null : $blocked;
+    }
+
     public function registerDefaults(): void
     {
         $defaults = [
             new Echo_,
             new Printf_,
+            new Shell_('bash'),
+            new Shell_('sh'),
             new Cat,
             new Head,
             new Tail,
@@ -42,6 +86,9 @@ final class CommandRegistry
             new Mv,
             new Touch,
             new Grep_,
+            new Rg_,
+            new Jq_,
+            new Diff_,
             new Sort_,
             new Uniq_,
             new Wc,

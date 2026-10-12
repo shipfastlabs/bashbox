@@ -83,6 +83,16 @@ abstract class AbstractCommand implements CommandInterface
     {
         $name = $argv[0];
 
+        if (! str_contains($name, '/') && $commandContext->registry?->has($name) !== true) {
+            $path = $commandContext->registry?->resolve($name, $commandContext->fs, $commandContext->cwd, $env ?? $commandContext->env, executableOnly: false);
+
+            if ($path === null) {
+                return ['No such file or directory', 127];
+            }
+
+            $argv[0] = $name = $path;
+        }
+
         if (str_contains($name, '/')) {
             $path = $this->resolvePath($commandContext, $name);
 
@@ -95,8 +105,6 @@ abstract class AbstractCommand implements CommandInterface
             if ($stat->isDirectory || ($stat->mode & 0o111) === 0) {
                 return ['Permission denied', 126];
             }
-        } elseif ($commandContext->registry?->has($name) !== true) {
-            return ['No such file or directory', 127];
         }
 
         // `command` skips functions; the only builtins it can reach run the registered command anyway.

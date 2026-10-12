@@ -25,6 +25,7 @@ final class CommandContext
     /**
      * @param  array<string, string>  $env
      * @param  Closure(string, array<string, string>|null=, string|StdinStream|null=): ExecResult  $exec
+     * @param  Closure(string, string, list<string>): ExecResult|null  $shell  Run text in a fresh child shell with inherited stdin.
      */
     public function __construct(
         public readonly FileSystemInterface $fs,
@@ -36,6 +37,7 @@ final class CommandContext
         public readonly ?SecureHttpClient $fetch = null,
         public readonly ?CommandRegistry $registry = null,
         public readonly int $umask = 0o022,
+        public readonly ?Closure $shell = null,
     ) {
         $this->stdinStream = is_string($stdin) ? new StdinStream($stdin) : $stdin;
     }
